@@ -1,0 +1,113 @@
+
+━━━ T01 — AUTHENTICATION ━━━
+  ✓ Non-admin token rejected on GET /packages (HTTP 403)
+  ✓ Admin token accepted on GET /packages (HTTP 200)
+  ✓ Invalid token rejected (HTTP 401)
+
+━━━ T02 — INPUT VALIDATION: upload-url ━━━
+  ✓ Missing packageName → 400 (HTTP 400)
+  ✓ Missing version → 400 (HTTP 400)
+  ✓ Missing packageType → 400 (HTTP 400)
+  ✓ Invalid packageType → 400 (HTTP 400)
+
+━━━ T03 — INPUT VALIDATION: deployments ━━━
+  ✓ Missing packageName → 400 (HTTP 400)
+  ✓ Invalid targetType → 400 (HTTP 400)
+  ✓ Non-existent package → 404 (HTTP 404)
+  ✓ Re-deploy already-installed version → 400 (HTTP 400)
+
+━━━ T04 — INPUT VALIDATION: compatibility check ━━━
+  ✓ Unknown deviceId → 404 (HTTP 404)
+  ✓ Known deviceId → 200 (HTTP 200)
+
+━━━ T05 — PACKAGE UPLOAD FLOW ━━━
+  ✓ Upload URL request returns 200 (HTTP 200)
+  ✓ Package starts as PENDING (status=PENDING)
+  ✓ Response has uploadUrl (has field: uploadUrl)
+  ✓ Response has s3Key (has field: s3Key)
+  → s3Key: application/controller-app/5.0.1785490579-10803/test-artifact.tar.gz
+  ✓ Binary PUT to S3 pre-signed URL → 200 (HTTP 200)
+  → Waiting for artifact_processor (up to 15s)...
+  ✓ Package auto-promoted to ACTIVE in 2s (S3 event → artifact_processor)
+  ✓ SHA256 written by artifact_processor: 987422c078753d10...
+  ✓ ECDSA signature written by artifact_processor
+  ✓ Duplicate ACTIVE version upload → 409 (HTTP 409)
+
+━━━ T06 — LIST PACKAGES ━━━
+  ✓ GET /packages returns 10 packages
+  ✓ Filter by packageName returns packages array (has field: packages)
+
+━━━ T07 — COMPATIBILITY CHECK ━━━
+  ✓ Compatibility response has availableUpdates (has field: availableUpdates)
+  ✓ Compatibility response has installedVersions (has field: installedVersions)
+  ✓ Compatibility response has pendingJobId (has field: pendingJobId)
+  → Device installed controller-app: 2.0.0
+
+━━━ T08 — DEPLOYMENT CREATION ━━━
+  ✓ Deployment created: digilux-ota-controller-app-5-0-1785490579-10803-1785490588
+  ✓ New deployment starts as QUEUED (status=QUEUED)
+  ✓ Rollout stage preserved (rolloutStage=CANARY)
+  ✓ Response has iotJobArn (has field: iotJobArn)
+
+━━━ T09 — JOB STATUS & LIST ━━━
+  ✓ GET job includes live iotStatus (has field: iotStatus)
+  ✓ GET job includes iotJobStatus (has field: iotJobStatus)
+  ✓ GET job includes deviceStatuses (has field: deviceStatuses)
+  → IoT Job status: IN_PROGRESS
+  ✓ GET /deployments returns 20 jobs
+
+━━━ T10 — DEVICE STATUS HANDLER (simulate SUCCEEDED) ━━━
+  ✓ IN_PROGRESS published to IoT MQTT topic
+  ✓ SUCCEEDED published to IoT MQTT topic
+  ✓ Job status updated to SUCCEEDED in DynamoDB
+  ✓ Device inventory updated: controller-app=5.0.1785490579-10803
+  ✓ pendingJobId cleared after SUCCEEDED
+
+━━━ T11 — SIMULATE FAILED UPDATE (with rollback detail) ━━━
+  → Reset device to controller-app@3.0.0 for failure test
+  ✓ Created failure-test job: digilux-ota-controller-app-4-0-0-1785490600
+  ✓ FAILED status recorded in DynamoDB (device rolled back)
+  ✓ pendingJobId cleared after FAILED (device can accept next job)
+
+━━━ T12 — ABORT FLOW ━━━
+  ✓ Abort returns status=CANCELLED
+  ✓ Aborting already-cancelled job → 400
+
+━━━ T13 — AUDIT LOGS IN CLOUDWATCH ━━━
+  ✓ PACKAGE_UPLOAD_URL_REQUESTED audit — audit event found in /aws/lambda/digilux_ota_upload_url
+  ✓ PACKAGE_REGISTERED_ACTIVE audit — audit event found in /aws/lambda/digilux_ota_artifact_processor
+  ✓ DEPLOYMENT_CREATED audit — audit event found in /aws/lambda/digilux_ota_job_create
+  ✓ DEPLOYMENT_ABORTED audit — audit event found in /aws/lambda/digilux_ota_job_create
+  ✓ DEVICE_UPDATE_SUCCEEDED audit — audit event found in /aws/lambda/digilux_ota_status_handler
+  ✓ DEVICE_UPDATE_FAILED audit — audit event found in /aws/lambda/digilux_ota_status_handler
+
+━━━ T14 — DYNAMODB CONSISTENCY ━━━
+  ✓ Table digilux_ota_packages has 14 records
+  ✓ Table digilux_device_inventory has 1 records
+  ✓ Table digilux_ota_jobs has 33 records
+  ✓ Table digilux_ota_compatibility has 14 records
+
+━━━ T15 — IOT INFRASTRUCTURE ━━━
+  ✓ IoT Rule digilux_ota_status_ingest is active
+  ✓ IoT Rule digilux_ota_device_register is active
+  ✓ Thing Group DGX-Canary exists
+  ✓ Thing Group DGX-Beta exists
+  ✓ Thing Group DGX-Production exists
+  ✓ Thing Group DGX-Controllers exists
+  ✓ S3 bucket has 6 event notifications configured
+  ✓ ECDSA signing key present in Secrets Manager
+
+━━━ T16 — LAMBDA HEALTH ━━━
+  ✓ Lambda digilux_ota_upload_url: State=Active Runtime=python3.11
+  ✓ Lambda digilux_ota_artifact_processor: State=Active Runtime=python3.11
+  ✓ Lambda digilux_ota_job_create: State=Active Runtime=python3.11
+  ✓ Lambda digilux_ota_compatibility_check: State=Active Runtime=python3.11
+  ✓ Lambda digilux_ota_status_handler: State=Active Runtime=python3.11
+  ✓ Lambda digilux_ota_device_register: State=Active Runtime=python3.11
+
+━━━ RESULTS ━━━
+
+  Total: 69   ✓ Passed: 69   ✗ Failed: 0   ⚠ Warnings: 0
+
+  OVERALL: PASS
+Run date: Fri Jul 31 15:07:11 IST 2026

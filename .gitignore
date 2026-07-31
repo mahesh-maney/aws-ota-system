@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+
+# Lambda dependency packages (rebuilt during deployment)
+infrastructure/06_lambdas/*/package/
+
+# Claude Code settings
+.claude/
+
+# macOS
+.DS_Store
+
+# Test artifacts (contain tokens and URLs — never commit)
+/tmp/ota_*.txt
+/tmp/ota_test.sh
+
+# Environment / secrets
+.env
+*.env
+secrets.json
+credentials.json

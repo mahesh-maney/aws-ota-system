@@ -1,0 +1,47 @@
+[Unit]
+Description=Digilux OTA Agent
+Documentation=https://digilux.io/docs/ota
+After=network-online.target digilux-controller.service
+Wants=network-online.target
+Requires=digilux-controller.service
+
+[Service]
+Type=simple
+User=digilux
+Group=digilux
+WorkingDirectory=/opt/digilux/ota
+
+# Load configuration from env file (created during provisioning)
+EnvironmentFile=/etc/digilux/ota-agent.env
+
+ExecStart=/opt/digilux/ota/venv/bin/python /opt/digilux/ota/ota_agent.py
+
+# Restart on failure with exponential backoff
+Restart=on-failure
+RestartSec=10
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+# Security hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ReadWritePaths=/opt/digilux/ota /opt/digilux/app /opt/digilux/drivers /opt/digilux/backups /etc/digilux /tmp/digilux-ota
+ProtectHome=true
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+
+# Give systemctl access for service management during updates
+# The digilux user must be in the 'systemd-journal' group and have
+# a sudoers rule: digilux ALL=(root) NOPASSWD: /bin/systemctl start digilux-controller, /bin/systemctl stop digilux-controller, /bin/systemctl kill digilux-controller
+AmbientCapabilities=
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=digilux-ota-agent
+
+# Watchdog — systemd will restart if the process hangs
+WatchdogSec=300
+
+[Install]
+WantedBy=multi-user.target
