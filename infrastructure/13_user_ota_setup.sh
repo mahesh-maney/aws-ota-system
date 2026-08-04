@@ -200,7 +200,8 @@ POLICY_DOC=$(cat <<EOF
       "Effect": "Allow",
       "Action": [
         "iot:CreateJob",
-        "iot:DescribeJob"
+        "iot:DescribeJob",
+        "iot:TagResource"
       ],
       "Resource": [
         "arn:aws:iot:${REGION}:${ACCOUNT_ID}:job/digilux-ota-*",
