@@ -1,9 +1,11 @@
 # Digilux OTA (Over-The-Air) Update System — Integration Guide
 
-**Version:** 1.3
+**Version:** 1.4
 **Date:** 2026-08-04
 **Audience:** Integration / QA Team
-**Base URL:** `https://ds6nxf8ac5.execute-api.ap-south-1.amazonaws.com/smarthome`
+**Base URL:** `https://iot.digilux.co.in/smarthome` (custom domain)
+**Alternate URL:** `https://ds6nxf8ac5.execute-api.ap-south-1.amazonaws.com/smarthome`
+**Region:** `ap-south-1` | **Cognito Pool:** `ap-south-1_h1o8s7257` | **Client ID:** `q7189jitfkk4ttesepkgls491`
 
 ---
 
@@ -33,6 +35,26 @@ The Digilux OTA system supports two update modes:
 | `CANARY` | Max 2 devices/min | First 5 devices — smoke test |
 | `BETA` | Exponential from 2/min | ~10% of fleet |
 | `PRODUCTION` | Exponential from 5/min | Full fleet |
+
+---
+
+## Quick Reference — All Endpoints
+
+| Method | Path | Auth | Description |
+|--------|------|------|-------------|
+| **Admin** | | `admin` group token | |
+| GET | `/api/v1/ota/packages` | Admin | List packages |
+| POST | `/api/v1/ota/packages/upload-url` | Admin | Get pre-signed S3 upload URL |
+| GET | `/api/v1/controllers/{deviceId}/updates/available` | Admin | Compatibility check for a device |
+| POST | `/api/v1/ota/deployments` | Admin | Create deployment (push update) |
+| GET | `/api/v1/ota/deployments` | Admin | List all deployments |
+| GET | `/api/v1/ota/deployments/{jobId}` | Admin | Get deployment status |
+| POST | `/api/v1/ota/deployments/{jobId}/abort` | Admin | Abort a deployment |
+| **End User** | | Any valid token | |
+| GET | `/api/v1/ota/my/updates` | User | Check available updates for user's devices |
+| POST | `/api/v1/ota/my/updates/consent` | User | Consent + trigger update (IoT Job flow) |
+| POST | `/api/v1/ota/my/updates/download-link` | User | Get download URL + MQTT push (app-mediated flow) |
+| GET | `/api/v1/ota/my/updates/{jobId}/status` | User | Track consent-flow update status |
 
 ---
 
@@ -88,7 +110,7 @@ Authorization: <Cognito ID Token>
 
 Non-admin tokens receive `HTTP 403 — Admin access required`.
 
-### End-user endpoints (Section 4.8–4.10)
+### End-user endpoints (Sections 4.8–4.11)
 
 Require any valid **Cognito ID Token** — no admin group needed. The `userId` is extracted from the JWT `sub` claim to determine device ownership.
 
@@ -97,6 +119,30 @@ Authorization: <Cognito ID Token>
 ```
 
 Users can only see and update devices registered under their own `userId`.
+
+### How to obtain a token
+
+```bash
+# Admin token (for sections 4.1–4.7)
+aws cognito-idp initiate-auth \
+  --auth-flow USER_PASSWORD_AUTH \
+  --client-id q7189jitfkk4ttesepkgls491 \
+  --auth-parameters USERNAME=<admin-email>,PASSWORD=<password> \
+  --region ap-south-1 \
+  --query 'AuthenticationResult.IdToken' \
+  --output text
+
+# End-user token (for sections 4.8–4.11)
+aws cognito-idp initiate-auth \
+  --auth-flow USER_PASSWORD_AUTH \
+  --client-id q7189jitfkk4ttesepkgls491 \
+  --auth-parameters USERNAME=<user-email>,PASSWORD=<password> \
+  --region ap-south-1 \
+  --query 'AuthenticationResult.IdToken' \
+  --output text
+```
+
+Tokens are valid for **24 hours**. Pass the token as the `Authorization` header value (no `Bearer` prefix).
 
 ---
 
@@ -636,7 +682,7 @@ An alternative to the consent flow. The Lambda returns a pre-signed S3 download 
    → Flutter shows result to user
 ```
 
-### 5.3 App-mediated download-link flow (Flutter app)
+### 5.3 App-mediated download-link flow (Flutter app / curl)
 
 > **Prerequisite:** Admin must have completed steps 1–3 of section 5.1 so the package is `ACTIVE`.
 
@@ -664,6 +710,25 @@ An alternative to the consent flow. The Lambda returns a pre-signed S3 download 
     → Flutter can show "Device offline — update will apply when device reconnects"
     → Flutter may pass downloadUrl to a NetworkController or local BT channel if available
     → URL is valid for 1 hour; call again if URL expires before device comes online
+```
+
+**curl example — download-link:**
+
+```bash
+BASE_URL="https://iot.digilux.co.in/smarthome"
+USER_TOKEN="<user-cognito-id-token>"
+
+# Step 1 — check available updates for user's devices
+curl -s -X GET "$BASE_URL/api/v1/ota/my/updates" \
+  -H "Authorization: $USER_TOKEN" | jq '.devices[].availableUpdates'
+
+# Step 2 — get download link (Lambda also pushes URL to device via MQTT)
+RESP=$(curl -s -X POST "$BASE_URL/api/v1/ota/my/updates/download-link" \
+  -H "Authorization: $USER_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"deviceId":"<device-uuid>","packageName":"controller-app","version":"4.0.0"}')
+
+echo $RESP | jq '{downloadUrl: .downloadUrl, mqttDelivered: .mqttDelivered, expiresAt: .expiresAt}'
 ```
 
 **Key differences from consent flow:**
@@ -959,7 +1024,166 @@ The 90-day retention on non-current versions allows rollback reference while con
 
 ---
 
-## 14. Version History
+## 14. QA Test Guide
+
+### 14.1 Test Environment
+
+| Item | Value |
+|---|---|
+| Base URL | `https://iot.digilux.co.in/smarthome` |
+| Region | `ap-south-1` |
+| Cognito Pool | `ap-south-1_h1o8s7257` |
+| Cognito Client ID | `q7189jitfkk4ttesepkgls491` |
+| Test device UUID | `edb39bba-baf1-4700-968c-a42228e53aa0` |
+| Test device thing name | `digilux-94ba062a250c` |
+| Test device model | `DGX-1000` |
+| Postman collection | `postman/Digilux_OTA.postman_collection.json` |
+| Postman environment | `postman/Digilux_OTA.postman_environment.json` |
+
+### 14.2 Test Accounts
+
+| Account | Role | Use for |
+|---|---|---|
+| `mahesh.maney@gmail.com` | Admin (admin group) | All admin-only endpoints (4.1–4.7) |
+| `demotesthw5@yopmail.com` | Regular user | End-user endpoints (4.8–4.11); owns test device |
+| `stores@digilux.co.in` | Regular user | Alternative non-admin token; owns a different device |
+
+> Passwords are held by the Digilux engineering team. Contact the team to obtain test credentials. Tokens expire after 24 hours.
+
+### 14.3 Pre-Test Reset
+
+Before each test run, reset the test device to a clean state so version checks pass:
+
+```bash
+DEVICE_ID="edb39bba-baf1-4700-968c-a42228e53aa0"
+aws dynamodb update-item \
+  --table-name digilux_device_inventory \
+  --key "{\"deviceId\":{\"S\":\"${DEVICE_ID}\"}}" \
+  --update-expression "SET pendingJobId = :null, installedVersions.#pkg = :v, lastUpdatedAt = :ts" \
+  --expression-attribute-names '{"#pkg":"controller-app"}' \
+  --expression-attribute-values "{\":null\":{\"NULL\":true},\":v\":{\"S\":\"2.0.0\"},\":ts\":{\"N\":\"$(date +%s)000\"}}" \
+  --region ap-south-1
+```
+
+This resets the device to `controller-app@2.0.0` with no pending job — allowing all version-check and consent tests to pass.
+
+### 14.4 Test Cases — Admin Flow
+
+#### TC-A01 Authentication
+| # | Action | Expected |
+|---|---|---|
+| 1 | Call `GET /api/v1/ota/packages` with **no token** | `401 Unauthorized` |
+| 2 | Call `GET /api/v1/ota/packages` with a **non-admin token** | `403 Forbidden — Admin access required` |
+| 3 | Call `GET /api/v1/ota/packages` with a valid **admin token** | `200 OK` |
+
+#### TC-A02 Package Upload Flow
+| # | Action | Expected |
+|---|---|---|
+| 1 | `POST /packages/upload-url` with valid body | `200` with `uploadUrl`, `s3Key`, `status: PENDING` |
+| 2 | `PUT <uploadUrl>` with binary (no auth header) | `200` from S3 |
+| 3 | Poll `GET /packages?packageName=<name>` for up to 15 s | `status` changes from `PENDING` → `ACTIVE` |
+| 4 | Re-upload same `packageName@version` | `409 — already ACTIVE` |
+| 5 | `POST /packages/upload-url` missing `packageName` | `400` |
+| 6 | `POST /packages/upload-url` with invalid `packageType` | `400` |
+
+#### TC-A03 Compatibility Check
+| # | Action | Expected |
+|---|---|---|
+| 1 | `GET /controllers/<test-device-id>/updates/available` | `200` with `installedVersions`, `availableUpdates` |
+| 2 | `GET /controllers/<unknown-uuid>/updates/available` | `404 — Device not found` |
+
+#### TC-A04 Deployment Lifecycle
+| # | Action | Expected |
+|---|---|---|
+| 1 | `POST /deployments` with ACTIVE package + test device | `201` with `jobId`, `status: QUEUED` |
+| 2 | `GET /deployments/{jobId}` | `200` with `iotStatus`, `deviceStatuses` |
+| 3 | `GET /deployments` | `200` with array of jobs |
+| 4 | `POST /deployments` targeting same device + same version already installed | `400` |
+| 5 | `POST /deployments` with PENDING package | `400` |
+| 6 | `POST /deployments` with non-existent package | `404` |
+
+#### TC-A05 Abort
+| # | Action | Expected |
+|---|---|---|
+| 1 | `POST /deployments/{jobId}/abort` on an active job | `200` with `status: CANCELLED` |
+| 2 | `POST /deployments/{jobId}/abort` on already-cancelled job | `400` |
+
+### 14.5 Test Cases — End User Flow
+
+> **Pre-condition for all user tests:** run the device reset from Section 14.3 first.
+
+#### TC-U01 Check Available Updates
+| # | Action | Expected |
+|---|---|---|
+| 1 | `GET /ota/my/updates` with a valid non-admin token | `200` with `devices` array |
+| 2 | Device at `2.0.0`; ACTIVE package at `4.0.0` | `availableUpdates` contains `controller-app 4.0.0` |
+| 3 | No packages published yet | `availableUpdates: []` for that device |
+
+#### TC-U02 Give Update Consent
+| # | Action | Expected |
+|---|---|---|
+| 1 | `POST /my/updates/consent` with valid body (user token, owned device, ACTIVE version, newer) | `202` with `consentId`, `jobId`, `status: QUEUED` |
+| 2 | Same request again within 5 minutes | `429 — rate limit` |
+| 3 | Request for device not owned by this user | `404 — Device not found` |
+| 4 | Request for version already installed | `409 — already installed` |
+| 5 | Request for version older than installed | `409 — not newer` |
+| 6 | Request while `pendingJobId` is set | `409 — update already in progress` |
+| 7 | Admin token used instead of user token | `202` (admin tokens are valid Cognito tokens and pass auth) |
+| 8 | Missing `deviceId` field | `400` |
+| 9 | Malformed UUID for `deviceId` | `400` |
+
+#### TC-U03 Get Update Status
+| # | Action | Expected |
+|---|---|---|
+| 1 | `GET /my/updates/{jobId}/status` with a `jobId` from TC-U02 step 1 | `200` with `status`, `statusMessage`, `consentId` |
+| 2 | `GET /my/updates/{jobId}/status` using another user's `jobId` | `404` |
+| 3 | `GET /my/updates/nonexistent-job-id/status` | `404` |
+
+#### TC-U04 Get Download Link
+| # | Action | Expected |
+|---|---|---|
+| 1 | `POST /my/updates/download-link` with valid body (owned device, ACTIVE version, newer) | `200` with `downloadUrl`, `sha256`, `signature`, `mqttDelivered`, `expiresAt` |
+| 2 | Verify `downloadUrl` is accessible via HTTP GET (no auth) | `200` from S3 (file download starts) |
+| 3 | Verify `mqttDelivered: true` when device is online | `mqttDelivered: true` |
+| 4 | Request for device not owned by this user | `404 — Device not found` |
+| 5 | Request for version already installed (reset device first) | `409 — already installed` |
+| 6 | Request while `pendingJobId` is set | `409 — update already in progress` |
+| 7 | Repeated calls within short interval (no rate limit) | Each call succeeds with `200` |
+
+### 14.6 Postman Quick Start
+
+1. Open Postman
+2. **Import** → `postman/Digilux_OTA.postman_collection.json`
+3. **Import** → `postman/Digilux_OTA.postman_environment.json`
+4. Select environment **"Digilux OTA — AWS (ap-south-1)"**
+5. Set `auth_token` — paste admin Cognito ID token
+6. Set `user_auth_token` — paste non-admin Cognito ID token
+7. `device_id`, `package_name`, `package_version` are pre-filled in the environment
+8. Use **Full Deployment Flow** folder for admin E2E, **Full User Update Flow** for consent flow, **Full App-Mediated Update Flow** for download-link flow
+
+### 14.7 Automated E2E Test Suite
+
+The repository includes a bash-based E2E test script covering 69 assertions across 16 test groups.
+
+```bash
+# Prerequisites: AWS CLI configured, tokens in /tmp
+echo "<admin-id-token>" > /tmp/ota_admin_token.txt
+echo "<nonadmin-id-token>" > /tmp/ota_nonadmin_token.txt
+echo "https://iot.digilux.co.in/smarthome" > /tmp/ota_base_url.txt
+
+# Reset test device (see Section 14.3)
+
+# Run
+bash infrastructure/e2e_test.sh
+```
+
+Results are printed to stdout and saved to `infrastructure/e2e_test_results.txt`. Last verified: **69/69 PASS** (2026-08-04).
+
+> The E2E suite covers the admin flow (T01–T16). User-flow endpoint tests (consent, download-link) are covered by the Postman collection.
+
+---
+
+## 15. Version History
 
 | Version | Date | Author | Changes |
 |---|---|---|---|

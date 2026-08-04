@@ -199,18 +199,42 @@ curl -s "https://ds6nxf8ac5.execute-api.ap-south-1.amazonaws.com/smarthome/api/v
   -H "Authorization: $USER_TOKEN" | jq '{status, statusMessage, progress}'
 ```
 
+### 5. App-mediated download-link (alternative to consent)
+
+```bash
+# Get a pre-signed download URL — Lambda also pushes it to the device via MQTT
+RESP=$(curl -s -X POST \
+  "https://iot.digilux.co.in/smarthome/api/v1/ota/my/updates/download-link" \
+  -H "Authorization: $USER_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"deviceId":"<device-uuid>","packageName":"controller-app","version":"4.0.0"}')
+
+echo $RESP | jq '{downloadUrl: .downloadUrl, mqttDelivered: .mqttDelivered, expiresAt: .expiresAt}'
+# mqttDelivered: true  → device was notified via MQTT, download starts immediately
+# mqttDelivered: false → device offline; URL still in response for fallback use
+```
+
 ### Postman
 
 Import `postman/Digilux_OTA.postman_collection.json` and `postman/Digilux_OTA.postman_environment.json`.
-- Set `auth_token` for admin endpoints, `user_auth_token` for user endpoints
-- **Full Deployment Flow** folder — admin end-to-end sequence
-- **End User Updates > Full User Update Flow** — user-initiated sequence
+
+| Variable | Set to |
+|---|---|
+| `auth_token` | Admin Cognito ID token |
+| `user_auth_token` | Non-admin Cognito ID token |
+| `device_id` | Pre-filled: `edb39bba-baf1-4700-968c-a42228e53aa0` |
+
+Key folders:
+- **Full Deployment Flow** — admin end-to-end (upload → deploy → poll)
+- **End User Updates > Full User Update Flow** — consent flow (check → consent → poll status)
+- **End User Updates > Full App-Mediated Update Flow** — download-link flow (check → download-link)
 
 ---
 
 ## API Reference — Admin
 
-**Base URL:** `https://ds6nxf8ac5.execute-api.ap-south-1.amazonaws.com/smarthome`
+**Base URL:** `https://iot.digilux.co.in/smarthome` (custom domain — use this)
+**Alternate URL:** `https://ds6nxf8ac5.execute-api.ap-south-1.amazonaws.com/smarthome`
 
 **Auth:** All admin endpoints require `Authorization: <Cognito ID Token>` from the `admin` Cognito group. Non-admin tokens return `403`.
 
@@ -1096,6 +1120,7 @@ Everything is logged. Every action — package upload, deployment, consent, succ
 | Admin deployment | Admin | IoT Job created, device downloads + installs over HTTPS |
 | User check for updates | Homeowner | App shows available versions for their device |
 | User consent & install | Homeowner | Consent recorded, IoT Job created, device downloads + installs |
+| App-mediated download | Homeowner / Flutter app | Pre-signed URL returned to app + published to device via MQTT; no IoT Job |
 | Status tracking | Admin or User | Real-time job status with per-device progress |
 | Rollout stages | Admin | CANARY → BETA → PRODUCTION with auto-abort |
 | Device self-registration | Device | Reports installed versions on every boot |
