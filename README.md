@@ -831,3 +831,210 @@ Results are written to `infrastructure/e2e_test_results.txt`.
 | `1.1` | 2026-07-31 | Production hardening: SNS alerts, DLQs, log retention, S3 lifecycle, CloudWatch alarms |
 | `1.2` | 2026-07-31 | Added `REJECTED` status, NEEDS_RECOVERY alert path, semver comparison docs, `compatibleModels` docs |
 | `1.3` | 2026-08-04 | User-initiated OTA flow: `digilux_ota_user_check_updates`, `digilux_ota_user_consent`, `digilux_ota_user_update_status`; new `digilux_ota_user_consents` DynamoDB table; `digilux-ota-user-lambda-role`; device ownership verification; rate limiting; consent audit trail |
+
+---
+
+## Feature Guide — Plain English
+
+### What problem does it solve?
+
+Imagine you have 500 Digilux smart home controller boxes installed across 500 different homes. One day you find a bug, or you want to add a new feature. Without OTA, someone has to physically visit each home with a USB drive and update the box manually. That's expensive, slow, and impractical.
+
+OTA lets you update every box remotely, over the internet, while the homeowner doesn't even notice anything happening.
+
+---
+
+### The Two Actors
+
+**The Admin** — Digilux's ops/engineering team. They prepare and publish new software versions. Think of them as the publisher.
+
+**The End User (Homeowner)** — The person who bought the Digilux system. They get notified when an update is ready and decide when to apply it — like how your phone asks "Update available. Install now?"
+
+---
+
+### Feature 1: Packaging a Software Update
+
+**Who does it:** Admin
+
+The process of getting a new software version ready for deployment.
+
+1. **Admin requests an upload slot** — calls the API and says "I want to upload `controller-app` version `4.0.0`". The system gives back a temporary, secure link to upload the file.
+
+2. **Admin uploads the binary** — drops the actual `.tar.gz` file (the compiled software) directly to AWS S3 cloud storage using that link. No one else can access this link. It expires in 1 hour.
+
+3. **System automatically processes it** — the moment the file lands in S3, a background process (Lambda) automatically wakes up and:
+   - Calculates the **SHA256 fingerprint** of the file (like a unique stamp that proves the file wasn't corrupted or tampered with)
+   - Digitally signs it using an **ECDSA private key** stored in AWS Secrets Manager (like a wax seal only Digilux can make)
+   - Marks the package as `ACTIVE` — ready for deployment
+
+4. **Admin can verify** — calls the list API to confirm the package shows `ACTIVE` status before proceeding.
+
+**Why this matters:** No one can sneak a fake or corrupted file into the system. Even if someone intercepted the file mid-transfer, the device would reject it because the fingerprint and digital signature wouldn't match.
+
+---
+
+### Feature 2: Admin-Initiated Deployment (Mandatory Push)
+
+**Who does it:** Admin
+
+The ops team decides to push an update to a device or an entire group of devices — the device has no choice but to install it.
+
+**How it works:**
+
+1. Admin creates a "deployment" — specifies which package, which version, and which device(s) to target.
+
+2. AWS IoT Core (Amazon's device messaging infrastructure) sends a tiny notification to the device via **MQTT** — a lightweight always-on messaging protocol, like a WhatsApp message but for machines.
+
+3. The device wakes up, asks for the full job details, gets a **secure download link** (pre-signed HTTPS URL from S3, valid 1 hour).
+
+4. The device downloads the binary file over HTTPS, verifies the SHA256 fingerprint and ECDSA signature, takes a **backup of the currently running software**, then installs the new version.
+
+5. After installing, the device runs a health check. If everything is working, it reports `SUCCEEDED`. If not, it automatically rolls back to the backup and reports `FAILED`.
+
+6. The admin can check the status at any time via the API.
+
+**Rollout Stages:** You don't have to push to everyone at once. You can push to:
+- **CANARY** — just 2 devices per minute, your 5 "test" devices first. If they're fine after 24 hours, you proceed.
+- **BETA** — ~10% of the fleet, exponentially ramping up.
+- **PRODUCTION** — the full fleet.
+
+**Auto-abort:** If more than 10% of devices fail or 20% time out, the system automatically stops the rollout. You don't have to babysit it.
+
+---
+
+### Feature 3: User-Initiated Update (With Consent)
+
+**Who does it:** End User (homeowner, via the Flutter app)
+
+The homeowner gets to see available updates and choose when to apply them — like app updates on your phone.
+
+**How it works:**
+
+1. **User opens the app and checks for updates.** The app calls our API. The system:
+   - Looks up which controller device(s) belong to this user (from the database)
+   - Checks what software versions are installed on each device
+   - Compares with the latest `ACTIVE` packages the admin has published
+   - Returns: "You have an update available: controller-app 3.0.0 → 4.0.0, Zigbee 3.0 support"
+
+2. **User taps "Update Now".** The app sends a consent request. Before doing anything, the system checks:
+   - Is this device actually owned by this user? (Security gate — you can't trigger an update on someone else's device)
+   - Is the package genuinely available and published by Digilux?
+   - Is this version actually newer than what's installed?
+   - Is there already an update running? (Can't start two at once)
+   - Has this user already requested an update in the last 5 minutes? (Rate limit — prevents accidental double-taps or abuse)
+
+3. **If all checks pass:** The system records the consent (for audit purposes), creates a job, and the device gets notified. The device downloads the binary over HTTPS from S3, verifies it, and installs it — exactly the same secure process as an admin push.
+
+4. **User can track progress.** The app polls the status endpoint:
+   - "Your device is queued for the update."
+   - "Your device is downloading and installing the update."
+   - "The update was installed successfully." ✅
+   - Or "The update failed. Your device may have rolled back to the previous version." ❌
+
+**Key distinction from admin push:** The admin publishes what's *available*. The user decides *when*. The admin cannot force an update through the user-initiated flow — and the user cannot install something the admin hasn't published.
+
+---
+
+### Feature 4: Device Registration (Self-Check-In)
+
+**Who does it:** The device itself, automatically
+
+Every time the controller device starts up, it sends a "hello, I'm online" message to the cloud over MQTT. This message includes:
+- Its unique device ID
+- What software versions are currently installed
+- Its hardware model and revision
+
+The cloud stores this in a database (`digilux_device_inventory`). This is how we always know the truth about what's installed — the device tells us on every boot, so even if the cloud record was stale, it gets corrected automatically.
+
+---
+
+### Feature 5: Compatibility Check
+
+**Who does it:** Admin (or integration system)
+
+Before pushing an update to a device, you can ask: "Is this device eligible for this update?"
+
+The system checks:
+- **Hardware model** — e.g. update only applies to `DGX-1000`, not `DGX-500`
+- **Minimum hardware revision** — e.g. needs hardware revision `1.0` or higher
+- **Already installed?** — no point pushing `4.0.0` if it's already on `4.0.0`
+- **Version comparison** — done correctly: `4.10.0` is newer than `4.2.0` (not lexicographic string comparison, which would get that wrong)
+
+---
+
+### Feature 6: Failure Recovery
+
+Three failure scenarios, all handled automatically:
+
+**Scenario A — Download fails mid-way (e.g. internet drops)**
+The device retries up to 3 times with increasing wait times (30s, then 60s). A partially downloaded file is always deleted before retrying — never a corrupt half-file. After 3 failures, the job is marked `FAILED`.
+
+**Scenario B — Install fails or health check fails**
+The device took a backup before stopping the service. It restores the backup, restarts the old version, and reports `FAILED` with detail "previous version restored". The device is back to normal automatically.
+
+**Scenario C — Install fails AND the backup restore also fails**
+This is a critical situation (e.g. disk corruption). The device reports `FAILED` with `statusDetail: NEEDS_RECOVERY`. The cloud logs this separately. Digilux field team is alerted to visit the device physically.
+
+---
+
+### Feature 7: Offline Device Handling
+
+**Problem:** What if the device is offline when an update is triggered?
+
+**Solution:** The IoT Job is held by AWS. The moment the device comes back online and reconnects, AWS automatically delivers the pending job. The device picks it up and proceeds normally. The pre-signed download URL is valid for 1 hour from when the deployment was created, so the download must complete within that window.
+
+---
+
+### Feature 8: Abort / Cancel
+
+**Who does it:** Admin
+
+If an update is going badly (many failures, wrong version pushed by mistake), the admin can abort it. Devices already downloading or installing are not interrupted mid-way — only devices that haven't started yet are cancelled. This avoids leaving a device in a broken half-installed state.
+
+---
+
+### Feature 9: Audit Trail & Observability
+
+Everything is logged. Every action — package upload, deployment, consent, success, failure — produces a structured audit log entry. Specifically:
+
+- **9 CloudWatch alarms** fire if Lambdas error or message queues back up, alerting the ops team by email
+- **Dead Letter Queues (DLQs)** catch any messages that failed to process after 2 retries — nothing is silently dropped
+- **Dashboard** in CloudWatch shows real-time fleet health
+- **Consent records** are stored for 24 hours — you can always answer "did this user actually consent to this update?"
+- **NEEDS_RECOVERY** events can be found via a CloudWatch Logs query on the status handler
+
+---
+
+### Feature 10: Security (Layer by Layer)
+
+| Layer | What it does |
+|---|---|
+| **Cognito JWT** | Every API call is authenticated — no anonymous access |
+| **Admin group check** | Admin endpoints reject any token not from the `admin` Cognito group |
+| **Device ownership check** | User endpoints verify the device belongs to the calling user — checked against the database, not just the request body |
+| **SHA256 + ECDSA** | The device independently verifies the downloaded file's integrity and authenticity before touching the filesystem |
+| **Private signing key in Secrets Manager** | The key that signs packages never leaves AWS — it's not in any code or config file |
+| **Pre-signed S3 URLs** | Download links expire in 1 hour and can only be used once for that specific file |
+| **Rate limiting** | Max 1 consent per device per 5 minutes — prevents spam or accidental loops |
+| **404 instead of 403** | When a user tries to act on a device they don't own, they get "not found" not "forbidden" — so they can't even confirm that device ID exists |
+| **Separate IAM roles** | The user Lambda role has no admin permissions — even if it were compromised, it couldn't list all devices or push to arbitrary devices |
+
+---
+
+### Summary
+
+| Feature | Triggered by | What happens |
+|---|---|---|
+| Upload package | Admin | Binary lands in S3, gets signed and marked ACTIVE |
+| Admin deployment | Admin | IoT Job created, device downloads + installs over HTTPS |
+| User check for updates | Homeowner | App shows available versions for their device |
+| User consent & install | Homeowner | Consent recorded, IoT Job created, device downloads + installs |
+| Status tracking | Admin or User | Real-time job status with per-device progress |
+| Rollout stages | Admin | CANARY → BETA → PRODUCTION with auto-abort |
+| Device self-registration | Device | Reports installed versions on every boot |
+| Compatibility check | Admin | Filters by model, hardware revision, version |
+| Download retry | Device | 3 attempts with backoff before failing |
+| Rollback | Device | Automatic restore from backup on install failure |
+| Offline handling | AWS IoT | Job held and delivered when device reconnects |
+| Abort | Admin | Cancels pending devices without interrupting active installs |
+| Alerting | AWS CloudWatch | Email alert on Lambda errors, DLQ depth, IoT rule failures |
