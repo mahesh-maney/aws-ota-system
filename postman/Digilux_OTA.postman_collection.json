@@ -662,6 +662,318 @@
           "response": []
         }
       ]
+    },
+    {
+      "name": "End User Updates",
+      "description": "User-initiated OTA update flow. The homeowner (Flutter app user) checks for available updates, gives consent, and tracks progress.\n\n**Auth:** Regular Cognito ID token — no admin group required.\n**Flow:** Check → Consent → Poll status\n\nUsers can only see and update their own devices.",
+      "item": [
+        {
+          "name": "Check Available Updates",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/v1/ota/my/updates",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "ota", "my", "updates"]
+            },
+            "description": "Returns all controller devices owned by the calling user and any available updates for each device.\n\n- Ownership is determined by the `userId` in the Cognito JWT (`sub` claim)\n- Only devices registered in `digilux_device_data` under this userId are returned\n- A device with `otaStatus: NOT_REGISTERED` has never run the OTA agent\n- Version comparison uses semver integer tuples — `4.10.0 > 4.2.0`\n- `pendingJobId` non-null means an update is already in progress"
+          },
+          "response": [
+            {
+              "name": "200 OK — Update available",
+              "status": "OK",
+              "code": 200,
+              "header": [{"key": "Content-Type", "value": "application/json"}],
+              "body": "{\n  \"devices\": [\n    {\n      \"deviceId\": \"edb39bba-baf1-4700-968c-a42228e53aa0\",\n      \"otaStatus\": \"REGISTERED\",\n      \"model\": \"DGX-1000\",\n      \"hwRevision\": \"1.0\",\n      \"installedVersions\": {\n        \"controller-app\": \"3.0.0\"\n      },\n      \"pendingJobId\": null,\n      \"availableUpdates\": [\n        {\n          \"packageName\": \"controller-app\",\n          \"packageType\": \"CONTROLLER_APP\",\n          \"currentVersion\": \"3.0.0\",\n          \"availableVersion\": \"4.0.0\",\n          \"releaseNotes\": \"Zigbee 3.0 support, improved stability\",\n          \"artifactSize\": 2097810\n        }\n      ],\n      \"updateCount\": 1\n    }\n  ],\n  \"totalUpdates\": 1\n}",
+              "originalRequest": {
+                "method": "GET",
+                "url": {"raw": "{{base_url}}/api/v1/ota/my/updates"}
+              }
+            },
+            {
+              "name": "200 OK — Up to date",
+              "status": "OK",
+              "code": 200,
+              "header": [{"key": "Content-Type", "value": "application/json"}],
+              "body": "{\n  \"devices\": [\n    {\n      \"deviceId\": \"edb39bba-baf1-4700-968c-a42228e53aa0\",\n      \"otaStatus\": \"REGISTERED\",\n      \"model\": \"DGX-1000\",\n      \"hwRevision\": \"1.0\",\n      \"installedVersions\": {\n        \"controller-app\": \"4.0.0\"\n      },\n      \"pendingJobId\": null,\n      \"availableUpdates\": [],\n      \"updateCount\": 0\n    }\n  ],\n  \"totalUpdates\": 0\n}",
+              "originalRequest": {
+                "method": "GET",
+                "url": {"raw": "{{base_url}}/api/v1/ota/my/updates"}
+              }
+            },
+            {
+              "name": "200 OK — Device not yet OTA-registered",
+              "status": "OK",
+              "code": 200,
+              "header": [{"key": "Content-Type", "value": "application/json"}],
+              "body": "{\n  \"devices\": [\n    {\n      \"deviceId\": \"edb39bba-baf1-4700-968c-a42228e53aa0\",\n      \"otaStatus\": \"NOT_REGISTERED\",\n      \"message\": \"OTA agent has not started on this device yet.\",\n      \"installedVersions\": {},\n      \"availableUpdates\": [],\n      \"pendingJobId\": null\n    }\n  ],\n  \"totalUpdates\": 0\n}",
+              "originalRequest": {
+                "method": "GET",
+                "url": {"raw": "{{base_url}}/api/v1/ota/my/updates"}
+              }
+            }
+          ]
+        },
+        {
+          "name": "Give Update Consent",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "const res = pm.response.json();",
+                  "if (res.jobId) {",
+                  "    pm.collectionVariables.set('job_id', res.jobId);",
+                  "    console.log('job_id saved:', res.jobId);",
+                  "}",
+                  "if (res.consentId) {",
+                  "    pm.collectionVariables.set('consent_id', res.consentId);",
+                  "    console.log('consent_id saved:', res.consentId);",
+                  "}",
+                  "pm.test('Status is 202 Accepted', () => pm.response.to.have.status(202));",
+                  "pm.test('jobId present', () => pm.expect(res.jobId).to.be.a('string').and.not.empty);",
+                  "pm.test('status is QUEUED', () => pm.expect(res.status).to.eql('QUEUED'));"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{"key": "Content-Type", "value": "application/json"}],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"deviceId\": \"{{device_id}}\",\n  \"packageName\": \"{{package_name}}\",\n  \"version\": \"{{package_version}}\"\n}",
+              "options": {"raw": {"language": "json"}}
+            },
+            "url": {
+              "raw": "{{base_url}}/api/v1/ota/my/updates/consent",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "ota", "my", "updates", "consent"]
+            },
+            "description": "Records the user's consent and triggers the OTA update on their device.\n\n**Security checks performed (server-side):**\n1. Valid Cognito JWT with `sub` claim\n2. `deviceId` UUID format validation\n3. Device ownership — `deviceId` must be registered under this `userId` in `digilux_device_data`\n4. Package must exist and be `ACTIVE` (admin must have uploaded it first)\n5. Requested version must be strictly newer than the installed version\n6. No update already in progress (`pendingJobId` must be null)\n7. Rate limit — max 1 consent per device per 5 minutes\n\nOn success, an AWS IoT Job is created and the device will download the binary via HTTPS from S3.\n\n`job_id` and `consent_id` are auto-saved by the test script."
+          },
+          "response": [
+            {
+              "name": "202 Accepted — Update queued",
+              "status": "Accepted",
+              "code": 202,
+              "header": [{"key": "Content-Type", "value": "application/json"}],
+              "body": "{\n  \"consentId\": \"a1b2c3d4-e5f6-7890-abcd-ef1234567890\",\n  \"jobId\": \"digilux-ota-controller-app-4-0-0-1785475706\",\n  \"deviceId\": \"edb39bba-baf1-4700-968c-a42228e53aa0\",\n  \"packageName\": \"controller-app\",\n  \"version\": \"4.0.0\",\n  \"status\": \"QUEUED\",\n  \"message\": \"Update accepted. Your device will download and install the update shortly. Use the status endpoint to track progress.\"\n}",
+              "originalRequest": {
+                "method": "POST",
+                "url": {"raw": "{{base_url}}/api/v1/ota/my/updates/consent"}
+              }
+            },
+            {
+              "name": "404 Not Found — Device not owned by user",
+              "status": "Not Found",
+              "code": 404,
+              "header": [{"key": "Content-Type", "value": "application/json"}],
+              "body": "{\n  \"error\": \"Device not found\"\n}",
+              "originalRequest": {
+                "method": "POST",
+                "url": {"raw": "{{base_url}}/api/v1/ota/my/updates/consent"}
+              }
+            },
+            {
+              "name": "409 Conflict — Update already in progress",
+              "status": "Conflict",
+              "code": 409,
+              "header": [{"key": "Content-Type", "value": "application/json"}],
+              "body": "{\n  \"error\": \"An update is already in progress on this device.\",\n  \"pendingJobId\": \"digilux-ota-controller-app-3-0-0-1785470000\"\n}",
+              "originalRequest": {
+                "method": "POST",
+                "url": {"raw": "{{base_url}}/api/v1/ota/my/updates/consent"}
+              }
+            },
+            {
+              "name": "409 Conflict — Already installed",
+              "status": "Conflict",
+              "code": 409,
+              "header": [{"key": "Content-Type", "value": "application/json"}],
+              "body": "{\n  \"error\": \"controller-app version 4.0.0 is already installed on this device.\"\n}",
+              "originalRequest": {
+                "method": "POST",
+                "url": {"raw": "{{base_url}}/api/v1/ota/my/updates/consent"}
+              }
+            },
+            {
+              "name": "429 Too Many Requests — Rate limited",
+              "status": "Too Many Requests",
+              "code": 429,
+              "header": [{"key": "Content-Type", "value": "application/json"}],
+              "body": "{\n  \"error\": \"Too many update requests. Please wait 5 minutes before retrying.\"\n}",
+              "originalRequest": {
+                "method": "POST",
+                "url": {"raw": "{{base_url}}/api/v1/ota/my/updates/consent"}
+              }
+            }
+          ]
+        },
+        {
+          "name": "Get Update Status",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status is 200', () => pm.response.to.have.status(200));",
+                  "const res = pm.response.json();",
+                  "const terminal = ['SUCCEEDED', 'FAILED', 'CANCELLED', 'REJECTED'];",
+                  "console.log('Update status:', res.status, '|', res.statusMessage);",
+                  "if (terminal.includes(res.status)) {",
+                  "    pm.test('Update reached terminal state: ' + res.status, () => pm.expect(terminal).to.include(res.status));",
+                  "} else {",
+                  "    console.log('Still in progress — re-run to poll again');",
+                  "}"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/v1/ota/my/updates/{{job_id}}/status",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "ota", "my", "updates", "{{job_id}}", "status"]
+            },
+            "description": "Returns the current status of a user-initiated update.\n\n**Security:** the `jobId` must belong to a consent record created by the calling user. Users cannot query other users' job statuses — returns 404 if not found or not owned.\n\n**Status values:**\n- `QUEUED` — device not yet acknowledged\n- `IN_PROGRESS` — downloading/installing\n- `SUCCEEDED` — installed successfully\n- `FAILED` — failed; device may have rolled back\n- `CANCELLED` — cancelled\n- `REJECTED` — device rejected"
+          },
+          "response": [
+            {
+              "name": "200 OK — SUCCEEDED",
+              "status": "OK",
+              "code": 200,
+              "header": [{"key": "Content-Type", "value": "application/json"}],
+              "body": "{\n  \"jobId\": \"digilux-ota-controller-app-4-0-0-1785475706\",\n  \"consentId\": \"a1b2c3d4-e5f6-7890-abcd-ef1234567890\",\n  \"packageName\": \"controller-app\",\n  \"version\": \"4.0.0\",\n  \"status\": \"SUCCEEDED\",\n  \"statusMessage\": \"The update was installed successfully.\",\n  \"consentedAt\": 1785475706560,\n  \"createdAt\": 1785475706560,\n  \"completedAt\": 1785475888991,\n  \"progress\": 100,\n  \"statusDetail\": null,\n  \"deviceProgress\": {\n    \"succeeded\": 1,\n    \"failed\": 0,\n    \"inProgress\": 0,\n    \"queued\": 0\n  }\n}",
+              "originalRequest": {
+                "method": "GET",
+                "url": {"raw": "{{base_url}}/api/v1/ota/my/updates/{{job_id}}/status"}
+              }
+            },
+            {
+              "name": "200 OK — IN_PROGRESS",
+              "status": "OK",
+              "code": 200,
+              "header": [{"key": "Content-Type", "value": "application/json"}],
+              "body": "{\n  \"jobId\": \"digilux-ota-controller-app-4-0-0-1785475706\",\n  \"consentId\": \"a1b2c3d4-e5f6-7890-abcd-ef1234567890\",\n  \"packageName\": \"controller-app\",\n  \"version\": \"4.0.0\",\n  \"status\": \"IN_PROGRESS\",\n  \"statusMessage\": \"Your device is downloading and installing the update.\",\n  \"consentedAt\": 1785475706560,\n  \"createdAt\": 1785475706560,\n  \"completedAt\": null,\n  \"progress\": 62,\n  \"statusDetail\": null\n}",
+              "originalRequest": {
+                "method": "GET",
+                "url": {"raw": "{{base_url}}/api/v1/ota/my/updates/{{job_id}}/status"}
+              }
+            },
+            {
+              "name": "200 OK — FAILED with rollback",
+              "status": "OK",
+              "code": 200,
+              "header": [{"key": "Content-Type", "value": "application/json"}],
+              "body": "{\n  \"jobId\": \"digilux-ota-controller-app-4-0-0-1785475706\",\n  \"consentId\": \"a1b2c3d4-e5f6-7890-abcd-ef1234567890\",\n  \"packageName\": \"controller-app\",\n  \"version\": \"4.0.0\",\n  \"status\": \"FAILED\",\n  \"statusMessage\": \"The update failed. Your device may have rolled back to the previous version.\",\n  \"consentedAt\": 1785475706560,\n  \"createdAt\": 1785475706560,\n  \"completedAt\": 1785475820000,\n  \"progress\": 0,\n  \"statusDetail\": \"Install failed — previous version restored\"\n}",
+              "originalRequest": {
+                "method": "GET",
+                "url": {"raw": "{{base_url}}/api/v1/ota/my/updates/{{job_id}}/status"}
+              }
+            },
+            {
+              "name": "404 Not Found — Not owned by user",
+              "status": "Not Found",
+              "code": 404,
+              "header": [{"key": "Content-Type", "value": "application/json"}],
+              "body": "{\n  \"error\": \"Update not found\"\n}",
+              "originalRequest": {
+                "method": "GET",
+                "url": {"raw": "{{base_url}}/api/v1/ota/my/updates/{{job_id}}/status"}
+              }
+            }
+          ]
+        },
+        {
+          "name": "Full User Update Flow",
+          "description": "Run these 3 requests in order to complete a user-initiated update.",
+          "item": [
+            {
+              "name": "1. Check Available Updates",
+              "request": {
+                "method": "GET",
+                "header": [],
+                "url": {
+                  "raw": "{{base_url}}/api/v1/ota/my/updates",
+                  "host": ["{{base_url}}"],
+                  "path": ["api", "v1", "ota", "my", "updates"]
+                }
+              },
+              "response": []
+            },
+            {
+              "name": "2. Give Consent",
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "exec": [
+                      "const res = pm.response.json();",
+                      "if (res.jobId) pm.collectionVariables.set('job_id', res.jobId);",
+                      "if (res.consentId) pm.collectionVariables.set('consent_id', res.consentId);",
+                      "pm.test('Consent accepted (202)', () => pm.response.to.have.status(202));",
+                      "console.log('job_id:', res.jobId, '| consentId:', res.consentId);"
+                    ],
+                    "type": "text/javascript"
+                  }
+                }
+              ],
+              "request": {
+                "method": "POST",
+                "header": [{"key": "Content-Type", "value": "application/json"}],
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"deviceId\": \"{{device_id}}\",\n  \"packageName\": \"{{package_name}}\",\n  \"version\": \"{{package_version}}\"\n}",
+                  "options": {"raw": {"language": "json"}}
+                },
+                "url": {
+                  "raw": "{{base_url}}/api/v1/ota/my/updates/consent",
+                  "host": ["{{base_url}}"],
+                  "path": ["api", "v1", "ota", "my", "updates", "consent"]
+                }
+              },
+              "response": []
+            },
+            {
+              "name": "3. Poll Status Until Terminal",
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "exec": [
+                      "const res = pm.response.json();",
+                      "const terminal = ['SUCCEEDED', 'FAILED', 'CANCELLED', 'REJECTED'];",
+                      "console.log('Status:', res.status, '-', res.statusMessage);",
+                      "if (terminal.includes(res.status)) {",
+                      "    pm.test('Update completed: ' + res.status, () => pm.expect(terminal).to.include(res.status));",
+                      "} else {",
+                      "    console.log('Re-run to poll again');",
+                      "}"
+                    ],
+                    "type": "text/javascript"
+                  }
+                }
+              ],
+              "request": {
+                "method": "GET",
+                "header": [],
+                "url": {
+                  "raw": "{{base_url}}/api/v1/ota/my/updates/{{job_id}}/status",
+                  "host": ["{{base_url}}"],
+                  "path": ["api", "v1", "ota", "my", "updates", "{{job_id}}", "status"]
+                }
+              },
+              "response": []
+            }
+          ]
+        }
+      ]
     }
   ]
 }
