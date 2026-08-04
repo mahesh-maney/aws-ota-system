@@ -35,7 +35,6 @@ RATE_LIMIT_MINUTES=5,\
 DEVICE_DATA_USER_INDEX=userId-index,\
 CONSENTS_USER_INDEX=userId-deviceId-index,\
 CONSENTS_JOB_INDEX=jobId-index,\
-OTA_MQTT_TOPIC_TEMPLATE=iot/device/{deviceId}/ota,\
 LOG_LEVEL=INFO"
 
 echo "========================================================"

@@ -50,11 +50,14 @@ def _resp(status: int, body: dict) -> dict:
 
 
 def _version_tuple(v: str):
-    """Parse '4.2.0' → (4, 2, 0). Falls back to string comparison on parse error."""
-    try:
-        return tuple(int(x) for x in str(v).split("."))
-    except (ValueError, AttributeError):
-        return (str(v),)
+    """Parse '4.2.0' → (4, 2, 0). Non-numeric segments use their numeric prefix (e.g. '28188-rc1' → 28188)."""
+    result = []
+    for part in str(v).split("."):
+        try:
+            result.append(int(part.split("-")[0]))
+        except (ValueError, AttributeError):
+            result.append(0)
+    return tuple(result) if result else (0,)
 
 
 def _is_newer(candidate: str, installed: str) -> bool:
