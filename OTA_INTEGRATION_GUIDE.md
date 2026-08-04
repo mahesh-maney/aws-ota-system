@@ -1,7 +1,7 @@
 # Digilux OTA (Over-The-Air) Update System — Integration Guide
 
-**Version:** 1.2
-**Date:** 2026-07-31
+**Version:** 1.3
+**Date:** 2026-08-04
 **Audience:** Integration / QA Team
 **Base URL:** `https://ds6nxf8ac5.execute-api.ap-south-1.amazonaws.com/smarthome`
 
@@ -9,7 +9,11 @@
 
 ## 1. Overview
 
-The Digilux OTA system enables admins to push software updates to controller devices in the field without physical access. Updates are **mandatory** — a device cannot decline or defer them once a deployment is created.
+The Digilux OTA system supports two update modes:
+
+**Admin-initiated:** Ops team pushes mandatory updates to any device or device group. The device cannot decline once an admin deployment is created.
+
+**User-initiated:** The homeowner opens the Flutter app, sees an available update, gives explicit consent, and the device downloads and installs the update over HTTPS. The admin must have published the package first — users only control *when* to apply it, not *what* is available.
 
 ### Update Types Supported
 
@@ -74,13 +78,25 @@ Admin (API)                  AWS Cloud                        Controller Device
 
 ## 3. Authentication
 
-All API endpoints require a **Cognito ID Token** from the `admin` group.
+### Admin endpoints (Sections 4.1–4.7)
+
+Require a **Cognito ID Token** from the `admin` group.
 
 ```http
 Authorization: <Cognito ID Token>
 ```
 
 Non-admin tokens receive `HTTP 403 — Admin access required`.
+
+### End-user endpoints (Section 4.8–4.10)
+
+Require any valid **Cognito ID Token** — no admin group needed. The `userId` is extracted from the JWT `sub` claim to determine device ownership.
+
+```http
+Authorization: <Cognito ID Token>
+```
+
+Users can only see and update devices registered under their own `userId`.
 
 ---
 
@@ -374,28 +390,177 @@ Cancels the IoT Job for any devices not yet in terminal state. Devices already i
 
 ---
 
-## 5. Complete Integration Flow
-
-### Step-by-step for a new package deployment
+### 4.8 Check Available Updates (End User)
 
 ```
-1. POST /api/v1/ota/packages/upload-url
+GET /api/v1/ota/my/updates
+```
+
+Returns all controller devices owned by the calling user and any available updates. Ownership is resolved from the JWT `sub` claim via `digilux_device_data`.
+
+**Response `200`:**
+```json
+{
+  "devices": [
+    {
+      "deviceId": "edb39bba-baf1-4700-968c-a42228e53aa0",
+      "otaStatus": "REGISTERED",
+      "model": "DGX-1000",
+      "hwRevision": "1.0",
+      "installedVersions": { "controller-app": "3.0.0" },
+      "pendingJobId": null,
+      "availableUpdates": [
+        {
+          "packageName": "controller-app",
+          "packageType": "CONTROLLER_APP",
+          "currentVersion": "3.0.0",
+          "availableVersion": "4.0.0",
+          "releaseNotes": "Zigbee 3.0 support",
+          "artifactSize": 2097810
+        }
+      ],
+      "updateCount": 1
+    }
+  ],
+  "totalUpdates": 1
+}
+```
+
+> `otaStatus: NOT_REGISTERED` — OTA agent has never started on this device. The device will not appear until it has connected at least once.
+
+---
+
+### 4.9 Give Update Consent (End User)
+
+```
+POST /api/v1/ota/my/updates/consent
+```
+
+Records user consent and triggers the OTA update. The device receives an IoT Job notification and downloads the binary over HTTPS from S3.
+
+**Request body:**
+```json
+{
+  "deviceId":    "edb39bba-baf1-4700-968c-a42228e53aa0",
+  "packageName": "controller-app",
+  "version":     "4.0.0"
+}
+```
+
+**Response `202`:**
+```json
+{
+  "consentId":   "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+  "jobId":       "digilux-ota-controller-app-4-0-0-1785475706",
+  "deviceId":    "edb39bba-baf1-4700-968c-a42228e53aa0",
+  "packageName": "controller-app",
+  "version":     "4.0.0",
+  "status":      "QUEUED",
+  "message":     "Update accepted. Your device will download and install the update shortly."
+}
+```
+
+**Validation and security checks (all server-side):**
+
+| HTTP | Condition |
+|---|---|
+| `400` | Missing or malformed request fields |
+| `404` | Device not found or not owned by this user |
+| `404` | Package/version not found |
+| `409` | This version is already installed |
+| `409` | Requested version is not newer than installed |
+| `409` | Another update is already in progress (`pendingJobId` non-null) |
+| `409` | Device OTA agent has never started |
+| `429` | Rate limit exceeded (1 consent per device per 5 min) |
+
+> **Note on `404` vs `403`:** The ownership check returns `404` on failure, not `403`. This avoids revealing whether a given `deviceId` exists to an unauthorized caller.
+
+---
+
+### 4.10 Get Update Status (End User)
+
+```
+GET /api/v1/ota/my/updates/{jobId}/status
+```
+
+Returns the status of a user-initiated update. The `jobId` must belong to a consent created by the calling user — returns `404` if not found or not owned.
+
+**Response `200`:**
+```json
+{
+  "jobId":         "digilux-ota-controller-app-4-0-0-1785475706",
+  "consentId":     "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+  "packageName":   "controller-app",
+  "version":       "4.0.0",
+  "status":        "SUCCEEDED",
+  "statusMessage": "The update was installed successfully.",
+  "consentedAt":   1785475706560,
+  "createdAt":     1785475706560,
+  "completedAt":   1785475888991,
+  "progress":      100,
+  "statusDetail":  null
+}
+```
+
+**Status values:**
+
+| Status | `statusMessage` |
+|---|---|
+| `QUEUED` | Your device is queued for the update. |
+| `IN_PROGRESS` | Your device is downloading and installing the update. |
+| `SUCCEEDED` | The update was installed successfully. |
+| `FAILED` | The update failed. Your device may have rolled back to the previous version. |
+| `CANCELLED` | The update was cancelled. |
+| `REJECTED` | Your device rejected the update. |
+
+---
+
+## 5. Complete Integration Flow
+
+### 5.1 Admin-initiated deployment
+
+```
+1. POST /api/v1/ota/packages/upload-url        (admin token)
    → receive { uploadUrl, s3Key, status: "PENDING" }
 
 2. PUT <uploadUrl>  (binary, Content-Type: application/octet-stream)
    → HTTP 200 from S3
 
-3. Poll GET /api/v1/ota/packages?packageName=<name>
+3. Poll GET /api/v1/ota/packages?packageName=<name>  (admin token)
    → wait for status: "ACTIVE"  (typically < 5 seconds)
 
-4. GET /api/v1/controllers/{deviceId}/updates/available
+4. GET /api/v1/controllers/{deviceId}/updates/available  (admin token)
    → confirm availableUpdates contains the new version
 
-5. POST /api/v1/ota/deployments
+5. POST /api/v1/ota/deployments  (admin token)
    → receive { jobId, status: "QUEUED" }
 
-6. Poll GET /api/v1/ota/deployments/{jobId}
+6. Poll GET /api/v1/ota/deployments/{jobId}  (admin token)
    → wait for status: "SUCCEEDED" or "FAILED"
+```
+
+### 5.2 User-initiated update (Flutter app)
+
+> **Prerequisite:** Admin must have completed steps 1–3 above so the package is `ACTIVE`.
+
+```
+1. GET /api/v1/ota/my/updates  (user token)
+   → receive list of devices with availableUpdates
+   → Flutter shows "Update available: controller-app 4.0.0"
+
+2. User taps "Update Now" in Flutter app
+
+3. POST /api/v1/ota/my/updates/consent  (user token)
+   → body: { deviceId, packageName, version }
+   → receive { consentId, jobId, status: "QUEUED" }
+   → device receives IoT notification over MQTT
+   → device downloads binary via HTTPS from S3
+   → device verifies SHA256 + ECDSA signature
+   → device installs and reports status
+
+4. Poll GET /api/v1/ota/my/updates/{jobId}/status  (user token)
+   → wait for status: "SUCCEEDED" or "FAILED"
+   → Flutter shows result to user
 ```
 
 ---
@@ -688,3 +853,4 @@ The 90-day retention on non-current versions allows rollback reference while con
 | `1.0` | 2026-07-31 | Digilux Engineering | Initial release — full OTA system: package upload, artifact processing, deployment lifecycle, device status handling, abort flow, audit logging, compatibility check, IoT integration |
 | `1.1` | 2026-07-31 | Digilux Engineering | Production hardening: SNS alert topic (`digilux-ota-alerts`), SQS DLQs for async Lambdas, 30-day log retention on all Lambda log groups, S3 lifecycle policy (non-current versions → STANDARD_IA @30d, deleted @90d), individual CloudWatch alarms for all 6 Lambdas + DLQ depth alarms, updated dashboard with DLQ widget; fixed e2e test T08 duplicate deployment API call bug |
 | `1.2` | 2026-07-31 | Digilux Engineering | Accuracy fixes: added `REJECTED` job status, corrected `NEEDS_RECOVERY` alert path (CloudWatch Logs Insights, not Lambda error alarm), added `instructions` field to upload-url response, documented semver version comparison logic and empty `compatibleModels` behaviour |
+| `1.3` | 2026-08-04 | Digilux Engineering | User-initiated OTA flow: Sections 4.8–4.10 (check updates, consent, status); updated auth section to cover user vs admin tokens; added Section 5.2 (user flow sequence); new DynamoDB table `digilux_ota_user_consents`; device ownership verification via `digilux_device_data`; rate limiting; consent audit trail |
