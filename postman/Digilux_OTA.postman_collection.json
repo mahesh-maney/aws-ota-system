@@ -1,0 +1,667 @@
+{
+  "info": {
+    "name": "Digilux OTA Update System",
+    "description": "REST API collection for the Digilux Over-The-Air update system. Covers package management, deployment lifecycle, and device compatibility checks.\n\n**Base URL:** `https://ds6nxf8ac5.execute-api.ap-south-1.amazonaws.com/smarthome`\n\n**Auth:** All requests require a Cognito ID Token from the `admin` group in the `Authorization` header.\n\n**How to get a token:**\n```\naws cognito-idp initiate-auth \\\n  --auth-flow USER_PASSWORD_AUTH \\\n  --client-id q7189jitfkk4ttesepkgls491 \\\n  --auth-parameters USERNAME=<email>,PASSWORD=<password> \\\n  --region ap-south-1 \\\n  --query 'AuthenticationResult.IdToken' \\\n  --output text\n```\nPaste the result into the `auth_token` collection variable.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    {
+      "key": "base_url",
+      "value": "https://ds6nxf8ac5.execute-api.ap-south-1.amazonaws.com/smarthome",
+      "type": "string"
+    },
+    {
+      "key": "auth_token",
+      "value": "",
+      "type": "string",
+      "description": "Cognito ID Token for an admin-group user"
+    },
+    {
+      "key": "device_id",
+      "value": "edb39bba-baf1-4700-968c-a42228e53aa0",
+      "type": "string",
+      "description": "Device UUID from digilux_device_inventory"
+    },
+    {
+      "key": "job_id",
+      "value": "",
+      "type": "string",
+      "description": "Populated automatically by the Create Deployment request"
+    },
+    {
+      "key": "upload_url",
+      "value": "",
+      "type": "string",
+      "description": "Populated automatically by the Get Upload URL request"
+    },
+    {
+      "key": "package_name",
+      "value": "controller-app",
+      "type": "string"
+    },
+    {
+      "key": "package_version",
+      "value": "4.0.0",
+      "type": "string"
+    }
+  ],
+  "auth": {
+    "type": "apikey",
+    "apikey": [
+      {
+        "key": "key",
+        "value": "Authorization",
+        "type": "string"
+      },
+      {
+        "key": "value",
+        "value": "{{auth_token}}",
+        "type": "string"
+      },
+      {
+        "key": "in",
+        "value": "header",
+        "type": "string"
+      }
+    ]
+  },
+  "item": [
+    {
+      "name": "Packages",
+      "description": "Manage OTA software packages — upload artifacts, list available packages, and check status.",
+      "item": [
+        {
+          "name": "List Packages",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/v1/ota/packages?status=ACTIVE",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "ota", "packages"],
+              "query": [
+                {
+                  "key": "status",
+                  "value": "ACTIVE",
+                  "description": "Filter by status: ACTIVE or PENDING"
+                },
+                {
+                  "key": "packageName",
+                  "value": "{{package_name}}",
+                  "description": "List all versions of a specific package (optional)",
+                  "disabled": true
+                }
+              ]
+            },
+            "description": "Returns all packages. Filter by `status` (ACTIVE or PENDING) or `packageName` to list versions of a specific package.\n\nTypically called after uploading a package to poll until `status` changes from PENDING to ACTIVE (usually < 5 seconds)."
+          },
+          "response": [
+            {
+              "name": "200 OK — Active packages",
+              "status": "OK",
+              "code": 200,
+              "header": [{"key": "Content-Type", "value": "application/json"}],
+              "body": "{\n  \"packages\": [\n    {\n      \"packageName\": \"controller-app\",\n      \"version\": \"4.0.0\",\n      \"packageType\": \"CONTROLLER_APP\",\n      \"status\": \"ACTIVE\",\n      \"artifactSize\": 2097810,\n      \"releaseNotes\": \"Zigbee 3.0 support\",\n      \"createdBy\": \"admin@example.com\",\n      \"createdAt\": 1785475706560\n    }\n  ],\n  \"count\": 1\n}",
+              "originalRequest": {
+                "method": "GET",
+                "url": {
+                  "raw": "{{base_url}}/api/v1/ota/packages?status=ACTIVE",
+                  "host": ["{{base_url}}"],
+                  "path": ["api", "v1", "ota", "packages"],
+                  "query": [{"key": "status", "value": "ACTIVE"}]
+                }
+              }
+            }
+          ]
+        },
+        {
+          "name": "Get Upload URL",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "const res = pm.response.json();",
+                  "if (res.uploadUrl) {",
+                  "    pm.collectionVariables.set('upload_url', res.uploadUrl);",
+                  "    console.log('upload_url saved:', res.uploadUrl.substring(0, 80) + '...');",
+                  "}",
+                  "pm.test('Status is 200', () => pm.response.to.have.status(200));",
+                  "pm.test('uploadUrl present', () => pm.expect(res.uploadUrl).to.be.a('string').and.not.empty);",
+                  "pm.test('status is PENDING', () => pm.expect(res.status).to.eql('PENDING'));"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"packageName\": \"{{package_name}}\",\n  \"version\": \"{{package_version}}\",\n  \"packageType\": \"CONTROLLER_APP\",\n  \"fileName\": \"controller-app-4.0.0.tar.gz\",\n  \"releaseNotes\": \"Zigbee 3.0 support, improved stability\",\n  \"compatibleModels\": [\"DGX-1000\"],\n  \"minHwRevision\": \"1.0\",\n  \"dependsOn\": {},\n  \"incompatibleWith\": {}\n}",
+              "options": {"raw": {"language": "json"}}
+            },
+            "url": {
+              "raw": "{{base_url}}/api/v1/ota/packages/upload-url",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "ota", "packages", "upload-url"]
+            },
+            "description": "Step 1 of the upload flow. Returns a pre-signed S3 PUT URL valid for 1 hour.\n\nAfter receiving the response:\n1. PUT the binary to `uploadUrl` with `Content-Type: application/octet-stream`\n2. Poll `GET /packages?packageName=<name>` until `status` = `ACTIVE`\n\nThe `upload_url` collection variable is auto-populated by the test script.\n\n**packageType options:** `CONTROLLER_FIRMWARE`, `CONTROLLER_APP`, `DRIVER`, `ZIGBEE_DEVICE`, `CONFIG`, `RULES`\n\n**compatibleModels:** Empty array `[]` = compatible with all models."
+          },
+          "response": [
+            {
+              "name": "200 OK — Upload URL issued",
+              "status": "OK",
+              "code": 200,
+              "header": [{"key": "Content-Type", "value": "application/json"}],
+              "body": "{\n  \"uploadUrl\": \"https://digilux-ota-artifacts.s3.amazonaws.com/application/controller-app/4.0.0/controller-app-4.0.0.tar.gz?X-Amz-Algorithm=...\",\n  \"s3Key\": \"application/controller-app/4.0.0/controller-app-4.0.0.tar.gz\",\n  \"expiresIn\": 3600,\n  \"packageName\": \"controller-app\",\n  \"version\": \"4.0.0\",\n  \"packageType\": \"CONTROLLER_APP\",\n  \"status\": \"PENDING\",\n  \"instructions\": \"PUT your binary to uploadUrl with Content-Type: application/octet-stream. The package will be registered automatically within seconds of upload.\"\n}",
+              "originalRequest": {
+                "method": "POST",
+                "url": {"raw": "{{base_url}}/api/v1/ota/packages/upload-url"}
+              }
+            },
+            {
+              "name": "409 Conflict — Version already ACTIVE",
+              "status": "Conflict",
+              "code": 409,
+              "header": [{"key": "Content-Type", "value": "application/json"}],
+              "body": "{\n  \"error\": \"Package controller-app@4.0.0 already exists and is ACTIVE. Use a new version number.\"\n}",
+              "originalRequest": {
+                "method": "POST",
+                "url": {"raw": "{{base_url}}/api/v1/ota/packages/upload-url"}
+              }
+            }
+          ]
+        },
+        {
+          "name": "Upload Artifact to S3 (PUT)",
+          "request": {
+            "method": "PUT",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/octet-stream"
+              }
+            ],
+            "body": {
+              "mode": "file",
+              "file": {
+                "src": ""
+              }
+            },
+            "url": {
+              "raw": "{{upload_url}}",
+              "host": ["{{upload_url}}"]
+            },
+            "auth": {
+              "type": "noauth"
+            },
+            "description": "Step 2 of the upload flow. PUT the binary artifact directly to S3 using the pre-signed URL from the previous step.\n\n- **No Authorization header** — the pre-signed URL handles auth\n- Set `Content-Type: application/octet-stream`\n- Select your binary file in the Body > file tab\n- S3 returns HTTP 200 with empty body on success\n\nAfter this, run `List Packages` (with packageName filter) to confirm status moves to ACTIVE."
+          },
+          "response": [
+            {
+              "name": "200 OK — S3 accepts the binary",
+              "status": "OK",
+              "code": 200,
+              "header": [],
+              "body": ""
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Device",
+      "description": "Check what software versions are installed on a device and what updates are available.",
+      "item": [
+        {
+          "name": "Check Available Updates",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/v1/controllers/{{device_id}}/updates/available",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "controllers", "{{device_id}}", "updates", "available"]
+            },
+            "description": "Returns the current installed versions and any available updates for the device.\n\n- `deviceId` is the UUID from `digilux_device_inventory` (not the MAC-based IoT thing name)\n- `availableUpdates` is empty if the device is on the latest compatible version\n- `pendingJobId` is non-null if there is an active deployment in progress\n- Version comparison uses semver integer tuples — `4.10.0 > 4.2.0`\n- `compatibleModels: []` (empty) means the package applies to all models\n\n**404** is returned if the OTA agent has never run on this device."
+          },
+          "response": [
+            {
+              "name": "200 OK — Updates available",
+              "status": "OK",
+              "code": 200,
+              "header": [{"key": "Content-Type", "value": "application/json"}],
+              "body": "{\n  \"deviceId\": \"edb39bba-baf1-4700-968c-a42228e53aa0\",\n  \"thingName\": \"digilux-94ba062a250c\",\n  \"model\": \"DGX-1000\",\n  \"hwRevision\": \"1.0\",\n  \"pendingJobId\": null,\n  \"installedVersions\": {\n    \"controller-app\": \"3.0.0\"\n  },\n  \"availableUpdates\": [\n    {\n      \"packageName\": \"controller-app\",\n      \"packageType\": \"CONTROLLER_APP\",\n      \"currentVersion\": \"3.0.0\",\n      \"availableVersion\": \"4.0.0\",\n      \"artifactSize\": 2097810,\n      \"releaseNotes\": \"Zigbee 3.0 support\"\n    }\n  ],\n  \"updateCount\": 1\n}",
+              "originalRequest": {
+                "method": "GET",
+                "url": {"raw": "{{base_url}}/api/v1/controllers/{{device_id}}/updates/available"}
+              }
+            },
+            {
+              "name": "200 OK — No updates available",
+              "status": "OK",
+              "code": 200,
+              "header": [{"key": "Content-Type", "value": "application/json"}],
+              "body": "{\n  \"deviceId\": \"edb39bba-baf1-4700-968c-a42228e53aa0\",\n  \"thingName\": \"digilux-94ba062a250c\",\n  \"model\": \"DGX-1000\",\n  \"hwRevision\": \"1.0\",\n  \"pendingJobId\": null,\n  \"installedVersions\": {\n    \"controller-app\": \"4.0.0\"\n  },\n  \"availableUpdates\": [],\n  \"updateCount\": 0\n}",
+              "originalRequest": {
+                "method": "GET",
+                "url": {"raw": "{{base_url}}/api/v1/controllers/{{device_id}}/updates/available"}
+              }
+            },
+            {
+              "name": "404 Not Found — Device not in inventory",
+              "status": "Not Found",
+              "code": 404,
+              "header": [{"key": "Content-Type", "value": "application/json"}],
+              "body": "{\n  \"error\": \"Device not found in OTA inventory. The OTA agent may not have started on this device yet.\"\n}",
+              "originalRequest": {
+                "method": "GET",
+                "url": {"raw": "{{base_url}}/api/v1/controllers/{{device_id}}/updates/available"}
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Deployments",
+      "description": "Create and manage OTA deployments. A deployment pushes a specific package version to a device or device group.",
+      "item": [
+        {
+          "name": "Create Deployment",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "const res = pm.response.json();",
+                  "if (res.jobId) {",
+                  "    pm.collectionVariables.set('job_id', res.jobId);",
+                  "    console.log('job_id saved:', res.jobId);",
+                  "}",
+                  "pm.test('Status is 201', () => pm.response.to.have.status(201));",
+                  "pm.test('jobId present', () => pm.expect(res.jobId).to.be.a('string').and.not.empty);",
+                  "pm.test('status is QUEUED', () => pm.expect(res.status).to.eql('QUEUED'));"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"packageName\": \"{{package_name}}\",\n  \"version\": \"{{package_version}}\",\n  \"targetType\": \"THING\",\n  \"targetId\": \"{{device_id}}\",\n  \"rolloutStage\": \"CANARY\"\n}",
+              "options": {"raw": {"language": "json"}}
+            },
+            "url": {
+              "raw": "{{base_url}}/api/v1/ota/deployments",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "ota", "deployments"]
+            },
+            "description": "Creates an IoT Job to push a package version to a device or device group.\n\nThe `job_id` collection variable is auto-populated by the test script for use in subsequent requests.\n\n**targetType options:**\n- `THING` — single device, `targetId` = device UUID\n- `THING_GROUP` — group name (e.g. `DGX-Canary`), `targetId` = group name\n\n**rolloutStage options:**\n- `CANARY` — max 2 devices/min, first 5 devices\n- `BETA` — exponential from 2/min, ~10% of fleet\n- `PRODUCTION` — exponential from 5/min, full fleet (default)\n\n**Validation errors:**\n- 400 if package is not ACTIVE\n- 400 if device already has this version installed (THING only)\n- 404 if package/version not found\n- 404 if device not in OTA inventory"
+          },
+          "response": [
+            {
+              "name": "201 Created — Deployment queued",
+              "status": "Created",
+              "code": 201,
+              "header": [{"key": "Content-Type", "value": "application/json"}],
+              "body": "{\n  \"jobId\": \"digilux-ota-controller-app-4-0-0-1785475706\",\n  \"iotJobArn\": \"arn:aws:iot:ap-south-1:986906626244:job/digilux-ota-controller-app-4-0-0-1785475706\",\n  \"packageName\": \"controller-app\",\n  \"version\": \"4.0.0\",\n  \"targetType\": \"THING\",\n  \"targetId\": \"edb39bba-baf1-4700-968c-a42228e53aa0\",\n  \"rolloutStage\": \"CANARY\",\n  \"status\": \"QUEUED\"\n}",
+              "originalRequest": {
+                "method": "POST",
+                "url": {"raw": "{{base_url}}/api/v1/ota/deployments"}
+              }
+            },
+            {
+              "name": "400 Bad Request — Already installed",
+              "status": "Bad Request",
+              "code": 400,
+              "header": [{"key": "Content-Type", "value": "application/json"}],
+              "body": "{\n  \"error\": \"Device already has controller-app@4.0.0 installed. No deployment needed.\"\n}",
+              "originalRequest": {
+                "method": "POST",
+                "url": {"raw": "{{base_url}}/api/v1/ota/deployments"}
+              }
+            },
+            {
+              "name": "400 Bad Request — Package not ACTIVE",
+              "status": "Bad Request",
+              "code": 400,
+              "header": [{"key": "Content-Type", "value": "application/json"}],
+              "body": "{\n  \"error\": \"Package controller-app@4.0.0 is not in ACTIVE status. Current status: PENDING\"\n}",
+              "originalRequest": {
+                "method": "POST",
+                "url": {"raw": "{{base_url}}/api/v1/ota/deployments"}
+              }
+            },
+            {
+              "name": "404 Not Found — Package not found",
+              "status": "Not Found",
+              "code": 404,
+              "header": [{"key": "Content-Type", "value": "application/json"}],
+              "body": "{\n  \"error\": \"Package controller-app@4.0.0 not found\"\n}",
+              "originalRequest": {
+                "method": "POST",
+                "url": {"raw": "{{base_url}}/api/v1/ota/deployments"}
+              }
+            }
+          ]
+        },
+        {
+          "name": "List Deployments",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/v1/ota/deployments?limit=20",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "ota", "deployments"],
+              "query": [
+                {
+                  "key": "limit",
+                  "value": "20",
+                  "description": "Max results (1–100, default 20)"
+                }
+              ]
+            },
+            "description": "Returns all deployments ordered newest-first. Maximum `limit` is 100."
+          },
+          "response": [
+            {
+              "name": "200 OK",
+              "status": "OK",
+              "code": 200,
+              "header": [{"key": "Content-Type", "value": "application/json"}],
+              "body": "{\n  \"jobs\": [\n    {\n      \"jobId\": \"digilux-ota-controller-app-4-0-0-1785475706\",\n      \"packageName\": \"controller-app\",\n      \"version\": \"4.0.0\",\n      \"packageType\": \"CONTROLLER_APP\",\n      \"targetType\": \"THING\",\n      \"targetId\": \"edb39bba-baf1-4700-968c-a42228e53aa0\",\n      \"rolloutStage\": \"CANARY\",\n      \"status\": \"SUCCEEDED\",\n      \"createdBy\": \"admin@example.com\",\n      \"createdAt\": 1785475706560,\n      \"completedAt\": 1785475888991\n    }\n  ],\n  \"count\": 1\n}",
+              "originalRequest": {
+                "method": "GET",
+                "url": {"raw": "{{base_url}}/api/v1/ota/deployments?limit=20"}
+              }
+            }
+          ]
+        },
+        {
+          "name": "Get Deployment Status",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status is 200', () => pm.response.to.have.status(200));",
+                  "const res = pm.response.json();",
+                  "const terminal = ['SUCCEEDED', 'FAILED', 'CANCELLED', 'REJECTED'];",
+                  "const status = res.status;",
+                  "console.log('Job status:', status);",
+                  "if (terminal.includes(status)) {",
+                  "    pm.test('Job reached terminal state: ' + status, () => pm.expect(terminal).to.include(status));",
+                  "} else {",
+                  "    console.log('Job still in progress — status:', status, '(re-run to poll)');",
+                  "}"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/v1/ota/deployments/{{job_id}}",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "ota", "deployments", "{{job_id}}"]
+            },
+            "description": "Returns full status of a deployment including per-device progress.\n\n**Job status values:**\n- `QUEUED` — created, device not yet acknowledged\n- `IN_PROGRESS` — device is downloading/installing\n- `SUCCEEDED` — installed and health check passed\n- `FAILED` — failed; see `deviceStatuses[id].statusDetail`\n- `CANCELLED` — aborted by admin\n- `REJECTED` — device rejected (precondition not met)\n\n**NEEDS_RECOVERY** appears in `statusDetail` when installation failed AND rollback also failed. Requires manual/SSH device access."
+          },
+          "response": [
+            {
+              "name": "200 OK — SUCCEEDED",
+              "status": "OK",
+              "code": 200,
+              "header": [{"key": "Content-Type", "value": "application/json"}],
+              "body": "{\n  \"jobId\": \"digilux-ota-controller-app-4-0-0-1785475706\",\n  \"packageName\": \"controller-app\",\n  \"version\": \"4.0.0\",\n  \"targetType\": \"THING\",\n  \"targetId\": \"edb39bba-baf1-4700-968c-a42228e53aa0\",\n  \"rolloutStage\": \"CANARY\",\n  \"status\": \"SUCCEEDED\",\n  \"createdBy\": \"admin@example.com\",\n  \"createdAt\": 1785475706560,\n  \"completedAt\": 1785475888991,\n  \"deviceStatuses\": {\n    \"edb39bba-baf1-4700-968c-a42228e53aa0\": {\n      \"status\": \"SUCCEEDED\",\n      \"progress\": 100,\n      \"updatedAt\": 1785475888991\n    }\n  },\n  \"iotStatus\": {\n    \"numberOfSucceededThings\": 1,\n    \"numberOfFailedThings\": 0,\n    \"numberOfInProgressThings\": 0,\n    \"numberOfQueuedThings\": 0\n  },\n  \"iotJobStatus\": \"COMPLETED\"\n}",
+              "originalRequest": {
+                "method": "GET",
+                "url": {"raw": "{{base_url}}/api/v1/ota/deployments/{{job_id}}"}
+              }
+            },
+            {
+              "name": "200 OK — IN_PROGRESS",
+              "status": "OK",
+              "code": 200,
+              "header": [{"key": "Content-Type", "value": "application/json"}],
+              "body": "{\n  \"jobId\": \"digilux-ota-controller-app-4-0-0-1785475706\",\n  \"packageName\": \"controller-app\",\n  \"version\": \"4.0.0\",\n  \"status\": \"IN_PROGRESS\",\n  \"deviceStatuses\": {\n    \"edb39bba-baf1-4700-968c-a42228e53aa0\": {\n      \"status\": \"IN_PROGRESS\",\n      \"progress\": 62,\n      \"updatedAt\": 1785475800000\n    }\n  },\n  \"iotStatus\": {\n    \"numberOfSucceededThings\": 0,\n    \"numberOfFailedThings\": 0,\n    \"numberOfInProgressThings\": 1,\n    \"numberOfQueuedThings\": 0\n  },\n  \"iotJobStatus\": \"IN_PROGRESS\"\n}",
+              "originalRequest": {
+                "method": "GET",
+                "url": {"raw": "{{base_url}}/api/v1/ota/deployments/{{job_id}}"}
+              }
+            },
+            {
+              "name": "200 OK — FAILED with rollback",
+              "status": "OK",
+              "code": 200,
+              "header": [{"key": "Content-Type", "value": "application/json"}],
+              "body": "{\n  \"jobId\": \"digilux-ota-controller-app-4-0-0-1785475706\",\n  \"packageName\": \"controller-app\",\n  \"version\": \"4.0.0\",\n  \"status\": \"FAILED\",\n  \"deviceStatuses\": {\n    \"edb39bba-baf1-4700-968c-a42228e53aa0\": {\n      \"status\": \"FAILED\",\n      \"progress\": 0,\n      \"statusDetail\": \"Install failed — previous version restored\",\n      \"updatedAt\": 1785475820000\n    }\n  },\n  \"iotJobStatus\": \"FAILED\"\n}",
+              "originalRequest": {
+                "method": "GET",
+                "url": {"raw": "{{base_url}}/api/v1/ota/deployments/{{job_id}}"}
+              }
+            },
+            {
+              "name": "200 OK — NEEDS_RECOVERY (critical)",
+              "status": "OK",
+              "code": 200,
+              "header": [{"key": "Content-Type", "value": "application/json"}],
+              "body": "{\n  \"jobId\": \"digilux-ota-controller-app-4-0-0-1785475706\",\n  \"packageName\": \"controller-app\",\n  \"version\": \"4.0.0\",\n  \"status\": \"FAILED\",\n  \"deviceStatuses\": {\n    \"edb39bba-baf1-4700-968c-a42228e53aa0\": {\n      \"status\": \"FAILED\",\n      \"progress\": 0,\n      \"statusDetail\": \"NEEDS_RECOVERY: install failed and rollback failed — manual intervention required\",\n      \"updatedAt\": 1785475820000\n    }\n  },\n  \"iotJobStatus\": \"FAILED\"\n}",
+              "originalRequest": {
+                "method": "GET",
+                "url": {"raw": "{{base_url}}/api/v1/ota/deployments/{{job_id}}"}
+              }
+            }
+          ]
+        },
+        {
+          "name": "Abort Deployment",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/v1/ota/deployments/{{job_id}}/abort",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "ota", "deployments", "{{job_id}}", "abort"]
+            },
+            "description": "Cancels the IoT Job for all devices not yet in a terminal state.\n\n**Behaviour:** `force=false` (default) — devices already downloading or installing are not interrupted. Only QUEUED executions are cancelled.\n\nAlready-terminal devices (SUCCEEDED, FAILED) are unaffected."
+          },
+          "response": [
+            {
+              "name": "200 OK — Aborted",
+              "status": "OK",
+              "code": 200,
+              "header": [{"key": "Content-Type", "value": "application/json"}],
+              "body": "{\n  \"jobId\": \"digilux-ota-controller-app-4-0-0-1785475706\",\n  \"status\": \"CANCELLED\"\n}",
+              "originalRequest": {
+                "method": "POST",
+                "url": {"raw": "{{base_url}}/api/v1/ota/deployments/{{job_id}}/abort"}
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Full Deployment Flow",
+      "description": "End-to-end sequence: upload package → wait for ACTIVE → check device → deploy → poll until done.\n\nRun these requests in order. Variables are auto-populated by test scripts.",
+      "item": [
+        {
+          "name": "1. Get Upload URL",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "const res = pm.response.json();",
+                  "if (res.uploadUrl) pm.collectionVariables.set('upload_url', res.uploadUrl);",
+                  "pm.test('Got upload URL', () => pm.expect(res.uploadUrl).to.be.a('string'));"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{"key": "Content-Type", "value": "application/json"}],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"packageName\": \"{{package_name}}\",\n  \"version\": \"{{package_version}}\",\n  \"packageType\": \"CONTROLLER_APP\",\n  \"fileName\": \"controller-app-{{package_version}}.tar.gz\",\n  \"releaseNotes\": \"Test release\",\n  \"compatibleModels\": [],\n  \"dependsOn\": {},\n  \"incompatibleWith\": {}\n}",
+              "options": {"raw": {"language": "json"}}
+            },
+            "url": {
+              "raw": "{{base_url}}/api/v1/ota/packages/upload-url",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "ota", "packages", "upload-url"]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "2. Upload Binary to S3",
+          "request": {
+            "method": "PUT",
+            "header": [{"key": "Content-Type", "value": "application/octet-stream"}],
+            "body": {"mode": "file", "file": {"src": ""}},
+            "url": {"raw": "{{upload_url}}", "host": ["{{upload_url}}"]},
+            "auth": {"type": "noauth"}
+          },
+          "response": []
+        },
+        {
+          "name": "3. Poll Until Package is ACTIVE",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "const res = pm.response.json();",
+                  "const pkg = (res.packages || []).find(p => p.version === pm.collectionVariables.get('package_version'));",
+                  "if (pkg) {",
+                  "    console.log('Package status:', pkg.status);",
+                  "    pm.test('Package is ACTIVE', () => pm.expect(pkg.status).to.eql('ACTIVE'));",
+                  "} else {",
+                  "    console.log('Package not found yet — re-run in a few seconds');",
+                  "}"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/v1/ota/packages?packageName={{package_name}}",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "ota", "packages"],
+              "query": [{"key": "packageName", "value": "{{package_name}}"}]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "4. Confirm Update Available for Device",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/v1/controllers/{{device_id}}/updates/available",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "controllers", "{{device_id}}", "updates", "available"]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "5. Create Deployment",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "const res = pm.response.json();",
+                  "if (res.jobId) pm.collectionVariables.set('job_id', res.jobId);",
+                  "pm.test('Deployment created', () => pm.response.to.have.status(201));",
+                  "pm.test('Status is QUEUED', () => pm.expect(res.status).to.eql('QUEUED'));",
+                  "console.log('job_id:', res.jobId);"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{"key": "Content-Type", "value": "application/json"}],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"packageName\": \"{{package_name}}\",\n  \"version\": \"{{package_version}}\",\n  \"targetType\": \"THING\",\n  \"targetId\": \"{{device_id}}\",\n  \"rolloutStage\": \"CANARY\"\n}",
+              "options": {"raw": {"language": "json"}}
+            },
+            "url": {
+              "raw": "{{base_url}}/api/v1/ota/deployments",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "ota", "deployments"]
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "6. Poll Deployment Until Terminal",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "const res = pm.response.json();",
+                  "const terminal = ['SUCCEEDED', 'FAILED', 'CANCELLED', 'REJECTED'];",
+                  "console.log('Deployment status:', res.status);",
+                  "if (terminal.includes(res.status)) {",
+                  "    pm.test('Deployment completed: ' + res.status, () => pm.expect(terminal).to.include(res.status));",
+                  "    if (res.status === 'SUCCEEDED') {",
+                  "        pm.test('All devices succeeded', () => {",
+                  "            pm.expect(res.iotStatus.numberOfFailedThings).to.eql(0);",
+                  "        });",
+                  "    }",
+                  "} else {",
+                  "    console.log('Still in progress — re-run to poll again');",
+                  "}"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/api/v1/ota/deployments/{{job_id}}",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "ota", "deployments", "{{job_id}}"]
+            }
+          },
+          "response": []
+        }
+      ]
+    }
+  ]
+}
