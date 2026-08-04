@@ -515,6 +515,79 @@ Returns the status of a user-initiated update. The `jobId` must belong to a cons
 
 ---
 
+### 4.11 Get Download Link — App-Mediated Update (End User)
+
+```
+POST /api/v1/ota/my/updates/download-link
+```
+
+An alternative to the consent flow. The Lambda returns a pre-signed S3 download URL **directly to the Flutter app** and simultaneously publishes the same payload to the device's OTA MQTT topic (`iot/device/{deviceId}/ota`). The device receives the URL over MQTT and downloads the firmware over HTTPS.
+
+**When to use this instead of `/consent`:**
+- You want the Flutter app to hold the URL (e.g., to display progress, pass to a `NetworkController`, or handle offline-device scenarios)
+- You want lower overhead — no IoT Job is created, just an MQTT publish
+
+**No IoT Job is created** — the device must report completion via its standard status topic.
+
+**Request body:**
+```json
+{
+  "deviceId":    "edb39bba-baf1-4700-968c-a42228e53aa0",
+  "packageName": "controller-app",
+  "version":     "4.0.0"
+}
+```
+
+**Response `200`:**
+```json
+{
+  "downloadUrl":   "https://digilux-ota-artifacts.s3.ap-south-1.amazonaws.com/packages/controller-app/4.0.0/controller-app-4.0.0.deb?X-Amz-Algorithm=...",
+  "sha256":        "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "signature":     "MEUCIQDx...",
+  "packageName":   "controller-app",
+  "version":       "4.0.0",
+  "size":          12456789,
+  "packageType":   "deb",
+  "expiresAt":     "2026-08-04T15:00:00Z",
+  "mqttDelivered": true,
+  "message":       "Download URL sent to device via MQTT. Device will begin download shortly."
+}
+```
+
+**`mqttDelivered`** — `true` if the device was notified via MQTT; `false` if the MQTT publish failed (e.g., device offline). In the `false` case the URL is still returned to the app — Flutter can retry or display a "device offline" message.
+
+**MQTT payload published to `iot/device/{deviceId}/ota`:**
+```json
+{
+  "operation":   "DOWNLOAD_AND_INSTALL",
+  "packageName": "controller-app",
+  "version":     "4.0.0",
+  "packageType": "deb",
+  "downloadUrl": "<presigned-url>",
+  "sha256":      "<hex>",
+  "signature":   "<base64>",
+  "size":        12456789,
+  "expiresAt":   "2026-08-04T15:00:00Z",
+  "initiatedBy": "USER_APP",
+  "userId":      "<sub>",
+  "mandatory":   false,
+  "rollback":    true
+}
+```
+
+**Security checks** (identical to `/consent` except no rate-limit check and no IoT Job created):
+1. Valid Cognito JWT with `sub` claim
+2. `deviceId` UUID format
+3. Device ownership (userId-index GSI on `digilux_device_data`)
+4. Package `ACTIVE`
+5. Device registered in OTA inventory
+6. Version strictly newer than installed
+7. No pending job already in-progress
+
+**Error responses:** same codes as `/consent` — `400`, `401`, `404`, `409`, `500`.
+
+---
+
 ## 5. Complete Integration Flow
 
 ### 5.1 Admin-initiated deployment
@@ -562,6 +635,46 @@ Returns the status of a user-initiated update. The `jobId` must belong to a cons
    → wait for status: "SUCCEEDED" or "FAILED"
    → Flutter shows result to user
 ```
+
+### 5.3 App-mediated download-link flow (Flutter app)
+
+> **Prerequisite:** Admin must have completed steps 1–3 of section 5.1 so the package is `ACTIVE`.
+
+```
+1. GET /api/v1/ota/my/updates  (user token)
+   → receive list of devices with availableUpdates
+   → Flutter shows "Update available: controller-app 4.0.0"
+
+2. User taps "Update Now" in Flutter app
+
+3. POST /api/v1/ota/my/updates/download-link  (user token)
+   → body: { deviceId, packageName, version }
+   → Lambda generates pre-signed S3 URL
+   → Lambda publishes { downloadUrl, sha256, signature, ... } to iot/device/{deviceId}/ota
+   → Response: { downloadUrl, sha256, signature, size, expiresAt, mqttDelivered }
+
+4a. If mqttDelivered = true:
+    → Device already received download command over MQTT
+    → Device downloads binary from S3 over HTTPS
+    → Device verifies SHA256 + ECDSA signature
+    → Device installs and reports status via MQTT status topic
+    → Flutter can display "Update in progress" using downloadUrl as a reference
+
+4b. If mqttDelivered = false (device offline):
+    → Flutter can show "Device offline — update will apply when device reconnects"
+    → Flutter may pass downloadUrl to a NetworkController or local BT channel if available
+    → URL is valid for 1 hour; call again if URL expires before device comes online
+```
+
+**Key differences from consent flow:**
+| | Consent (`/consent`) | Download-link (`/download-link`) |
+|---|---|---|
+| IoT Job created | Yes (full audit, retry logic) | No |
+| App receives URL | No | Yes |
+| Device notified | Via IoT Job | Via direct MQTT publish |
+| Status tracking | Via `/updates/{jobId}/status` | Via device MQTT status topic |
+| Rate limiting | Yes (1 per device per 5 min) | No |
+| Best for | Automated installs, audit trail | App-controlled installs |
 
 ---
 
@@ -854,3 +967,4 @@ The 90-day retention on non-current versions allows rollback reference while con
 | `1.1` | 2026-07-31 | Digilux Engineering | Production hardening: SNS alert topic (`digilux-ota-alerts`), SQS DLQs for async Lambdas, 30-day log retention on all Lambda log groups, S3 lifecycle policy (non-current versions → STANDARD_IA @30d, deleted @90d), individual CloudWatch alarms for all 6 Lambdas + DLQ depth alarms, updated dashboard with DLQ widget; fixed e2e test T08 duplicate deployment API call bug |
 | `1.2` | 2026-07-31 | Digilux Engineering | Accuracy fixes: added `REJECTED` job status, corrected `NEEDS_RECOVERY` alert path (CloudWatch Logs Insights, not Lambda error alarm), added `instructions` field to upload-url response, documented semver version comparison logic and empty `compatibleModels` behaviour |
 | `1.3` | 2026-08-04 | Digilux Engineering | User-initiated OTA flow: Sections 4.8–4.10 (check updates, consent, status); updated auth section to cover user vs admin tokens; added Section 5.2 (user flow sequence); new DynamoDB table `digilux_ota_user_consents`; device ownership verification via `digilux_device_data`; rate limiting; consent audit trail |
+| `1.4` | 2026-08-04 | Digilux Engineering | App-mediated download-link flow: Section 4.11 (`POST /api/v1/ota/my/updates/download-link`); Lambda returns pre-signed URL to Flutter app and simultaneously publishes download payload to device MQTT OTA topic; Section 5.3 (flow comparison table: consent vs download-link); new Lambda `digilux_ota_user_get_download_link`; IAM `iot:Publish` permission on `iot/device/*/ota` |

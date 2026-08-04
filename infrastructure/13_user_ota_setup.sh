@@ -20,6 +20,7 @@ LAMBDA_NAMES=(
   "digilux_ota_user_check_updates"
   "digilux_ota_user_consent"
   "digilux_ota_user_update_status"
+  "digilux_ota_user_get_download_link"
 )
 
 LAMBDA_ENV_COMMON="REGION=${REGION},ACCOUNT_ID=${ACCOUNT_ID},\
@@ -34,6 +35,7 @@ RATE_LIMIT_MINUTES=5,\
 DEVICE_DATA_USER_INDEX=userId-index,\
 CONSENTS_USER_INDEX=userId-deviceId-index,\
 CONSENTS_JOB_INDEX=jobId-index,\
+OTA_MQTT_TOPIC_TEMPLATE=iot/device/{deviceId}/ota,\
 LOG_LEVEL=INFO"
 
 echo "========================================================"
@@ -205,6 +207,14 @@ POLICY_DOC=$(cat <<EOF
         "arn:aws:iot:${REGION}:${ACCOUNT_ID}:job/digilux-ota-*",
         "arn:aws:iot:${REGION}:${ACCOUNT_ID}:thing/*"
       ]
+    },
+    {
+      "Sid": "IotPublish",
+      "Effect": "Allow",
+      "Action": [
+        "iot:Publish"
+      ],
+      "Resource": "arn:aws:iot:${REGION}:${ACCOUNT_ID}:topic/iot/device/*/ota"
     },
     {
       "Sid": "S3Presign",
@@ -441,6 +451,11 @@ echo "  /api/v1/ota/my/updates/{jobId}/status → ${STATUS_ID}"
 # GET /api/v1/ota/my/updates/{jobId}/status  → digilux_ota_user_update_status
 add_method "${STATUS_ID}" "GET" "digilux_ota_user_update_status" "COGNITO_USER_POOLS"
 
+# POST /api/v1/ota/my/updates/download-link  → digilux_ota_user_get_download_link
+DOWNLOAD_LINK_ID=$(get_or_create_resource "${UPDATES_ID}" "download-link")
+echo "  /api/v1/ota/my/updates/download-link → ${DOWNLOAD_LINK_ID}"
+add_method "${DOWNLOAD_LINK_ID}" "POST" "digilux_ota_user_get_download_link" "COGNITO_USER_POOLS"
+
 # ─────────────────────────────────────────────────────────────────────────────
 # STEP 6 — Deploy API stage
 # ─────────────────────────────────────────────────────────────────────────────
@@ -461,6 +476,7 @@ echo ""
 echo "  New endpoints:"
 echo "  GET  /api/v1/ota/my/updates"
 echo "  POST /api/v1/ota/my/updates/consent"
+echo "  POST /api/v1/ota/my/updates/download-link"
 echo "  GET  /api/v1/ota/my/updates/{jobId}/status"
 echo ""
 echo "  New DynamoDB table: ${CONSENTS_TABLE}"

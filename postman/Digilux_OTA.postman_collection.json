@@ -891,6 +891,91 @@
           ]
         },
         {
+          "name": "Get Download Link (App-Mediated)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status is 200', () => pm.response.to.have.status(200));",
+                  "const res = pm.response.json();",
+                  "pm.test('downloadUrl present', () => pm.expect(res.downloadUrl).to.be.a('string').and.not.empty);",
+                  "pm.test('sha256 present', () => pm.expect(res.sha256).to.be.a('string').and.not.empty);",
+                  "if (res.downloadUrl) pm.collectionVariables.set('upload_url', res.downloadUrl);",
+                  "console.log('mqttDelivered:', res.mqttDelivered, '| expiresAt:', res.expiresAt);",
+                  "console.log('Message:', res.message);"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{"key": "Content-Type", "value": "application/json"}],
+            "auth": {
+              "type": "bearer",
+              "bearer": [{"key": "token", "value": "{{user_auth_token}}", "type": "string"}]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"deviceId\": \"{{device_id}}\",\n  \"packageName\": \"{{package_name}}\",\n  \"version\": \"{{package_version}}\"\n}",
+              "options": {"raw": {"language": "json"}}
+            },
+            "url": {
+              "raw": "{{base_url}}/api/v1/ota/my/updates/download-link",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "ota", "my", "updates", "download-link"]
+            },
+            "description": "Returns a pre-signed S3 download URL for the firmware package and simultaneously publishes the download payload to the device's OTA MQTT topic (`iot/device/{deviceId}/ota`).\n\nThe device receives the URL over MQTT and begins downloading from S3 over HTTPS immediately. The Flutter app also receives the URL and can pass it to a NetworkController if needed (e.g., as a fallback if the device is offline).\n\n**No IoT Job is created** — this is a lightweight MQTT publish, lower overhead than the consent flow.\n\n**Response fields:**\n- `downloadUrl` — pre-signed S3 GET URL (1-hour TTL)\n- `sha256` — artifact SHA-256 hex digest for integrity verification\n- `signature` — ECDSA P-256 signature for authenticity verification\n- `size` — artifact size in bytes\n- `expiresAt` — ISO-8601 URL expiry time\n- `mqttDelivered` — `true` if device was notified via MQTT; `false` if device is offline\n- `message` — human-readable status\n\n**Auth:** Regular Cognito ID token (no admin group required). The `deviceId` must be owned by the calling user."
+          },
+          "response": [
+            {
+              "name": "200 OK — MQTT delivered",
+              "status": "OK",
+              "code": 200,
+              "header": [{"key": "Content-Type", "value": "application/json"}],
+              "body": "{\n  \"downloadUrl\": \"https://digilux-ota-artifacts.s3.ap-south-1.amazonaws.com/packages/controller-app/4.0.0/controller-app-4.0.0.deb?X-Amz-Algorithm=...\",\n  \"sha256\": \"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\",\n  \"signature\": \"MEUCIQDx...\",\n  \"packageName\": \"controller-app\",\n  \"version\": \"4.0.0\",\n  \"size\": 12456789,\n  \"packageType\": \"deb\",\n  \"expiresAt\": \"2026-08-04T15:00:00Z\",\n  \"mqttDelivered\": true,\n  \"message\": \"Download URL sent to device via MQTT. Device will begin download shortly.\"\n}",
+              "originalRequest": {
+                "method": "POST",
+                "url": {"raw": "{{base_url}}/api/v1/ota/my/updates/download-link"}
+              }
+            },
+            {
+              "name": "200 OK — device offline (MQTT not delivered)",
+              "status": "OK",
+              "code": 200,
+              "header": [{"key": "Content-Type", "value": "application/json"}],
+              "body": "{\n  \"downloadUrl\": \"https://digilux-ota-artifacts.s3.ap-south-1.amazonaws.com/packages/controller-app/4.0.0/controller-app-4.0.0.deb?X-Amz-Algorithm=...\",\n  \"sha256\": \"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\",\n  \"signature\": \"MEUCIQDx...\",\n  \"packageName\": \"controller-app\",\n  \"version\": \"4.0.0\",\n  \"size\": 12456789,\n  \"packageType\": \"deb\",\n  \"expiresAt\": \"2026-08-04T15:00:00Z\",\n  \"mqttDelivered\": false,\n  \"message\": \"Download URL generated. Device may be offline — pass the URL directly to the device when it comes online.\"\n}",
+              "originalRequest": {
+                "method": "POST",
+                "url": {"raw": "{{base_url}}/api/v1/ota/my/updates/download-link"}
+              }
+            },
+            {
+              "name": "404 Not Found — device not owned",
+              "status": "Not Found",
+              "code": 404,
+              "header": [{"key": "Content-Type", "value": "application/json"}],
+              "body": "{\n  \"error\": \"Device not found\"\n}",
+              "originalRequest": {
+                "method": "POST",
+                "url": {"raw": "{{base_url}}/api/v1/ota/my/updates/download-link"}
+              }
+            },
+            {
+              "name": "409 Conflict — update already in progress",
+              "status": "Conflict",
+              "code": 409,
+              "header": [{"key": "Content-Type", "value": "application/json"}],
+              "body": "{\n  \"error\": \"An update is already in progress on this device.\",\n  \"pendingJobId\": \"digilux-ota-controller-app-3-5-0-1785000000\"\n}",
+              "originalRequest": {
+                "method": "POST",
+                "url": {"raw": "{{base_url}}/api/v1/ota/my/updates/download-link"}
+              }
+            }
+          ]
+        },
+        {
           "name": "Full User Update Flow",
           "description": "Run these 3 requests in order to complete a user-initiated update.",
           "item": [
@@ -967,6 +1052,66 @@
                   "raw": "{{base_url}}/api/v1/ota/my/updates/{{job_id}}/status",
                   "host": ["{{base_url}}"],
                   "path": ["api", "v1", "ota", "my", "updates", "{{job_id}}", "status"]
+                }
+              },
+              "response": []
+            }
+          ]
+        },
+        {
+          "name": "Full App-Mediated Update Flow",
+          "description": "Alternative to the consent flow. Call 'Get Download Link' — Lambda returns the URL to the app AND sends it to the device over MQTT simultaneously. No IoT Job is created.",
+          "item": [
+            {
+              "name": "1. Check Available Updates",
+              "request": {
+                "method": "GET",
+                "header": [],
+                "auth": {
+                  "type": "bearer",
+                  "bearer": [{"key": "token", "value": "{{user_auth_token}}", "type": "string"}]
+                },
+                "url": {
+                  "raw": "{{base_url}}/api/v1/ota/my/updates",
+                  "host": ["{{base_url}}"],
+                  "path": ["api", "v1", "ota", "my", "updates"]
+                }
+              },
+              "response": []
+            },
+            {
+              "name": "2. Get Download Link",
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "exec": [
+                      "pm.test('Status is 200', () => pm.response.to.have.status(200));",
+                      "const res = pm.response.json();",
+                      "if (res.downloadUrl) pm.collectionVariables.set('upload_url', res.downloadUrl);",
+                      "console.log('mqttDelivered:', res.mqttDelivered, '| url set to upload_url variable');",
+                      "pm.test('URL received', () => pm.expect(res.downloadUrl).to.be.a('string').and.not.empty);"
+                    ],
+                    "type": "text/javascript"
+                  }
+                }
+              ],
+              "request": {
+                "method": "POST",
+                "header": [{"key": "Content-Type", "value": "application/json"}],
+                "auth": {
+                  "type": "bearer",
+                  "bearer": [{"key": "token", "value": "{{user_auth_token}}", "type": "string"}]
+                },
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"deviceId\": \"{{device_id}}\",\n  \"packageName\": \"{{package_name}}\",\n  \"version\": \"{{package_version}}\"\n}",
+                  "options": {"raw": {"language": "json"}}
+                },
+                "url": {
+                  "raw": "{{base_url}}/api/v1/ota/my/updates/download-link",
+                  "host": ["{{base_url}}"],
+                  "path": ["api", "v1", "ota", "my", "updates", "download-link"]
                 }
               },
               "response": []
