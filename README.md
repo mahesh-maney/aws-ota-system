@@ -738,14 +738,14 @@ The IoT Job is stored in AWS IoT. When the device comes back online:
 
 ### Internet Lost After Successful Install
 
-- **Within 60 min:** paho-mqtt auto-reconnects → SUCCEEDED sent → inventory updated
-- **After 60 min:** IoT marks `TIMED_OUT` → on next agent startup, re-registration corrects inventory automatically
+- **Within 24hr:** paho-mqtt auto-reconnects → SUCCEEDED sent → `digilux_device_data` updated
+- **After 24hr:** IoT marks `TIMED_OUT` → on next agent startup, `device_register` corrects `digilux_device_data` automatically
 
 ---
 
 ## Device Inventory
 
-Source of truth: `digilux_device_inventory` DynamoDB table.
+OTA fields (`installedVersions`, `pendingJobId`, `thingName`) are stored as attributes on `digilux_device_data` — the same table used for device ownership. No separate inventory table.
 
 | Field | Description |
 |---|---|
@@ -774,7 +774,7 @@ Source of truth: `digilux_device_inventory` DynamoDB table.
 | **Device ownership** | `digilux_device_data` is the ownership oracle — `userId` from JWT must match device record on every user request |
 | **Artifact integrity** | SHA256 hash verified on device before install |
 | **Artifact authenticity** | ECDSA P-256 signature verified using public key at `/etc/digilux/ota-agent.pub` |
-| **Transport** | Binary download via pre-signed S3 HTTPS URL (1-hour expiry) |
+| **Transport** | Binary download via **CloudFront signed URL** (tiered expiry: 1hr ≤50MB / 6hr ≤200MB / 24hr ≤500MB / 48hr >500MB) |
 | **Signing key** | Private key in Secrets Manager (`digilux-ota-signing-key`) — never on device |
 | **Mandatory updates** | Device cannot decline — `"mandatory": true` in IoT job document |
 | **S3** | Versioned, AES-256 SSE, public access fully blocked |
@@ -831,7 +831,7 @@ All alarms notify the `digilux-ota-alerts` SNS topic.
 | Resource | Name/ARN |
 |---|---|
 | S3 bucket | `digilux-ota-artifacts` |
-| DynamoDB tables | `digilux_ota_packages`, `digilux_ota_jobs`, `digilux_ota_compatibility`, `digilux_device_inventory`, `digilux_ota_user_consents` |
+| DynamoDB tables | `digilux_ota_packages`, `digilux_ota_jobs`, `digilux_ota_compatibility`, `digilux_device_data` (OTA fields), `digilux_ota_user_consents` |
 | IoT Thing Groups | `DGX-Canary`, `DGX-Beta`, `DGX-Production`, `DGX-Controllers` |
 | IoT Rules | `digilux_ota_status_ingest`, `digilux_ota_device_register` |
 | Signing key | `digilux-ota-signing-key` (Secrets Manager, ECDSA P-256) |
@@ -883,8 +883,9 @@ s3://digilux-ota-artifacts/<prefix>/<packageName>/<version>/<fileName>
 ```bash
 # Reset test device before each run
 DEVICE_ID="edb39bba-baf1-4700-968c-a42228e53aa0"
-aws dynamodb update-item --table-name digilux_device_inventory \
-  --key "{\"deviceId\":{\"S\":\"${DEVICE_ID}\"}}" \
+MAC="irjof5RLuQcVv2tvEVdSilZbm1Wj7J4AGWw69ZJ1e0r1AN7fM4W1NQ=="
+aws dynamodb update-item --table-name digilux_device_data \
+  --key "{\"deviceId\":{\"S\":\"${DEVICE_ID}\"},\"macAddress\":{\"S\":\"${MAC}\"}}" \
   --update-expression "SET pendingJobId = :null, installedVersions.#pkg = :v, lastUpdatedAt = :ts" \
   --expression-attribute-names '{"#pkg":"controller-app"}' \
   --expression-attribute-values "{\":null\":{\"NULL\":true},\":v\":{\"S\":\"2.0.0\"},\":ts\":{\"N\":\"$(date +%s)000\"}}" \
@@ -921,6 +922,7 @@ Results are written to `infrastructure/e2e_test_results.txt`.
 | `1.1` | 2026-07-31 | Production hardening: SNS alerts, DLQs, log retention, S3 lifecycle, CloudWatch alarms |
 | `1.2` | 2026-07-31 | Added `REJECTED` status, NEEDS_RECOVERY alert path, semver comparison docs, `compatibleModels` docs |
 | `1.3` | 2026-08-04 | User-initiated OTA flow: `digilux_ota_user_check_updates`, `digilux_ota_user_consent`, `digilux_ota_user_update_status`; new `digilux_ota_user_consents` DynamoDB table; `digilux-ota-user-lambda-role`; device ownership verification; rate limiting; consent audit trail |
+| `1.5` | 2026-08-12 | Consolidated `digilux_device_inventory` into `digilux_device_data`; CloudFront signed URLs; tiered presign expiry (1hr–48hr by size); IoT Job 24hr timeout; `dynamodb:UpdateItem` IAM fix; user e2e suite 53 tests |
 | `1.4` | 2026-08-04 | App-mediated download-link flow: `POST /api/v1/ota/my/updates/download-link`; `digilux_ota_user_get_download_link` Lambda; simultaneous URL delivery to Flutter app + MQTT publish to device; IAM `iot:Publish` on device OTA topic; comparison table: consent vs download-link |
 
 ---
@@ -976,7 +978,7 @@ The ops team decides to push an update to a device or an entire group of devices
 
 2. AWS IoT Core (Amazon's device messaging infrastructure) sends a tiny notification to the device via **MQTT** — a lightweight always-on messaging protocol, like a WhatsApp message but for machines.
 
-3. The device wakes up, asks for the full job details, gets a **secure download link** (pre-signed HTTPS URL from S3, valid 1 hour).
+3. The device wakes up, asks for the full job details, gets a **secure download link** (CloudFront signed URL, valid 1–48hr based on file size).
 
 4. The device downloads the binary file over HTTPS, verifies the SHA256 fingerprint and ECDSA signature, takes a **backup of the currently running software**, then installs the new version.
 
@@ -1035,7 +1037,7 @@ Every time the controller device starts up, it sends a "hello, I'm online" messa
 - What software versions are currently installed
 - Its hardware model and revision
 
-The cloud stores this in a database (`digilux_device_inventory`). This is how we always know the truth about what's installed — the device tells us on every boot, so even if the cloud record was stale, it gets corrected automatically.
+The cloud stores this in a database (`digilux_device_data`). This is how we always know the truth about what's installed — the device tells us on every boot, so even if the cloud record was stale, it gets corrected automatically.
 
 ---
 

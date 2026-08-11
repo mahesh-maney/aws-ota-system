@@ -567,7 +567,7 @@ Returns the status of a user-initiated update. The `jobId` must belong to a cons
 POST /api/v1/ota/my/updates/download-link
 ```
 
-An alternative to the consent flow. The Lambda returns a pre-signed S3 download URL **directly to the Flutter app** and simultaneously publishes the same payload to the device's OTA MQTT topic (`iot/device/{deviceId}/ota`). The device receives the URL over MQTT and downloads the firmware over HTTPS.
+An alternative to the consent flow. The Lambda returns a **CloudFront signed download URL** directly to the Flutter app and simultaneously publishes the same payload to the device's OTA MQTT topic (`iot/device/{deviceId}/ota`). The device receives the URL over MQTT and downloads the firmware over HTTPS.
 
 **When to use this instead of `/consent`:**
 - You want the Flutter app to hold the URL (e.g., to display progress, pass to a `NetworkController`, or handle offline-device scenarios)
@@ -587,7 +587,7 @@ An alternative to the consent flow. The Lambda returns a pre-signed S3 download 
 **Response `200`:**
 ```json
 {
-  "downloadUrl":   "https://digilux-ota-artifacts.s3.ap-south-1.amazonaws.com/packages/controller-app/4.0.0/controller-app-4.0.0.deb?X-Amz-Algorithm=...",
+  "downloadUrl":   "https://d2lr14tk4wqz8z.cloudfront.net/application/controller-app/4.0.0/controller-app-4.0.0.tar.gz?Policy=...&Signature=...&Key-Pair-Id=K3CL07APICBEMS",
   "sha256":        "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
   "signature":     "MEUCIQDx...",
   "packageName":   "controller-app",
@@ -761,7 +761,7 @@ Attempt 3: connection drops → partial file deleted → FAILED reported to clou
 - Non-retryable errors (HTTP 403, expired pre-signed URL, 404) fail immediately without retry
 - After 3 failures: job marked `FAILED`, admin must create a new deployment (which generates a fresh pre-signed URL)
 
-**Pre-signed URL expiry = 1 hour**, which matches the **IoT Jobs in-progress timeout = 60 min** — if the URL expires, the job also times out, and a new deployment is required.
+**Artifact URL expiry** is tiered by file size: ≤50MB → 1hr, ≤200MB → 6hr, ≤500MB → 24hr, >500MB → 48hr (configurable via `ota.config`). URLs are served via **CloudFront signed URLs** (not S3 presigned) for CDN-accelerated delivery. The **IoT Job in-progress timeout is 24 hours** (`IOT_JOB_TIMEOUT_MINUTES=1440`) — if a device is offline for more than 24hr, the job times out and a new deployment is required.
 
 ---
 
@@ -848,14 +848,14 @@ This prevents a bad update from propagating to the full fleet.
 
 If the device installed successfully but lost connection before reporting back:
 
-1. **Within 60 min:** paho-mqtt auto-reconnects → SUCCEEDED is sent belatedly → job status updated → device inventory updated
-2. **After 60 min:** IoT Jobs marks execution `TIMED_OUT` → on next OTA agent startup, `register_device` fires with the new installed version from disk → inventory is corrected automatically
+1. **Within 24hr:** paho-mqtt auto-reconnects → SUCCEEDED is sent belatedly → job status updated → device data updated
+2. **After 24hr:** IoT Jobs marks execution `TIMED_OUT` → on next OTA agent startup, `device_register` fires with the new installed version from disk → `digilux_device_data` is corrected automatically
 
 ---
 
 ## 7. Device Inventory & Status
 
-The `digilux_device_inventory` DynamoDB table is the source of truth for what is installed on each device.
+OTA fields (`installedVersions`, `pendingJobId`, `thingName`) are stored as attributes on the `digilux_device_data` table — the same table used for device ownership. This eliminates a separate inventory table and reduces DynamoDB reads.
 
 | Field | Description |
 |---|---|
@@ -1018,7 +1018,7 @@ The 90-day retention on non-current versions allows rollback reference while con
 | Single-partition device | No A/B partition — rollback uses file-system backup (3 generations kept) |
 | Version skipping | Fully supported; no sequential upgrade enforcement |
 | Group deployments | No per-device version check — target all devices in group regardless of current version |
-| Pre-signed URL TTL | 1 hour — download must complete within 1 hour of deployment creation |
+| Artifact URL TTL | Tiered by file size: ≤50MB→1hr / ≤200MB→6hr / ≤500MB→24hr / >500MB→48hr (CloudFront signed URL) |
 | Agent prerequisite | Device must have run OTA agent at least once to appear in inventory |
 | Zigbee OTA | Routed via zigbee2mqtt bridge API — 10-minute per-device timeout |
 
@@ -1057,8 +1057,8 @@ Before each test run, reset the test device to a clean state so version checks p
 ```bash
 DEVICE_ID="edb39bba-baf1-4700-968c-a42228e53aa0"
 aws dynamodb update-item \
-  --table-name digilux_device_inventory \
-  --key "{\"deviceId\":{\"S\":\"${DEVICE_ID}\"}}" \
+  --table-name digilux_device_data \
+  --key "{\"deviceId\":{\"S\":\"${DEVICE_ID}\"},\"macAddress\":{\"S\":\"irjof5RLuQcVv2tvEVdSilZbm1Wj7J4AGWw69ZJ1e0r1AN7fM4W1NQ==\"}}" \
   --update-expression "SET pendingJobId = :null, installedVersions.#pkg = :v, lastUpdatedAt = :ts" \
   --expression-attribute-names '{"#pkg":"controller-app"}' \
   --expression-attribute-values "{\":null\":{\"NULL\":true},\":v\":{\"S\":\"2.0.0\"},\":ts\":{\"N\":\"$(date +%s)000\"}}" \
@@ -1191,4 +1191,5 @@ Results are printed to stdout and saved to `infrastructure/e2e_test_results.txt`
 | `1.1` | 2026-07-31 | Digilux Engineering | Production hardening: SNS alert topic (`digilux-ota-alerts`), SQS DLQs for async Lambdas, 30-day log retention on all Lambda log groups, S3 lifecycle policy (non-current versions → STANDARD_IA @30d, deleted @90d), individual CloudWatch alarms for all 6 Lambdas + DLQ depth alarms, updated dashboard with DLQ widget; fixed e2e test T08 duplicate deployment API call bug |
 | `1.2` | 2026-07-31 | Digilux Engineering | Accuracy fixes: added `REJECTED` job status, corrected `NEEDS_RECOVERY` alert path (CloudWatch Logs Insights, not Lambda error alarm), added `instructions` field to upload-url response, documented semver version comparison logic and empty `compatibleModels` behaviour |
 | `1.3` | 2026-08-04 | Digilux Engineering | User-initiated OTA flow: Sections 4.8–4.10 (check updates, consent, status); updated auth section to cover user vs admin tokens; added Section 5.2 (user flow sequence); new DynamoDB table `digilux_ota_user_consents`; device ownership verification via `digilux_device_data`; rate limiting; consent audit trail |
+| `1.5` | 2026-08-12 | Digilux Engineering | Consolidated `digilux_device_inventory` into `digilux_device_data`; CloudFront signed URLs for artifact delivery; tiered presign expiry (1hr–48hr by file size, `ota.config`); IoT Job timeout 24hr; `dynamodb:UpdateItem` added to user Lambda IAM role; user e2e test suite expanded to 53 tests (TU01–TU11) |
 | `1.4` | 2026-08-04 | Digilux Engineering | App-mediated download-link flow: Section 4.11 (`POST /api/v1/ota/my/updates/download-link`); Lambda returns pre-signed URL to Flutter app and simultaneously publishes download payload to device MQTT OTA topic; Section 5.3 (flow comparison table: consent vs download-link); new Lambda `digilux_ota_user_get_download_link`; IAM `iot:Publish` permission on `iot/device/*/ota` |

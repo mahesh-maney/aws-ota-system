@@ -23,7 +23,6 @@ Security checks (in order):
   5. Device must be registered in OTA inventory
   6. Requested version must be newer than currently installed
   7. No other update already in-progress (pendingJobId must be null)
-  8. Rate limit — max 1 consent per device per RATE_LIMIT_MINUTES (default 5 min)
 """
 import datetime
 import json
@@ -427,21 +426,7 @@ def lambda_handler(event, context):
                 "pendingJobId": pending_job_id,
             })
 
-        # ── 10. Rate limit — prevent consent spam ─────────────────────────────
-        if _check_rate_limit(user_id, device_id):
-            log.warning(json.dumps({
-                "msg":      "rate_limit_exceeded",
-                "userId":   user_id,
-                "deviceId": device_id,
-            }))
-            _audit("CONSENT_RATE_LIMITED", user_id,
-                   {"deviceId": device_id, "packageName": package_name, "version": version},
-                   "FAILURE", reason="rate_limit")
-            return _resp(429, {
-                "error": f"Too many update requests. Please wait {RATE_LIMIT_MINUTES} minutes before retrying."
-            })
-
-        # ── 11. Create IoT Job ────────────────────────────────────────────────
+        # ── 10. Create IoT Job ────────────────────────────────────────────────
         consent_id = str(uuid.uuid4())
         job_id     = f"digilux-ota-{package_name}-{version}-{int(time.time())}".replace(".", "-")
 
@@ -465,7 +450,7 @@ def lambda_handler(event, context):
         iot_job_arn = _create_iot_job(pkg, package_name, version,
                                       thing_name, device_id, user_id, job_id, expiry_sec)
 
-        # ── 12. Persist records ───────────────────────────────────────────────
+        # ── 11. Persist records ───────────────────────────────────────────────
         now_ms = int(time.time() * 1000)
 
         # Consent audit record

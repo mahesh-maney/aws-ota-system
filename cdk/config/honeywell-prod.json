@@ -1,0 +1,29 @@
+{
+  "account": "HONEYWELL_AWS_ACCOUNT_ID",
+  "region": "ap-south-1",
+  "namePrefix": "honeywell",
+
+  "cognitoUserPoolId": "HONEYWELL_COGNITO_USER_POOL_ID",
+  "deviceDataTableName": "honeywell_device_data",
+
+  "artifactBucketName": "honeywell-ota-artifacts",
+  "signingSecretName": "honeywell-ota-signing-key",
+
+  "cloudfrontDomain": "HONEYWELL_CLOUDFRONT_DOMAIN",
+  "cloudfrontKeyPairId": "HONEYWELL_CLOUDFRONT_KEY_PAIR_ID",
+  "cloudfrontKeySecretName": "honeywell-ota-cloudfront-key",
+
+  "iotJobTimeoutMinutes": 1440,
+  "canaryGroup": "HW-Canary",
+  "canaryMax": 5,
+
+  "presignExpiryTiers": {
+    "tier1MaxMb": 50,  "tier1Sec": 3600,
+    "tier2MaxMb": 200, "tier2Sec": 21600,
+    "tier3MaxMb": 500, "tier3Sec": 86400,
+    "tier4Sec": 172800
+  },
+
+  "apiStageName": "prod",
+  "alertEmail": "ota-alerts@honeywell.com"
+}

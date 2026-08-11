@@ -19,13 +19,13 @@ This document describes all key flows in the Digilux OTA update system — from 
 | `digilux_ota_job_create` | Lambda | Creates IoT Jobs, lists/gets/aborts deployments |
 | `digilux_ota_compatibility_check` | Lambda | Returns available updates for a specific device |
 | `digilux_ota_status_handler` | Lambda | Receives device status via IoT Rule; updates DynamoDB |
-| `digilux_ota_device_register` | Lambda | Receives device registration on agent startup; upserts device inventory |
+| `digilux_ota_device_register` | Lambda | Receives device registration on agent startup; upserts OTA fields (`thingName`, `installedVersions`, `pendingJobId`) on `digilux_device_data` |
 | **S3** (`digilux-ota-artifacts`) | Storage | Stores firmware/app binaries |
-| **DynamoDB** | Storage | `digilux_ota_packages`, `digilux_ota_jobs`, `digilux_ota_compatibility`, `digilux_device_inventory` |
+| **DynamoDB** | Storage | `digilux_ota_packages`, `digilux_ota_jobs`, `digilux_ota_compatibility`, `digilux_device_data` (OTA fields: `installedVersions`, `pendingJobId`, `thingName`) |
 | **AWS IoT Core** | Messaging | Delivers jobs to devices over MQTT (port 8883, mTLS) |
 | **IoT Rule** `digilux_ota_status_ingest` | Rule | Topic `iot/device/+/ota/status` → `status_handler` Lambda |
 | **IoT Rule** `digilux_ota_device_register` | Rule | Topic `iot/device/+/ota/register` → `device_register` Lambda |
-| **Secrets Manager** | Security | Stores ECDSA P-256 private signing key (`digilux-ota-signing-key`) |
+| **Secrets Manager** | Security | Stores ECDSA P-256 private signing key (`digilux-ota-signing-key`) and CloudFront RSA private key (`digilux-ota-cloudfront-key`) |
 | **OTA Agent** | Device | Python service on Debian Linux controller; connects via MQTT, handles jobs |
 
 ---
@@ -202,7 +202,7 @@ Controller (OTA Agent)    IoT Core              device_register Lambda    Dynamo
 4. Agent subscribes to IoT Jobs notification topics
 5. Agent publishes a registration message to `iot/device/{thingName}/ota/register` with device metadata and installed versions
 6. IoT Rule `digilux_ota_device_register` invokes `device_register` Lambda
-7. Lambda upserts the device record in `digilux_device_inventory` (creates on first boot, updates on subsequent boots — corrects inventory after TIMED_OUT jobs)
+7. Lambda upserts OTA fields (`thingName`, `installedVersions`, `pendingJobId`) on the device record in `digilux_device_data` (creates on first boot, updates on subsequent boots — corrects installed version after TIMED_OUT jobs)
 8. Agent publishes to `jobs/$next/get` to fetch any pending jobs
 9. If a pending job exists, IoT Core delivers it immediately → **Flow 4 begins**
 
@@ -244,7 +244,7 @@ Admin            API Gateway       job_create Lambda    DynamoDB (packages/inven
   │                  │                   │     packageName, version) │                            │
   │                  │                   │  - rollout config         │                            │
   │                  │                   │  - abort config           │                            │
-  │                  │                   │  - 60-min timeout         │                            │
+  │                  │                   │  - 24-hr timeout          │                            │
   │                  │                   │───────────────────────────────────────────────────────>│
   │                  │                   │  ← { jobId, jobArn }      │                            │
   │                  │                   │                           │                            │
@@ -266,10 +266,10 @@ Admin            API Gateway       job_create Lambda    DynamoDB (packages/inven
 1. Admin calls `POST /api/v1/ota/deployments`
 2. `job_create` Lambda validates admin token and request body
 3. Lambda fetches the package from `digilux_ota_packages` — returns `404` if not found, `400` if not `ACTIVE`
-4. For `THING` target: Lambda looks up the device in `digilux_device_inventory` — returns `400` if device already has this version installed
-5. Lambda generates a pre-signed S3 `GET` URL for the artifact (1-hour expiry) — this is embedded in the IoT Job document so the device can download it
-6. Lambda calls `iot:CreateJob` with the job document, rollout config (CANARY/BETA/PRODUCTION rates), and 60-minute in-progress timeout
-7. Lambda writes a `QUEUED` record to `digilux_ota_jobs` and sets `pendingJobId` on the device inventory
+4. For `THING` target: Lambda queries `digilux_device_data` — returns `400` if device already has this version installed
+5. Lambda generates a **CloudFront signed URL** for the artifact (tiered expiry: 1hr for <50MB, 6hr for <200MB, 24hr for <500MB, 48hr for larger) and embeds it in the IoT Job document
+6. Lambda calls `iot:CreateJob` with the job document, rollout config (CANARY/BETA/PRODUCTION rates), and 24-hour in-progress timeout (`IOT_JOB_TIMEOUT_MINUTES=1440`)
+7. Lambda writes a `QUEUED` record to `digilux_ota_jobs` and sets `pendingJobId` on `digilux_device_data`
 8. Admin receives `{ jobId, status: "QUEUED" }` → **IoT Core queues the job for the device → Flow 5 begins**
 
 ### Validation errors
@@ -373,7 +373,7 @@ Controller (OTA Agent)    IoT Core (Jobs)    status_handler Lambda    DynamoDB (
 9. Agent publishes `SUCCEEDED (100%)` to both `$aws/things/{thing}/jobs/{jobId}/update` and `iot/device/{thing}/ota/status`
 10. IoT Rule `digilux_ota_status_ingest` fires → `status_handler` Lambda:
     - Updates job status to `SUCCEEDED` in `digilux_ota_jobs`
-    - Updates `installedVersions` in `digilux_device_inventory`
+    - Updates `installedVersions` in `digilux_device_data`
     - Clears `pendingJobId`
     - Emits `DEVICE_UPDATE_SUCCEEDED` audit log
 11. Agent updates Device Shadow with new versions
@@ -632,7 +632,7 @@ Admin                  IoT Core                Controller (OTA Agent)
 6. IoT Core delivers the stored job document
 7. Device proceeds with **Flow 5** (happy path)
 
-> The in-progress **60-minute timeout** only starts once the device acknowledges the job and begins execution — not from when the job was created.
+> The in-progress **24-hour timeout** (`IOT_JOB_TIMEOUT_MINUTES=1440`) only starts once the device acknowledges the job and begins execution — not from when the job was created.
 
 ---
 
@@ -699,7 +699,7 @@ Controller (OTA Agent)    IoT Core           status_handler Lambda
          │  SUCCEEDED         │                      │
          │  → fails (offline) │                      │
          │                    │                      │
-    ─────────────────── Within 60 minutes ──────────────────────
+    ─────────────────── Within 24 hours ────────────────────────
          │                    │                      │
          │  paho-mqtt         │                      │
          │  auto-reconnects   │                      │
@@ -713,7 +713,7 @@ Controller (OTA Agent)    IoT Core           status_handler Lambda
          │                    │                      │  Job → SUCCEEDED
          │                    │                      │  Inventory updated
          │                    │                      │
-    ──────── After 60 minutes (IoT Jobs timeout) ───────────────
+    ──────── After 24 hours (IoT Jobs timeout) ─────────────────
          │                    │                      │
          │  [Device reboots   │                      │
          │   or reconnects]   │                      │
@@ -735,12 +735,12 @@ Controller (OTA Agent)    IoT Core           status_handler Lambda
 
 ### Step-by-step
 
-**Scenario A — Reconnects within 60 minutes:**
+**Scenario A — Reconnects within 24 hours:**
 1. paho-mqtt library auto-reconnects
 2. Buffered `SUCCEEDED` message is published
 3. `status_handler` Lambda updates the job and inventory normally
 
-**Scenario B — Reconnects after 60 minutes (IoT Jobs timeout):**
+**Scenario B — Reconnects after 24 hours (IoT Jobs timeout):**
 1. IoT Core marks the job execution as `TIMED_OUT`
 2. On next startup or reconnect, the OTA agent publishes `ota/register` with the version it actually has on disk
 3. `device_register` Lambda upserts the inventory with the correct installed version
@@ -834,14 +834,14 @@ Key: `jobId` (hash)
 | `iotJobArn` | ARN of the AWS IoT Job |
 | `pendingJobId` | Set on device inventory when QUEUED, cleared on terminal status |
 
-### `digilux_device_inventory`
-Key: `deviceId` (hash)
+### OTA fields on `digilux_device_data`
+Key: `deviceId` (hash) + `macAddress` (range) — OTA Agent fields are attributes on the existing device record.
 
 | Field | Description |
 |---|---|
 | `installedVersions` | `{ "controller-app": "4.0.0", ... }` — source of truth |
 | `pendingJobId` | Current in-flight job, `null` if idle |
-| `thingName` | IoT Thing name (MAC-based) |
+| `thingName` | IoT Thing name (MAC-based, e.g. `digilux-94ba062a250c`) |
 | `lastSeen` / `lastUpdatedAt` | Timestamps |
 
 ### `digilux_ota_compatibility`
@@ -861,3 +861,4 @@ Key: `packageName` (hash) + `version` (range)
 | Version | Date | Changes |
 |---|---|---|
 | `1.0` | 2026-07-31 | Initial release — covers all 13 flows including package upload, device registration, deployment, happy path, failure, rollback, NEEDS_RECOVERY, abort, offline, staged rollout, reconnect recovery, and compatibility check |
+| `1.1` | 2026-08-12 | Consolidated `digilux_device_inventory` into `digilux_device_data` (OTA fields as attributes); CloudFront signed URLs replace S3 presigned URLs for artifact delivery; tiered presign expiry based on artifact size (1hr–48hr); IoT Job in-progress timeout raised from 60min to 24hr (`IOT_JOB_TIMEOUT_MINUTES=1440`) |
