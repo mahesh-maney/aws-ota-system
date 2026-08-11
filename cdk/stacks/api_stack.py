@@ -133,6 +133,6 @@ class ApiStack(cdk.Stack):
         # ── Outputs ───────────────────────────────────────────────────────────
         cdk.CfnOutput(self, "ApiUrl",
                       value=api.url,
-                      description=f"Base URL: {api.url}api/v1/ota/...")
+                      description="OTA REST API base URL")
         cdk.CfnOutput(self, "ApiId", value=api.rest_api_id)
         cdk.CfnOutput(self, "ApiStage", value=stage)

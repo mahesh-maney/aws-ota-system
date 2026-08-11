@@ -137,43 +137,47 @@ class LambdaStack(cdk.Stack):
             "LOG_LEVEL": "INFO",
         }
 
-        def make_fn(construct_id: str, name: str, role: iam.IRole) -> lambda_.Function:
+        # src_suffix: the tail of the source directory name (always digilux_ota_*)
+        # deployed_name: the actual Lambda function name (uses configurable prefix)
+        def make_fn(construct_id: str, src_suffix: str, role: iam.IRole) -> lambda_.Function:
+            deployed_name = f"{prefix}_ota_{src_suffix}"
+            src_dir_name  = f"digilux_ota_{src_suffix}"  # source always uses 'digilux' prefix
             log_group = logs.LogGroup(
                 self, f"{construct_id}LogGroup",
-                log_group_name=f"/aws/lambda/{name}",
+                log_group_name=f"/aws/lambda/{deployed_name}",
                 retention=logs.RetentionDays.ONE_MONTH,
                 removal_policy=cdk.RemovalPolicy.DESTROY,
             )
             fn = lambda_.Function(
                 self, construct_id,
-                function_name=name,
+                function_name=deployed_name,
                 runtime=lambda_.Runtime.PYTHON_3_11,
                 handler="lambda_function.lambda_handler",
-                code=_make_code(name),
+                code=_make_code(src_dir_name),
                 role=role,
                 timeout=cdk.Duration.seconds(30),
                 memory_size=256,
                 tracing=lambda_.Tracing.ACTIVE,
                 environment=common_env,
                 log_group=log_group,
-                description=f"{prefix.capitalize()} OTA — {name}",
+                description=f"{prefix.capitalize()} OTA — {deployed_name}",
             )
             return fn
 
         # ── Admin Lambdas ─────────────────────────────────────────────────────
-        self.upload_url      = make_fn("UploadUrl",      f"{prefix}_ota_upload_url",          iam_stack.admin_role)
-        self.artifact_proc   = make_fn("ArtifactProc",   f"{prefix}_ota_artifact_processor",  iam_stack.admin_role)
-        self.pkg_register    = make_fn("PkgRegister",    f"{prefix}_ota_package_register",    iam_stack.admin_role)
-        self.compat_check    = make_fn("CompatCheck",    f"{prefix}_ota_compatibility_check", iam_stack.admin_role)
-        self.job_create      = make_fn("JobCreate",      f"{prefix}_ota_job_create",          iam_stack.admin_role)
-        self.status_handler  = make_fn("StatusHandler",  f"{prefix}_ota_status_handler",      iam_stack.admin_role)
-        self.device_register = make_fn("DeviceRegister", f"{prefix}_ota_device_register",     iam_stack.admin_role)
+        self.upload_url      = make_fn("UploadUrl",      "upload_url",          iam_stack.admin_role)
+        self.artifact_proc   = make_fn("ArtifactProc",   "artifact_processor",  iam_stack.admin_role)
+        self.pkg_register    = make_fn("PkgRegister",    "package_register",    iam_stack.admin_role)
+        self.compat_check    = make_fn("CompatCheck",    "compatibility_check", iam_stack.admin_role)
+        self.job_create      = make_fn("JobCreate",      "job_create",          iam_stack.admin_role)
+        self.status_handler  = make_fn("StatusHandler",  "status_handler",      iam_stack.admin_role)
+        self.device_register = make_fn("DeviceRegister", "device_register",     iam_stack.admin_role)
 
         # ── User Lambdas ──────────────────────────────────────────────────────
-        self.check_updates   = make_fn("CheckUpdates",   f"{prefix}_ota_user_check_updates",      iam_stack.user_role)
-        self.consent         = make_fn("Consent",        f"{prefix}_ota_user_consent",             iam_stack.user_role)
-        self.update_status   = make_fn("UpdateStatus",   f"{prefix}_ota_user_update_status",       iam_stack.user_role)
-        self.download_link   = make_fn("DownloadLink",   f"{prefix}_ota_user_get_download_link",   iam_stack.user_role)
+        self.check_updates   = make_fn("CheckUpdates",   "user_check_updates",      iam_stack.user_role)
+        self.consent         = make_fn("Consent",        "user_consent",             iam_stack.user_role)
+        self.update_status   = make_fn("UpdateStatus",   "user_update_status",       iam_stack.user_role)
+        self.download_link   = make_fn("DownloadLink",   "user_get_download_link",   iam_stack.user_role)
 
         # ── IoT Topic Rules ───────────────────────────────────────────────────
         rule_log_group = logs.LogGroup(

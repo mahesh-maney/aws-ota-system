@@ -26,3 +26,10 @@ infrastructure/06_lambdas/*/package/
 *.env
 secrets.json
 credentials.json
+
+# CDK synthesized output (generated, never commit)
+cdk/cdk.out/
+cdk/outputs-*.json
+
+# CDK test configs (contain real account IDs)
+cdk/config/digilux-test.json
