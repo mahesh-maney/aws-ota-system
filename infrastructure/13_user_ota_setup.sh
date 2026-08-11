@@ -151,15 +151,6 @@ POLICY_DOC=$(cat <<EOF
       ]
     },
     {
-      "Sid": "InventoryReadWrite",
-      "Effect": "Allow",
-      "Action": [
-        "dynamodb:GetItem",
-        "dynamodb:UpdateItem"
-      ],
-      "Resource": "arn:aws:dynamodb:${REGION}:${ACCOUNT_ID}:table/digilux_device_inventory"
-    },
-    {
       "Sid": "PackagesRead",
       "Effect": "Allow",
       "Action": [
@@ -427,12 +418,12 @@ echo "  /api/v1/ota resource ID: ${OTA_RESOURCE_ID}"
 MY_ID=$(get_or_create_resource "${OTA_RESOURCE_ID}" "my")
 echo "  /api/v1/ota/my → ${MY_ID}"
 
-# /api/v1/ota/my/updates
+# /api/v1/ota/my/updates  (parent resource for consent, download-link, status)
 UPDATES_ID=$(get_or_create_resource "${MY_ID}" "updates")
 echo "  /api/v1/ota/my/updates → ${UPDATES_ID}"
 
-# GET /api/v1/ota/my/updates  → digilux_ota_user_check_updates
-add_method "${UPDATES_ID}" "GET" "digilux_ota_user_check_updates" "COGNITO_USER_POOLS"
+# NOTE: GET /api/v1/ota/my/updates was renamed to GET /api/v1/ota/device/available-updates
+# That route is managed by the device resource block below — do NOT add GET here.
 
 # POST /api/v1/ota/my/updates/consent  → digilux_ota_user_consent
 CONSENT_ID=$(get_or_create_resource "${UPDATES_ID}" "consent")
@@ -455,6 +446,15 @@ DOWNLOAD_LINK_ID=$(get_or_create_resource "${UPDATES_ID}" "download-link")
 echo "  /api/v1/ota/my/updates/download-link → ${DOWNLOAD_LINK_ID}"
 add_method "${DOWNLOAD_LINK_ID}" "POST" "digilux_ota_user_get_download_link" "COGNITO_USER_POOLS"
 
+# /api/v1/ota/device  (already created for available-updates)
+DEVICE_ID=$(get_or_create_resource "${OTA_RESOURCE_ID}" "device")
+echo "  /api/v1/ota/device → ${DEVICE_ID}"
+
+# GET /api/v1/ota/device/available-updates  → digilux_ota_user_check_updates
+AVAIL_ID=$(get_or_create_resource "${DEVICE_ID}" "available-updates")
+echo "  /api/v1/ota/device/available-updates → ${AVAIL_ID}"
+add_method "${AVAIL_ID}" "GET" "digilux_ota_user_check_updates" "COGNITO_USER_POOLS"
+
 # ─────────────────────────────────────────────────────────────────────────────
 # STEP 6 — Deploy API stage
 # ─────────────────────────────────────────────────────────────────────────────
@@ -473,7 +473,7 @@ echo "========================================================"
 echo "  User OTA setup complete."
 echo ""
 echo "  New endpoints:"
-echo "  GET  /api/v1/ota/my/updates"
+echo "  GET  /api/v1/ota/device/available-updates"
 echo "  POST /api/v1/ota/my/updates/consent"
 echo "  POST /api/v1/ota/my/updates/download-link"
 echo "  GET  /api/v1/ota/my/updates/{jobId}/status"
