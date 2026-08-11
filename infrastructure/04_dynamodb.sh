@@ -32,17 +32,9 @@ create_table_if_missing "digilux_ota_packages" \
    --billing-mode PAY_PER_REQUEST \
    --tags Key=Project,Value=digilux Key=Component,Value=ota"
 
-# ── digilux_device_inventory ──────────────────────────────────────────────────
-# Per-device installed version registry; also stores thingName<->deviceId mapping
-echo "==> digilux_device_inventory"
-create_table_if_missing "digilux_device_inventory" \
-  "--table-name digilux_device_inventory \
-   --attribute-definitions \
-     AttributeName=deviceId,AttributeType=S \
-   --key-schema \
-     AttributeName=deviceId,KeyType=HASH \
-   --billing-mode PAY_PER_REQUEST \
-   --tags Key=Project,Value=digilux Key=Component,Value=ota"
+# NOTE: digilux_device_inventory was consolidated into digilux_device_data.
+# OTA fields (installedVersions, pendingJobId, thingName) now live as attributes
+# on the existing device_data item (deviceId PK + macAddress SK).
 
 # ── digilux_ota_jobs ──────────────────────────────────────────────────────────
 # Job tracking: status, rollout stage, per-device progress, audit trail

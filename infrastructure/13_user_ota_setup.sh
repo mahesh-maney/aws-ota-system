@@ -50,6 +50,10 @@ PRESIGN_EXPIRY_TIER2_SEC=${PRESIGN_EXPIRY_TIER2_SEC:-21600},\
 PRESIGN_EXPIRY_TIER3_MAX_MB=${PRESIGN_EXPIRY_TIER3_MAX_MB:-500},\
 PRESIGN_EXPIRY_TIER3_SEC=${PRESIGN_EXPIRY_TIER3_SEC:-86400},\
 PRESIGN_EXPIRY_TIER4_SEC=${PRESIGN_EXPIRY_TIER4_SEC:-172800},\
+IOT_JOB_TIMEOUT_MINUTES=${IOT_JOB_TIMEOUT_MINUTES:-1440},\
+CLOUDFRONT_DOMAIN=${CLOUDFRONT_DOMAIN:-},\
+CLOUDFRONT_KEY_PAIR_ID=${CLOUDFRONT_KEY_PAIR_ID:-},\
+CLOUDFRONT_PRIVATE_KEY_SECRET=${CLOUDFRONT_PRIVATE_KEY_SECRET:-digilux-ota-cloudfront-key},\
 LOG_LEVEL=INFO"
 
 echo "========================================================"
@@ -231,6 +235,14 @@ POLICY_DOC=$(cat <<EOF
       "Resource": "arn:aws:s3:::digilux-ota-artifacts/*"
     },
     {
+      "Sid": "CloudFrontKey",
+      "Effect": "Allow",
+      "Action": [
+        "secretsmanager:GetSecretValue"
+      ],
+      "Resource": "arn:aws:secretsmanager:${REGION}:${ACCOUNT_ID}:secret:digilux-ota-cloudfront-key*"
+    },
+    {
       "Sid": "XRay",
       "Effect": "Allow",
       "Action": [
@@ -270,9 +282,24 @@ for FUNC_NAME in "${LAMBDA_NAMES[@]}"; do
   echo ""
   echo "  Packaging ${FUNC_NAME}..."
   ZIP_FILE="/tmp/${FUNC_NAME}.zip"
-  cd "${SRC_DIR}"
-  zip -qj "${ZIP_FILE}" lambda_function.py
+  PKG_TMP="/tmp/${FUNC_NAME}_pkg"
+  rm -rf "${PKG_TMP}" && mkdir -p "${PKG_TMP}"
+  cp "${SRC_DIR}/lambda_function.py" "${PKG_TMP}/"
+  # Install dependencies if requirements.txt exists
+  # Use --platform linux/x86_64 so native binaries match Lambda's runtime
+  if [[ -f "${SRC_DIR}/requirements.txt" ]]; then
+    echo "    Installing dependencies from requirements.txt (linux/x86_64)..."
+    pip install -q -r "${SRC_DIR}/requirements.txt" \
+      -t "${PKG_TMP}/" \
+      --platform manylinux2014_x86_64 \
+      --python-version 3.11 \
+      --only-binary=:all: \
+      --upgrade
+  fi
+  cd "${PKG_TMP}"
+  zip -qr "${ZIP_FILE}" .
   cd - > /dev/null
+  rm -rf "${PKG_TMP}"
 
   EXISTING=$(aws lambda get-function --function-name "${FUNC_NAME}" \
     --region "${REGION}" --query 'Configuration.FunctionName' \

@@ -60,9 +60,13 @@ import time
 
 from decimal import Decimal
 
+import base64
+
 import boto3
 from boto3.dynamodb.conditions import Key
 from botocore.exceptions import ClientError
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import padding
 
 log = logging.getLogger()
 log.setLevel(os.environ.get("LOG_LEVEL", "INFO"))
@@ -79,6 +83,13 @@ _TIER2_SEC     = int(os.environ.get("PRESIGN_EXPIRY_TIER2_SEC",    "21600"))
 _TIER3_MAX_MB  = int(os.environ.get("PRESIGN_EXPIRY_TIER3_MAX_MB", "500"))
 _TIER3_SEC     = int(os.environ.get("PRESIGN_EXPIRY_TIER3_SEC",    "86400"))
 _TIER4_SEC     = int(os.environ.get("PRESIGN_EXPIRY_TIER4_SEC",    "172800"))
+
+# CloudFront signed URL config
+CLOUDFRONT_DOMAIN             = os.environ.get("CLOUDFRONT_DOMAIN", "")
+CLOUDFRONT_KEY_PAIR_ID        = os.environ.get("CLOUDFRONT_KEY_PAIR_ID", "")
+CLOUDFRONT_PRIVATE_KEY_SECRET = os.environ.get("CLOUDFRONT_PRIVATE_KEY_SECRET", "digilux-ota-cloudfront-key")
+
+_cf_private_key_cache = None
 
 # OTA MQTT topic template — same topic the existing IoT Job agent already listens on
 OTA_MQTT_TOPIC_TEMPLATE = os.environ.get(
@@ -141,6 +152,50 @@ def _presign_expiry(artifact_size_bytes: int) -> int:
     elif size_mb <= _TIER3_MAX_MB:
         return _TIER3_SEC
     return _TIER4_SEC
+
+
+def _get_cf_private_key():
+    global _cf_private_key_cache
+    if _cf_private_key_cache:
+        return _cf_private_key_cache
+    sm = boto3.client("secretsmanager", region_name=REGION)
+    pem = sm.get_secret_value(SecretId=CLOUDFRONT_PRIVATE_KEY_SECRET)["SecretString"]
+    _cf_private_key_cache = serialization.load_pem_private_key(pem.encode(), password=None)
+    return _cf_private_key_cache
+
+
+def _cf_b64(data: bytes) -> str:
+    return base64.b64encode(data).decode().replace("+", "-").replace("=", "_").replace("/", "~")
+
+
+def _cloudfront_signed_url(s3_key: str, expiry_sec: int) -> str | None:
+    if not CLOUDFRONT_DOMAIN or not CLOUDFRONT_KEY_PAIR_ID:
+        return None
+    expire_epoch = int(time.time()) + expiry_sec
+    resource_url = f"https://{CLOUDFRONT_DOMAIN}/{s3_key}"
+    policy = json.dumps(
+        {"Statement": [{"Resource": resource_url, "Condition": {"DateLessThan": {"AWS:EpochTime": expire_epoch}}}]},
+        separators=(",", ":"),
+    )
+    private_key = _get_cf_private_key()
+    signature = private_key.sign(policy.encode(), padding.PKCS1v15(), hashes.SHA1())
+    return (
+        f"{resource_url}"
+        f"?Policy={_cf_b64(policy.encode())}"
+        f"&Signature={_cf_b64(signature)}"
+        f"&Key-Pair-Id={CLOUDFRONT_KEY_PAIR_ID}"
+    )
+
+
+def _get_artifact_url(pkg: dict, expiry_sec: int) -> str:
+    cf_url = _cloudfront_signed_url(pkg["s3Key"], expiry_sec)
+    if cf_url:
+        return cf_url
+    return s3.generate_presigned_url(
+        "get_object",
+        Params={"Bucket": pkg["s3Bucket"], "Key": pkg["s3Key"]},
+        ExpiresIn=expiry_sec,
+    )
 
 
 def _audit(event: str, actor: str, resource: dict, result: str, **extra) -> None:
@@ -284,11 +339,7 @@ def lambda_handler(event, context):
         expiry_sec = _presign_expiry(artifact_size)
         log.info(f"Presign expiry for {package_name}@{version} ({artifact_size} bytes): {expiry_sec}s")
 
-        presigned_url = s3.generate_presigned_url(
-            "get_object",
-            Params={"Bucket": pkg["s3Bucket"], "Key": pkg["s3Key"]},
-            ExpiresIn=expiry_sec,
-        )
+        presigned_url = _get_artifact_url(pkg, expiry_sec)
         expires_at = (
             datetime.datetime.utcnow() + datetime.timedelta(seconds=expiry_sec)
         ).strftime("%Y-%m-%dT%H:%M:%SZ")

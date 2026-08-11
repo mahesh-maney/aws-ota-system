@@ -8,6 +8,15 @@ BASE=$(cat /tmp/ota_base_url.txt)
 REGION="ap-south-1"
 DEVICE_ID="edb39bba-baf1-4700-968c-a42228e53aa0"
 
+# Fetch the macAddress (sort key) for the test device once — needed for UpdateItem
+# on digilux_device_data which has composite key (deviceId + macAddress).
+DEVICE_MAC=$(aws dynamodb query \
+  --table-name digilux_device_data \
+  --key-condition-expression "deviceId = :d" \
+  --expression-attribute-values "{\":d\":{\"S\":\"${DEVICE_ID}\"}}" \
+  --region "$REGION" \
+  --query 'Items[0].macAddress.S' --output text 2>/dev/null)
+
 PASS=0; FAIL=0; WARN=0
 FAILED_TESTS=()
 
@@ -294,22 +303,24 @@ if [ "$JOB_ID" != "NOJOB" ]; then
     && _pass "Job status updated to SUCCEEDED in DynamoDB" \
     || _fail "Job status not updated — got: $JOB_STATUS"
 
-  # Verify installed version updated in inventory
-  INV_VER=$(aws dynamodb get-item \
-    --table-name digilux_device_inventory \
-    --key "{\"deviceId\":{\"S\":\"${DEVICE_ID}\"}}" \
+  # Verify installed version updated in device_data
+  INV_VER=$(aws dynamodb query \
+    --table-name digilux_device_data \
+    --key-condition-expression "deviceId = :d" \
+    --expression-attribute-values "{\":d\":{\"S\":\"${DEVICE_ID}\"}}" \
     --region "$REGION" \
-    --query "Item.installedVersions.M.\"controller-app\".S" --output text 2>/dev/null)
+    --query "Items[0].installedVersions.M.\"controller-app\".S" --output text 2>/dev/null)
   [ "$INV_VER" = "$TEST_VERSION" ] \
-    && _pass "Device inventory updated: controller-app=$INV_VER" \
-    || _fail "Inventory not updated — got controller-app=$INV_VER, expected $TEST_VERSION"
+    && _pass "Device data updated: controller-app=$INV_VER" \
+    || _fail "installedVersions not updated — got controller-app=$INV_VER, expected $TEST_VERSION"
 
   # Verify pendingJobId cleared
-  PENDING=$(aws dynamodb get-item \
-    --table-name digilux_device_inventory \
-    --key "{\"deviceId\":{\"S\":\"${DEVICE_ID}\"}}" \
+  PENDING=$(aws dynamodb query \
+    --table-name digilux_device_data \
+    --key-condition-expression "deviceId = :d" \
+    --expression-attribute-values "{\":d\":{\"S\":\"${DEVICE_ID}\"}}" \
     --region "$REGION" \
-    --query 'Item.pendingJobId' --output text 2>/dev/null)
+    --query 'Items[0].pendingJobId' --output text 2>/dev/null)
   [ "$PENDING" = "None" ] || [ -z "$PENDING" ] || [ "$PENDING" = "True" ] \
     && _pass "pendingJobId cleared after SUCCEEDED" \
     || _warn "pendingJobId not cleared: $PENDING"
@@ -322,10 +333,10 @@ _section "T11 — SIMULATE FAILED UPDATE (with rollback detail)"
 # ─────────────────────────────────────────────────────────────────────────────
 
 # Create a second deployment of an earlier version
-# First reset the device inventory version so we can create a new job
+# First reset the device data version so we can create a new job
 aws dynamodb update-item \
-  --table-name digilux_device_inventory \
-  --key "{\"deviceId\":{\"S\":\"${DEVICE_ID}\"}}" \
+  --table-name digilux_device_data \
+  --key "{\"deviceId\":{\"S\":\"${DEVICE_ID}\"},\"macAddress\":{\"S\":\"${DEVICE_MAC}\"}}" \
   --update-expression "SET installedVersions.#pkg = :v" \
   --expression-attribute-names '{"#pkg":"controller-app"}' \
   --expression-attribute-values "{\":v\":{\"S\":\"3.0.0\"}}" \
@@ -359,10 +370,11 @@ if [ -n "$FAIL_JOB_ID" ] && [ "$FAIL_JOB_ID" != "None" ]; then
     || _fail "Job status not FAILED — got: $FAIL_STATUS"
 
   # pendingJobId should be cleared even on FAILED
-  PENDING=$(aws dynamodb get-item \
-    --table-name digilux_device_inventory \
-    --key "{\"deviceId\":{\"S\":\"${DEVICE_ID}\"}}" \
-    --region "$REGION" --query 'Item.pendingJobId' --output text 2>/dev/null)
+  PENDING=$(aws dynamodb query \
+    --table-name digilux_device_data \
+    --key-condition-expression "deviceId = :d" \
+    --expression-attribute-values "{\":d\":{\"S\":\"${DEVICE_ID}\"}}" \
+    --region "$REGION" --query 'Items[0].pendingJobId' --output text 2>/dev/null)
   [ "$PENDING" = "None" ] || [ -z "$PENDING" ] || [ "$PENDING" = "True" ] \
     && _pass "pendingJobId cleared after FAILED (device can accept next job)" \
     || _warn "pendingJobId not cleared after FAILED: $PENDING"
@@ -376,8 +388,8 @@ _section "T12 — ABORT FLOW"
 
 # Reset device version and create a new job to abort
 aws dynamodb update-item \
-  --table-name digilux_device_inventory \
-  --key "{\"deviceId\":{\"S\":\"${DEVICE_ID}\"}}" \
+  --table-name digilux_device_data \
+  --key "{\"deviceId\":{\"S\":\"${DEVICE_ID}\"},\"macAddress\":{\"S\":\"${DEVICE_MAC}\"}}" \
   --update-expression "SET installedVersions.#pkg = :v" \
   --expression-attribute-names '{"#pkg":"controller-app"}' \
   --expression-attribute-values "{\":v\":{\"S\":\"2.0.0\"}}" \
@@ -431,7 +443,7 @@ _section "T14 — DYNAMODB CONSISTENCY"
 # ─────────────────────────────────────────────────────────────────────────────
 
 # Verify all 4 tables exist and have records
-for TABLE in digilux_ota_packages digilux_device_inventory digilux_ota_jobs digilux_ota_compatibility; do
+for TABLE in digilux_ota_packages digilux_device_data digilux_ota_jobs digilux_ota_compatibility; do
   COUNT=$(aws dynamodb scan --table-name "$TABLE" --region "$REGION" \
     --select COUNT --query 'Count' --output text 2>/dev/null)
   [ "$COUNT" -gt 0 ] && _pass "Table $TABLE has $COUNT records" || _warn "Table $TABLE is empty"

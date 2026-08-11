@@ -57,8 +57,8 @@ aws iam put-role-policy \
         ],
         \"Resource\": [
           \"arn:aws:dynamodb:$REGION:$ACCOUNT_ID:table/digilux_ota_*\",
-          \"arn:aws:dynamodb:$REGION:$ACCOUNT_ID:table/digilux_device_inventory\",
-          \"arn:aws:dynamodb:$REGION:$ACCOUNT_ID:table/digilux_device_data\"
+          \"arn:aws:dynamodb:$REGION:$ACCOUNT_ID:table/digilux_device_data\",
+          \"arn:aws:dynamodb:$REGION:$ACCOUNT_ID:table/digilux_device_data/index/*\"
         ]
       },
       {

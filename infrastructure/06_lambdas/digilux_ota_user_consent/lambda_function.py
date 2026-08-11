@@ -34,9 +34,14 @@ import time
 import uuid
 from decimal import Decimal
 
+import base64
+import urllib.parse
+
 import boto3
 from boto3.dynamodb.conditions import Key
 from botocore.exceptions import ClientError
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import padding
 
 log = logging.getLogger()
 log.setLevel(os.environ.get("LOG_LEVEL", "INFO"))
@@ -58,6 +63,17 @@ _TIER2_SEC     = int(os.environ.get("PRESIGN_EXPIRY_TIER2_SEC",    "21600"))
 _TIER3_MAX_MB  = int(os.environ.get("PRESIGN_EXPIRY_TIER3_MAX_MB", "500"))
 _TIER3_SEC     = int(os.environ.get("PRESIGN_EXPIRY_TIER3_SEC",    "86400"))
 _TIER4_SEC     = int(os.environ.get("PRESIGN_EXPIRY_TIER4_SEC",    "172800"))
+
+# IoT Job in-progress timeout — configurable via ota.config / Lambda env vars
+IOT_JOB_TIMEOUT_MINUTES = int(os.environ.get("IOT_JOB_TIMEOUT_MINUTES", "1440"))  # 24hr default
+
+# CloudFront signed URL config
+CLOUDFRONT_DOMAIN             = os.environ.get("CLOUDFRONT_DOMAIN", "")
+CLOUDFRONT_KEY_PAIR_ID        = os.environ.get("CLOUDFRONT_KEY_PAIR_ID", "")
+CLOUDFRONT_PRIVATE_KEY_SECRET = os.environ.get("CLOUDFRONT_PRIVATE_KEY_SECRET", "digilux-ota-cloudfront-key")
+
+# Cache private key across Lambda invocations (avoid Secrets Manager call every request)
+_cf_private_key_cache = None
 
 CONSENTS_USER_INDEX = os.environ.get("CONSENTS_USER_INDEX", "userId-deviceId-index")
 
@@ -119,6 +135,65 @@ def _presign_expiry(artifact_size_bytes: int) -> int:
     elif size_mb <= _TIER3_MAX_MB:
         return _TIER3_SEC
     return _TIER4_SEC
+
+
+def _get_cf_private_key():
+    """Load and cache CloudFront RSA private key from Secrets Manager."""
+    global _cf_private_key_cache
+    if _cf_private_key_cache:
+        return _cf_private_key_cache
+    sm = boto3.client("secretsmanager", region_name=REGION)
+    pem = sm.get_secret_value(SecretId=CLOUDFRONT_PRIVATE_KEY_SECRET)["SecretString"]
+    _cf_private_key_cache = serialization.load_pem_private_key(pem.encode(), password=None)
+    return _cf_private_key_cache
+
+
+def _cf_b64(data: bytes) -> str:
+    """CloudFront-safe base64: replace +/= with -/~/_ per CloudFront spec."""
+    return base64.b64encode(data).decode().replace("+", "-").replace("=", "_").replace("/", "~")
+
+
+def _cloudfront_signed_url(s3_key: str, expiry_sec: int) -> str:
+    """
+    Generate a CloudFront signed URL for the given S3 key.
+    Falls back to S3 pre-signed URL if CloudFront is not configured.
+    """
+    if not CLOUDFRONT_DOMAIN or not CLOUDFRONT_KEY_PAIR_ID:
+        log.warning("CloudFront not configured — falling back to S3 pre-signed URL")
+        return None
+
+    expire_epoch = int(time.time()) + expiry_sec
+    resource_url = f"https://{CLOUDFRONT_DOMAIN}/{s3_key}"
+
+    policy = json.dumps({
+        "Statement": [{
+            "Resource": resource_url,
+            "Condition": {"DateLessThan": {"AWS:EpochTime": expire_epoch}},
+        }]
+    }, separators=(",", ":"))
+
+    private_key = _get_cf_private_key()
+    signature   = private_key.sign(policy.encode(), padding.PKCS1v15(), hashes.SHA1())
+
+    signed = (
+        f"{resource_url}"
+        f"?Policy={_cf_b64(policy.encode())}"
+        f"&Signature={_cf_b64(signature)}"
+        f"&Key-Pair-Id={CLOUDFRONT_KEY_PAIR_ID}"
+    )
+    return signed
+
+
+def _get_artifact_url(pkg: dict, expiry_sec: int) -> str:
+    """Return CloudFront signed URL if configured, else S3 pre-signed URL."""
+    cf_url = _cloudfront_signed_url(pkg["s3Key"], expiry_sec)
+    if cf_url:
+        return cf_url
+    return s3.generate_presigned_url(
+        "get_object",
+        Params={"Bucket": pkg["s3Bucket"], "Key": pkg["s3Key"]},
+        ExpiresIn=expiry_sec,
+    )
 
 
 def _audit(event: str, actor: str, resource: dict, result: str, **extra) -> None:
@@ -197,12 +272,8 @@ def _write_consent(consent_id: str, user_id: str, device_id: str,
 def _create_iot_job(pkg: dict, package_name: str, version: str,
                     thing_name: str, device_id: str,
                     user_id: str, job_id: str, expiry_sec: int) -> str:
-    presigned_url = s3.generate_presigned_url(
-        "get_object",
-        Params={"Bucket": pkg["s3Bucket"], "Key": pkg["s3Key"]},
-        ExpiresIn=expiry_sec,
-    )
-    log.info(f"Pre-signed GET URL generated for {package_name}@{version}, expires in {expiry_sec}s")
+    presigned_url = _get_artifact_url(pkg, expiry_sec)
+    log.info(f"Artifact URL generated for {package_name}@{version}, expires in {expiry_sec}s")
 
     artifact_size = pkg.get("artifactSize", 0)
     if isinstance(artifact_size, Decimal):
@@ -232,7 +303,7 @@ def _create_iot_job(pkg: dict, package_name: str, version: str,
         description=f"User-initiated update: {package_name} to {version}",
         # Single device — simple rollout, no abort criteria
         jobExecutionsRolloutConfig={"maximumPerMinute": 1},
-        timeoutConfig={"inProgressTimeoutInMinutes": 60},
+        timeoutConfig={"inProgressTimeoutInMinutes": IOT_JOB_TIMEOUT_MINUTES},
         tags=[
             {"Key": "Project",      "Value": "digilux"},
             {"Key": "Component",    "Value": "ota"},
