@@ -47,9 +47,17 @@ DEVICE_DATA_TABLE   = os.environ.get("DEVICE_DATA_TABLE",   "digilux_device_data
 PACKAGES_TABLE      = os.environ.get("PACKAGES_TABLE",       "digilux_ota_packages")
 OTA_JOBS_TABLE      = os.environ.get("OTA_JOBS_TABLE",       "digilux_ota_jobs")
 CONSENTS_TABLE      = os.environ.get("CONSENTS_TABLE",       "digilux_ota_user_consents")
-ARTIFACT_BUCKET     = os.environ.get("ARTIFACT_BUCKET",      "digilux-ota-artifacts")
-PRESIGN_EXPIRY_SEC  = int(os.environ.get("PRESIGN_EXPIRY_SEC", "3600"))
-RATE_LIMIT_MINUTES  = int(os.environ.get("RATE_LIMIT_MINUTES", "5"))
+ARTIFACT_BUCKET    = os.environ.get("ARTIFACT_BUCKET",    "digilux-ota-artifacts")
+RATE_LIMIT_MINUTES = int(os.environ.get("RATE_LIMIT_MINUTES", "5"))
+
+# Pre-signed URL expiry tiers — configured via ota.env / Lambda env vars
+_TIER1_MAX_MB  = int(os.environ.get("PRESIGN_EXPIRY_TIER1_MAX_MB", "50"))
+_TIER1_SEC     = int(os.environ.get("PRESIGN_EXPIRY_TIER1_SEC",    "3600"))
+_TIER2_MAX_MB  = int(os.environ.get("PRESIGN_EXPIRY_TIER2_MAX_MB", "200"))
+_TIER2_SEC     = int(os.environ.get("PRESIGN_EXPIRY_TIER2_SEC",    "21600"))
+_TIER3_MAX_MB  = int(os.environ.get("PRESIGN_EXPIRY_TIER3_MAX_MB", "500"))
+_TIER3_SEC     = int(os.environ.get("PRESIGN_EXPIRY_TIER3_SEC",    "86400"))
+_TIER4_SEC     = int(os.environ.get("PRESIGN_EXPIRY_TIER4_SEC",    "172800"))
 
 CONSENTS_USER_INDEX = os.environ.get("CONSENTS_USER_INDEX", "userId-deviceId-index")
 
@@ -99,6 +107,18 @@ def _version_tuple(v: str):
 
 def _is_newer(candidate: str, installed: str) -> bool:
     return _version_tuple(candidate) > _version_tuple(installed)
+
+
+def _presign_expiry(artifact_size_bytes: int) -> int:
+    """Return pre-signed URL TTL in seconds based on artifact size tiers."""
+    size_mb = artifact_size_bytes / (1024 * 1024)
+    if size_mb <= _TIER1_MAX_MB:
+        return _TIER1_SEC
+    elif size_mb <= _TIER2_MAX_MB:
+        return _TIER2_SEC
+    elif size_mb <= _TIER3_MAX_MB:
+        return _TIER3_SEC
+    return _TIER4_SEC
 
 
 def _audit(event: str, actor: str, resource: dict, result: str, **extra) -> None:
@@ -176,13 +196,13 @@ def _write_consent(consent_id: str, user_id: str, device_id: str,
 
 def _create_iot_job(pkg: dict, package_name: str, version: str,
                     thing_name: str, device_id: str,
-                    user_id: str, job_id: str) -> str:
+                    user_id: str, job_id: str, expiry_sec: int) -> str:
     presigned_url = s3.generate_presigned_url(
         "get_object",
         Params={"Bucket": pkg["s3Bucket"], "Key": pkg["s3Key"]},
-        ExpiresIn=PRESIGN_EXPIRY_SEC,
+        ExpiresIn=expiry_sec,
     )
-    log.info(f"Pre-signed GET URL generated for {package_name}@{version}, expires in {PRESIGN_EXPIRY_SEC}s")
+    log.info(f"Pre-signed GET URL generated for {package_name}@{version}, expires in {expiry_sec}s")
 
     artifact_size = pkg.get("artifactSize", 0)
     if isinstance(artifact_size, Decimal):
@@ -365,8 +385,14 @@ def lambda_handler(event, context):
             "thingName":   thing_name,
         }))
 
+        artifact_size_pre = pkg.get("artifactSize", 0)
+        if isinstance(artifact_size_pre, Decimal):
+            artifact_size_pre = int(artifact_size_pre)
+        expiry_sec = _presign_expiry(artifact_size_pre)
+        log.info(f"Presign expiry for {package_name}@{version} ({artifact_size_pre} bytes): {expiry_sec}s")
+
         iot_job_arn = _create_iot_job(pkg, package_name, version,
-                                      thing_name, device_id, user_id, job_id)
+                                      thing_name, device_id, user_id, job_id, expiry_sec)
 
         # ── 12. Persist records ───────────────────────────────────────────────
         now_ms = int(time.time() * 1000)

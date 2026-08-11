@@ -71,7 +71,14 @@ REGION             = os.environ["REGION"]
 DEVICE_DATA_TABLE  = os.environ.get("DEVICE_DATA_TABLE",  "digilux_device_data")
 PACKAGES_TABLE     = os.environ.get("PACKAGES_TABLE",      "digilux_ota_packages")
 ARTIFACT_BUCKET    = os.environ.get("ARTIFACT_BUCKET",     "digilux-ota-artifacts")
-PRESIGN_EXPIRY_SEC = int(os.environ.get("PRESIGN_EXPIRY_SEC", "3600"))
+# Pre-signed URL expiry tiers — configured via ota.env / Lambda env vars
+_TIER1_MAX_MB  = int(os.environ.get("PRESIGN_EXPIRY_TIER1_MAX_MB", "50"))
+_TIER1_SEC     = int(os.environ.get("PRESIGN_EXPIRY_TIER1_SEC",    "3600"))
+_TIER2_MAX_MB  = int(os.environ.get("PRESIGN_EXPIRY_TIER2_MAX_MB", "200"))
+_TIER2_SEC     = int(os.environ.get("PRESIGN_EXPIRY_TIER2_SEC",    "21600"))
+_TIER3_MAX_MB  = int(os.environ.get("PRESIGN_EXPIRY_TIER3_MAX_MB", "500"))
+_TIER3_SEC     = int(os.environ.get("PRESIGN_EXPIRY_TIER3_SEC",    "86400"))
+_TIER4_SEC     = int(os.environ.get("PRESIGN_EXPIRY_TIER4_SEC",    "172800"))
 
 # OTA MQTT topic template — same topic the existing IoT Job agent already listens on
 OTA_MQTT_TOPIC_TEMPLATE = os.environ.get(
@@ -122,6 +129,18 @@ def _version_tuple(v: str):
 
 def _is_newer(candidate: str, installed: str) -> bool:
     return _version_tuple(candidate) > _version_tuple(installed)
+
+
+def _presign_expiry(artifact_size_bytes: int) -> int:
+    """Return pre-signed URL TTL in seconds based on artifact size tiers."""
+    size_mb = artifact_size_bytes / (1024 * 1024)
+    if size_mb <= _TIER1_MAX_MB:
+        return _TIER1_SEC
+    elif size_mb <= _TIER2_MAX_MB:
+        return _TIER2_SEC
+    elif size_mb <= _TIER3_MAX_MB:
+        return _TIER3_SEC
+    return _TIER4_SEC
 
 
 def _audit(event: str, actor: str, resource: dict, result: str, **extra) -> None:
@@ -262,18 +281,21 @@ def lambda_handler(event, context):
         if isinstance(artifact_size, Decimal):
             artifact_size = int(artifact_size)
 
+        expiry_sec = _presign_expiry(artifact_size)
+        log.info(f"Presign expiry for {package_name}@{version} ({artifact_size} bytes): {expiry_sec}s")
+
         presigned_url = s3.generate_presigned_url(
             "get_object",
             Params={"Bucket": pkg["s3Bucket"], "Key": pkg["s3Key"]},
-            ExpiresIn=PRESIGN_EXPIRY_SEC,
+            ExpiresIn=expiry_sec,
         )
         expires_at = (
-            datetime.datetime.utcnow() + datetime.timedelta(seconds=PRESIGN_EXPIRY_SEC)
+            datetime.datetime.utcnow() + datetime.timedelta(seconds=expiry_sec)
         ).strftime("%Y-%m-%dT%H:%M:%SZ")
 
         log.info(
             f"Pre-signed URL generated for {package_name}@{version}, "
-            f"expires in {PRESIGN_EXPIRY_SEC}s"
+            f"expires in {expiry_sec}s"
         )
 
         # ── 11. Build MQTT payload ────────────────────────────────────────────

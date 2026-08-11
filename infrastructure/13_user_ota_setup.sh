@@ -13,6 +13,16 @@ API_ID="ds6nxf8ac5"          # existing API Gateway ID
 STAGE="smarthome"
 AUTHORIZER_ID="fp1yfy"       # existing Cognito authorizer
 
+# Load configurable values from ota.env
+ENV_FILE="$(dirname "$0")/ota.config"
+if [[ -f "${ENV_FILE}" ]]; then
+  # shellcheck source=infrastructure/ota.env
+  source "${ENV_FILE}"
+  echo "Loaded config from ${ENV_FILE}"
+else
+  echo "WARNING: ${ENV_FILE} not found — using Lambda defaults"
+fi
+
 LAMBDA_ROLE_NAME="digilux-ota-user-lambda-role"
 CONSENTS_TABLE="digilux_ota_user_consents"
 
@@ -29,11 +39,17 @@ PACKAGES_TABLE=digilux_ota_packages,\
 OTA_JOBS_TABLE=digilux_ota_jobs,\
 CONSENTS_TABLE=${CONSENTS_TABLE},\
 ARTIFACT_BUCKET=digilux-ota-artifacts,\
-PRESIGN_EXPIRY_SEC=3600,\
 RATE_LIMIT_MINUTES=5,\
 DEVICE_DATA_USER_INDEX=userId-index,\
 CONSENTS_USER_INDEX=userId-deviceId-index,\
 CONSENTS_JOB_INDEX=jobId-index,\
+PRESIGN_EXPIRY_TIER1_MAX_MB=${PRESIGN_EXPIRY_TIER1_MAX_MB:-50},\
+PRESIGN_EXPIRY_TIER1_SEC=${PRESIGN_EXPIRY_TIER1_SEC:-3600},\
+PRESIGN_EXPIRY_TIER2_MAX_MB=${PRESIGN_EXPIRY_TIER2_MAX_MB:-200},\
+PRESIGN_EXPIRY_TIER2_SEC=${PRESIGN_EXPIRY_TIER2_SEC:-21600},\
+PRESIGN_EXPIRY_TIER3_MAX_MB=${PRESIGN_EXPIRY_TIER3_MAX_MB:-500},\
+PRESIGN_EXPIRY_TIER3_SEC=${PRESIGN_EXPIRY_TIER3_SEC:-86400},\
+PRESIGN_EXPIRY_TIER4_SEC=${PRESIGN_EXPIRY_TIER4_SEC:-172800},\
 LOG_LEVEL=INFO"
 
 echo "========================================================"
