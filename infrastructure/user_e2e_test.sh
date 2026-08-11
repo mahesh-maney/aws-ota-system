@@ -9,7 +9,17 @@ DEVICE_ID="edb39bba-baf1-4700-968c-a42228e53aa0"
 PACKAGE_NAME="controller-app"
 VERSION="4.0.0"
 REGION="ap-south-1"
+CLOUDFRONT_DOMAIN="d2lr14tk4wqz8z.cloudfront.net"
 PASS=0; FAIL=0; SKIP=0
+
+# Fetch macAddress once — needed for composite-key UpdateItem on digilux_device_data
+DEVICE_MAC=$(aws dynamodb query \
+  --table-name digilux_device_data \
+  --key-condition-expression "deviceId = :d" \
+  --expression-attribute-values "{\":d\":{\"S\":\"${DEVICE_ID}\"}}" \
+  --region "$REGION" \
+  --query 'Items[0].macAddress.S' --output text 2>/dev/null)
+echo "  [SETUP] Device macAddress resolved"
 
 _pass() { echo "  [PASS] $1"; PASS=$((PASS + 1)); }
 _fail() { echo "  [FAIL] $1"; FAIL=$((FAIL + 1)); }
@@ -28,8 +38,8 @@ _expect_one_of() {
 }
 
 _reset_device() {
-  aws dynamodb update-item --table-name digilux_device_inventory \
-    --key "{\"deviceId\":{\"S\":\"${DEVICE_ID}\"}}" \
+  aws dynamodb update-item --table-name digilux_device_data \
+    --key "{\"deviceId\":{\"S\":\"${DEVICE_ID}\"},\"macAddress\":{\"S\":\"${DEVICE_MAC}\"}}" \
     --update-expression "SET pendingJobId = :null, installedVersions.#pkg = :v, lastUpdatedAt = :ts" \
     --expression-attribute-names '{"#pkg":"controller-app"}' \
     --expression-attribute-values "{\":null\":{\"NULL\":true},\":v\":{\"S\":\"2.0.0\"},\":ts\":{\"N\":\"$(date +%s)000\"}}" \
@@ -37,10 +47,39 @@ _reset_device() {
   echo "  [RESET] Device → controller-app@2.0.0, pendingJobId=null"
 }
 
+_clear_rate_limit() {
+  # Delete recent consent records for this user+device so the 5-minute rate
+  # limiter does not block subsequent consent test sections.
+  # The rate limit uses a GSI query on (userId, deviceId) with consentedAt.
+  local USER_ID
+  USER_ID=$(python3 -c "
+import base64, json
+tok = '$TOKEN'
+part = tok.split('.')[1]
+part += '=' * (-len(part) % 4)
+print(json.loads(base64.b64decode(part))['sub'])
+" 2>/dev/null)
+
+  # Find all recent consent records for this user+device
+  ITEMS=$(aws dynamodb query --table-name digilux_ota_user_consents \
+    --index-name userId-deviceId-index \
+    --key-condition-expression "userId = :u AND deviceId = :d" \
+    --expression-attribute-values "{\":u\":{\"S\":\"${USER_ID}\"},\":d\":{\"S\":\"${DEVICE_ID}\"}}" \
+    --region "$REGION" \
+    --query 'Items[*].consentId.S' --output text 2>/dev/null)
+
+  for CONSENT_ID in $ITEMS; do
+    aws dynamodb delete-item --table-name digilux_ota_user_consents \
+      --key "{\"consentId\":{\"S\":\"${CONSENT_ID}\"}}" \
+      --region "$REGION" > /dev/null 2>&1 || true
+  done
+  echo "  [SETUP] Rate-limit records cleared for userId=${USER_ID:0:8}..."
+}
+
 _set_device_version() {
   local ver="$1"
-  aws dynamodb update-item --table-name digilux_device_inventory \
-    --key "{\"deviceId\":{\"S\":\"${DEVICE_ID}\"}}" \
+  aws dynamodb update-item --table-name digilux_device_data \
+    --key "{\"deviceId\":{\"S\":\"${DEVICE_ID}\"},\"macAddress\":{\"S\":\"${DEVICE_MAC}\"}}" \
     --update-expression "SET pendingJobId = :null, installedVersions.#pkg = :v" \
     --expression-attribute-names '{"#pkg":"controller-app"}' \
     --expression-attribute-values "{\":null\":{\"NULL\":true},\":v\":{\"S\":\"$ver\"}}" \
@@ -51,25 +90,29 @@ _set_device_version() {
 # ──────────────────────────────────────────────────────────────────────────────
 _section "TU01 — AUTHENTICATION"
 
-CODE=$(curl -s -o /dev/null -w "%{http_code}" "$BASE_URL/api/v1/ota/my/updates")
+CODE=$(curl -s -o /dev/null -w "%{http_code}" "$BASE_URL/api/v1/ota/device/available-updates")
 _expect_code "No token" "401" "$CODE"
 
-CODE=$(curl -s -o /dev/null -w "%{http_code}" -H "Authorization: invalid.token.here" "$BASE_URL/api/v1/ota/my/updates")
+CODE=$(curl -s -o /dev/null -w "%{http_code}" -H "Authorization: invalid.token.here" "$BASE_URL/api/v1/ota/device/available-updates")
 _expect_one_of "Invalid token" "$CODE" "401" "403"
 
-CODE=$(curl -s -o /dev/null -w "%{http_code}" -H "Authorization: $TOKEN" "$BASE_URL/api/v1/ota/my/updates")
+CODE=$(curl -s -o /dev/null -w "%{http_code}" -H "Authorization: $TOKEN" "$BASE_URL/api/v1/ota/device/available-updates")
 _expect_code "Valid user token → check updates" "200" "$CODE"
 
 CODE=$(curl -s -o /dev/null -w "%{http_code}" -H "Authorization: $TOKEN" "$BASE_URL/api/v1/ota/deployments")
 _expect_code "Non-admin token on admin deployments endpoint" "403" "$CODE"
 
+# Old endpoint (GET /my/updates) no longer has a GET method — should 403 or 404
+CODE=$(curl -s -o /dev/null -w "%{http_code}" -H "Authorization: $TOKEN" "$BASE_URL/api/v1/ota/my/updates")
+_expect_one_of "Old GET /my/updates endpoint gone" "$CODE" "403" "404"
+
 # ──────────────────────────────────────────────────────────────────────────────
-_section "TU02 — CHECK MY UPDATES"
+_section "TU02 — CHECK AVAILABLE UPDATES"
 
 _reset_device
-RESP=$(curl -s -H "Authorization: $TOKEN" "$BASE_URL/api/v1/ota/my/updates")
-CODE=$(curl -s -o /dev/null -w "%{http_code}" -H "Authorization: $TOKEN" "$BASE_URL/api/v1/ota/my/updates")
-_expect_code "GET /my/updates" "200" "$CODE"
+RESP=$(curl -s -H "Authorization: $TOKEN" "$BASE_URL/api/v1/ota/device/available-updates")
+CODE=$(curl -s -o /dev/null -w "%{http_code}" -H "Authorization: $TOKEN" "$BASE_URL/api/v1/ota/device/available-updates")
+_expect_code "GET /device/available-updates" "200" "$CODE"
 
 DEVICES=$(echo "$RESP" | python3 -c "import json,sys; print(len(json.load(sys.stdin).get('devices',[])))" 2>/dev/null || echo "0")
 if [ "$DEVICES" -ge 1 ]; then _pass "Response contains $DEVICES device(s)"; else _fail "No devices in response"; fi
@@ -123,6 +166,7 @@ _expect_code "Device not owned by user" "404" "$CODE"
 _section "TU04 — CONSENT HAPPY PATH"
 
 _reset_device
+_clear_rate_limit
 
 BODY=$(curl -s -X POST -H "Authorization: $TOKEN" -H "Content-Type: application/json" \
   -d "{\"deviceId\":\"$DEVICE_ID\",\"packageName\":\"$PACKAGE_NAME\",\"version\":\"$VERSION\"}" \
@@ -142,10 +186,11 @@ JOB_STATUS=$(echo "$RESP" | python3 -c "import json,sys; print(json.load(sys.std
 if [ "$JOB_STATUS" = "QUEUED" ]; then _pass "status=QUEUED"; else _fail "status → expected QUEUED, got $JOB_STATUS"; fi
 
 sleep 1
-PENDING=$(aws dynamodb get-item --table-name digilux_device_inventory \
-  --key "{\"deviceId\":{\"S\":\"$DEVICE_ID\"}}" \
+PENDING=$(aws dynamodb query --table-name digilux_device_data \
+  --key-condition-expression "deviceId = :d" \
+  --expression-attribute-values "{\":d\":{\"S\":\"$DEVICE_ID\"}}" \
   --region "$REGION" \
-  --query 'Item.pendingJobId.S' --output text 2>/dev/null)
+  --query 'Items[0].pendingJobId.S' --output text 2>/dev/null)
 if [ "$PENDING" = "$JOB_ID" ]; then _pass "DynamoDB pendingJobId=$JOB_ID"; else _fail "DynamoDB pendingJobId mismatch — got: $PENDING"; fi
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -297,6 +342,70 @@ CODE=$(curl -s -o /dev/null -w "%{http_code}" -X POST -H "Authorization: $TOKEN"
   -d "{\"deviceId\":\"$DEVICE_ID\",\"packageName\":\"$PACKAGE_NAME\",\"version\":\"1.0.0\"}" \
   "$BASE_URL/api/v1/ota/my/updates/download-link")
 _expect_one_of "download-link non-existent version" "$CODE" "404" "409"
+
+# ──────────────────────────────────────────────────────────────────────────────
+_section "TU10 — CLOUDFRONT SIGNED URL FORMAT"
+
+_reset_device
+
+RESP=$(curl -s -X POST -H "Authorization: $TOKEN" -H "Content-Type: application/json" \
+  -d "{\"deviceId\":\"$DEVICE_ID\",\"packageName\":\"$PACKAGE_NAME\",\"version\":\"$VERSION\"}" \
+  "$BASE_URL/api/v1/ota/my/updates/download-link")
+
+DL_URL=$(echo "$RESP" | python3 -c "import json,sys; print(json.load(sys.stdin).get('downloadUrl',''))" 2>/dev/null)
+
+# URL must be served from CloudFront, not S3
+if [[ "$DL_URL" == "https://${CLOUDFRONT_DOMAIN}/"* ]]; then
+  _pass "downloadUrl is a CloudFront URL (not S3 presigned)"
+else
+  _fail "downloadUrl is NOT from CloudFront — got: ${DL_URL:0:80}..."
+fi
+
+# Must contain CloudFront signed URL query params
+if [[ "$DL_URL" == *"Policy="* ]]; then _pass "Signed URL has Policy param"; else _fail "Policy param missing from URL"; fi
+if [[ "$DL_URL" == *"Signature="* ]]; then _pass "Signed URL has Signature param"; else _fail "Signature param missing from URL"; fi
+if [[ "$DL_URL" == *"Key-Pair-Id="* ]]; then _pass "Signed URL has Key-Pair-Id param"; else _fail "Key-Pair-Id param missing from URL"; fi
+
+# CloudFront signed URL must NOT contain AWS query-string presign params
+if [[ "$DL_URL" != *"X-Amz-Signature="* ]]; then
+  _pass "URL has no S3 presign params (correct — CloudFront path)"
+else
+  _fail "URL still contains S3 presign params (CloudFront signing failed)"
+fi
+
+# Verify signed URL is actually reachable (HTTP 200 or 206)
+HTTP_CF=$(curl -s -o /dev/null -w "%{http_code}" "$DL_URL")
+if [ "$HTTP_CF" = "200" ] || [ "$HTTP_CF" = "206" ]; then
+  _pass "CloudFront signed URL is reachable (HTTP $HTTP_CF)"
+else
+  _fail "CloudFront signed URL returned HTTP $HTTP_CF"
+fi
+
+# ──────────────────────────────────────────────────────────────────────────────
+_section "TU11 — PRESIGN EXPIRY TIER (small package → 1 hour)"
+
+# controller-app@4.0.0 is ~2MB — well within tier 1 (≤50MB → 3600s = 1hr)
+EXPIRES_AT=$(echo "$RESP" | python3 -c "import json,sys; print(json.load(sys.stdin).get('expiresAt',''))" 2>/dev/null)
+if [ -z "$EXPIRES_AT" ]; then
+  _fail "expiresAt field missing"
+else
+  # Check expiry is roughly 1 hour from now (allow 5 min slack each side)
+  DELTA=$(python3 -c "
+from datetime import datetime, timezone
+expires = datetime.strptime('$EXPIRES_AT', '%Y-%m-%dT%H:%M:%SZ').replace(tzinfo=timezone.utc)
+now = datetime.now(timezone.utc)
+print(int((expires - now).total_seconds()))
+" 2>/dev/null)
+  if [ -n "$DELTA" ] && [ "$DELTA" -ge 3300 ] && [ "$DELTA" -le 3900 ]; then
+    _pass "expiresAt is ~1 hour from now (${DELTA}s) — tier 1 correct"
+  else
+    _fail "expiresAt delta=${DELTA}s — expected ~3600s (tier 1 for small package)"
+  fi
+fi
+
+# Size field should be non-zero
+SIZE=$(echo "$RESP" | python3 -c "import json,sys; print(json.load(sys.stdin).get('size',0))" 2>/dev/null)
+if [ "${SIZE:-0}" -gt 0 ]; then _pass "size=${SIZE} bytes present"; else _fail "size field missing or zero"; fi
 
 # ──────────────────────────────────────────────────────────────────────────────
 _reset_device

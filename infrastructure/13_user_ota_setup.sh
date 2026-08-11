@@ -159,11 +159,12 @@ POLICY_DOC=$(cat <<EOF
       "Resource": "arn:aws:logs:${REGION}:${ACCOUNT_ID}:log-group:/aws/lambda/digilux_ota_user_*:*"
     },
     {
-      "Sid": "DeviceDataRead",
+      "Sid": "DeviceDataReadWrite",
       "Effect": "Allow",
       "Action": [
         "dynamodb:GetItem",
-        "dynamodb:Query"
+        "dynamodb:Query",
+        "dynamodb:UpdateItem"
       ],
       "Resource": [
         "arn:aws:dynamodb:${REGION}:${ACCOUNT_ID}:table/digilux_device_data",
