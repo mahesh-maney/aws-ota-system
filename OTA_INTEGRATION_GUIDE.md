@@ -51,7 +51,7 @@ The Digilux OTA system supports two update modes:
 | GET | `/api/v1/ota/deployments/{jobId}` | Admin | Get deployment status |
 | POST | `/api/v1/ota/deployments/{jobId}/abort` | Admin | Abort a deployment |
 | **End User** | | Any valid token | |
-| GET | `/api/v1/ota/my/updates` | User | Check available updates for user's devices |
+| GET | `/api/v1/ota/device/available-updates` | User | Check available updates for user's devices |
 | POST | `/api/v1/ota/my/updates/consent` | User | Consent + trigger update (IoT Job flow) |
 | POST | `/api/v1/ota/my/updates/download-link` | User | Get download URL + MQTT push (app-mediated flow) |
 | GET | `/api/v1/ota/my/updates/{jobId}/status` | User | Track consent-flow update status |
@@ -439,7 +439,7 @@ Cancels the IoT Job for any devices not yet in terminal state. Devices already i
 ### 4.8 Check Available Updates (End User)
 
 ```
-GET /api/v1/ota/my/updates
+GET /api/v1/ota/device/available-updates
 ```
 
 Returns all controller devices owned by the calling user and any available updates. Ownership is resolved from the JWT `sub` claim via `digilux_device_data`.
@@ -663,7 +663,7 @@ An alternative to the consent flow. The Lambda returns a pre-signed S3 download 
 > **Prerequisite:** Admin must have completed steps 1–3 above so the package is `ACTIVE`.
 
 ```
-1. GET /api/v1/ota/my/updates  (user token)
+1. GET /api/v1/ota/device/available-updates  (user token)
    → receive list of devices with availableUpdates
    → Flutter shows "Update available: controller-app 4.0.0"
 
@@ -687,7 +687,7 @@ An alternative to the consent flow. The Lambda returns a pre-signed S3 download 
 > **Prerequisite:** Admin must have completed steps 1–3 of section 5.1 so the package is `ACTIVE`.
 
 ```
-1. GET /api/v1/ota/my/updates  (user token)
+1. GET /api/v1/ota/device/available-updates  (user token)
    → receive list of devices with availableUpdates
    → Flutter shows "Update available: controller-app 4.0.0"
 
@@ -719,7 +719,7 @@ BASE_URL="https://iot.digilux.co.in/smarthome"
 USER_TOKEN="<user-cognito-id-token>"
 
 # Step 1 — check available updates for user's devices
-curl -s -X GET "$BASE_URL/api/v1/ota/my/updates" \
+curl -s -X GET "$BASE_URL/api/v1/ota/device/available-updates" \
   -H "Authorization: $USER_TOKEN" | jq '.devices[].availableUpdates'
 
 # Step 2 — get download link (Lambda also pushes URL to device via MQTT)
@@ -1115,7 +1115,7 @@ This resets the device to `controller-app@2.0.0` with no pending job — allowin
 #### TC-U01 Check Available Updates
 | # | Action | Expected |
 |---|---|---|
-| 1 | `GET /ota/my/updates` with a valid non-admin token | `200` with `devices` array |
+| 1 | `GET /ota/device/available-updates` with a valid non-admin token | `200` with `devices` array |
 | 2 | Device at `2.0.0`; ACTIVE package at `4.0.0` | `availableUpdates` contains `controller-app 4.0.0` |
 | 3 | No packages published yet | `availableUpdates: []` for that device |
 

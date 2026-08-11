@@ -67,14 +67,11 @@ from botocore.exceptions import ClientError
 log = logging.getLogger()
 log.setLevel(os.environ.get("LOG_LEVEL", "INFO"))
 
-REGION              = os.environ["REGION"]
-DEVICE_DATA_TABLE   = os.environ.get("DEVICE_DATA_TABLE",   "digilux_device_data")
-INVENTORY_TABLE     = os.environ.get("INVENTORY_TABLE",      "digilux_device_inventory")
-PACKAGES_TABLE      = os.environ.get("PACKAGES_TABLE",       "digilux_ota_packages")
-ARTIFACT_BUCKET     = os.environ.get("ARTIFACT_BUCKET",      "digilux-ota-artifacts")
-PRESIGN_EXPIRY_SEC  = int(os.environ.get("PRESIGN_EXPIRY_SEC", "3600"))
-
-DEVICE_DATA_USER_INDEX = os.environ.get("DEVICE_DATA_USER_INDEX", "userId-index")
+REGION             = os.environ["REGION"]
+DEVICE_DATA_TABLE  = os.environ.get("DEVICE_DATA_TABLE",  "digilux_device_data")
+PACKAGES_TABLE     = os.environ.get("PACKAGES_TABLE",      "digilux_ota_packages")
+ARTIFACT_BUCKET    = os.environ.get("ARTIFACT_BUCKET",     "digilux-ota-artifacts")
+PRESIGN_EXPIRY_SEC = int(os.environ.get("PRESIGN_EXPIRY_SEC", "3600"))
 
 # OTA MQTT topic template — same topic the existing IoT Job agent already listens on
 OTA_MQTT_TOPIC_TEMPLATE = os.environ.get(
@@ -143,25 +140,21 @@ def _audit(event: str, actor: str, resource: dict, result: str, **extra) -> None
 # Validation helpers
 # ──────────────────────────────────────────────────────────────────────────────
 
-def _device_belongs_to_user(user_id: str, device_id: str) -> bool:
+def _get_device_item(device_id: str) -> dict | None:
+    """
+    Query digilux_device_data by deviceId (hash key). Returns the first item or None.
+    The item carries userId (for ownership check) and OTA fields
+    (installedVersions, pendingJobId, thingName).
+    """
     tbl  = dynamo.Table(DEVICE_DATA_TABLE)
-    resp = tbl.query(
-        IndexName=DEVICE_DATA_USER_INDEX,
-        KeyConditionExpression=Key("userId").eq(user_id),
-    )
-    owned_ids = {item.get("deviceId") for item in resp.get("Items", [])}
-    log.debug(f"User {user_id} owns devices: {owned_ids}")
-    return device_id in owned_ids
+    resp = tbl.query(KeyConditionExpression=Key("deviceId").eq(device_id))
+    items = resp.get("Items", [])
+    return items[0] if items else None
 
 
 def _get_package(package_name: str, version: str) -> dict | None:
     tbl = dynamo.Table(PACKAGES_TABLE)
     return tbl.get_item(Key={"packageName": package_name, "version": version}).get("Item")
-
-
-def _get_inventory(device_id: str) -> dict | None:
-    tbl = dynamo.Table(INVENTORY_TABLE)
-    return tbl.get_item(Key={"deviceId": device_id}).get("Item")
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -207,9 +200,10 @@ def lambda_handler(event, context):
         if not _VERSION_RE.match(version):
             return _resp(400, {"error": "Invalid version format"})
 
-        # ── 5. Device ownership (most critical security gate) ─────────────────
-        log.info(f"Verifying ownership: userId={user_id}, deviceId={device_id}")
-        if not _device_belongs_to_user(user_id, device_id):
+        # ── 5. Device lookup + ownership check (single query) ────────────────
+        log.info(f"Looking up device: userId={user_id}, deviceId={device_id}")
+        dev = _get_device_item(device_id)
+        if not dev or dev.get("userId") != user_id:
             log.warning(json.dumps({
                 "msg":      "ownership_check_failed",
                 "userId":   user_id,
@@ -230,9 +224,10 @@ def lambda_handler(event, context):
                 "error": f"Package {package_name}@{version} is not available for installation"
             })
 
-        # ── 7. Device inventory — must be registered ──────────────────────────
-        inv = _get_inventory(device_id)
-        if not inv:
+        # ── 7. OTA agent must have registered (thingName present) ────────────
+        thing_name = dev.get("thingName")
+        if not thing_name:
+            log.warning(f"Device {device_id} has no thingName — OTA agent not yet started")
             return _resp(409, {
                 "error": (
                     "Device OTA agent has not started yet. "
@@ -240,13 +235,8 @@ def lambda_handler(event, context):
                 )
             })
 
-        thing_name = inv.get("thingName")
-        if not thing_name:
-            log.error(f"Device {device_id} has no thingName in inventory")
-            return _resp(500, {"error": "Internal server error"})
-
         # ── 8. Version check — must be strictly newer ─────────────────────────
-        installed_ver = inv.get("installedVersions", {}).get(package_name)
+        installed_ver = (dev.get("installedVersions") or {}).get(package_name)
         if installed_ver and not _is_newer(version, installed_ver):
             if installed_ver == version:
                 return _resp(409, {
@@ -260,7 +250,7 @@ def lambda_handler(event, context):
             })
 
         # ── 9. No active update already in-progress ───────────────────────────
-        pending_job_id = inv.get("pendingJobId")
+        pending_job_id = dev.get("pendingJobId")
         if pending_job_id:
             return _resp(409, {
                 "error": "An update is already in progress on this device.",

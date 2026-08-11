@@ -11,8 +11,8 @@ LAMBDA_DIR="$(cd "$(dirname "$0")/06_lambdas" && pwd)"
 COMMON_ENV="Variables={
   REGION=$REGION,
   ACCOUNT_ID=$ACCOUNT_ID,
+  DEVICE_DATA_TABLE=digilux_device_data,
   PACKAGES_TABLE=digilux_ota_packages,
-  INVENTORY_TABLE=digilux_device_inventory,
   OTA_JOBS_TABLE=digilux_ota_jobs,
   COMPAT_TABLE=digilux_ota_compatibility,
   ARTIFACT_BUCKET=digilux-ota-artifacts,

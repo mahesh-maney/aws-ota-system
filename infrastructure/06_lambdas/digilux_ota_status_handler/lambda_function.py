@@ -21,14 +21,14 @@ import os
 import time
 
 import boto3
-from boto3.dynamodb.conditions import Attr
+from boto3.dynamodb.conditions import Attr, Key
 
 log = logging.getLogger()
 log.setLevel(logging.INFO)
 
-REGION = os.environ["REGION"]
-INVENTORY_TABLE = os.environ.get("INVENTORY_TABLE", "digilux_device_inventory")
-OTA_JOBS_TABLE  = os.environ.get("OTA_JOBS_TABLE", "digilux_ota_jobs")
+REGION            = os.environ["REGION"]
+DEVICE_DATA_TABLE = os.environ.get("DEVICE_DATA_TABLE", "digilux_device_data")
+OTA_JOBS_TABLE    = os.environ.get("OTA_JOBS_TABLE",    "digilux_ota_jobs")
 
 dynamo = boto3.resource("dynamodb", region_name=REGION)
 iot    = boto3.client("iot", region_name=REGION)
@@ -110,56 +110,65 @@ def lambda_handler(event, context):
         log.info(f"Job {job_id} aggregate status → {aggregate} (device {device_key} reported {status})")
 
         if status in ("SUCCEEDED", "FAILED"):
-            inv_table = dynamo.Table(INVENTORY_TABLE)
+            # Look up macAddress for the composite key update
+            data_table = dynamo.Table(DEVICE_DATA_TABLE)
+            dev_items  = data_table.query(
+                KeyConditionExpression=Key("deviceId").eq(device_id)
+            ).get("Items", [])
 
-            if status == "SUCCEEDED":
-                log.info(json.dumps({
-                    "msg": "device_update_succeeded",
-                    "deviceId": device_id, "jobId": job_id,
-                    "packageName": pkg_name, "version": version,
-                }))
-                inv_table.update_item(
-                    Key={"deviceId": device_id},
-                    UpdateExpression=(
-                        "SET installedVersions.#pkg = :ver, "
-                        "pendingJobId = :null, "
-                        "lastUpdatedAt = :ts"
-                    ),
-                    ExpressionAttributeNames={"#pkg": pkg_name},
-                    ExpressionAttributeValues={
-                        ":ver": version, ":null": None, ":ts": now_ms,
-                    },
-                )
-                log.info(f"Inventory updated: device={device_id} {pkg_name}={version}, pendingJobId cleared")
-
-                _audit("DEVICE_UPDATE_SUCCEEDED",
-                       f"device:{device_id}",
-                       {"deviceId": device_id, "jobId": job_id},
-                       "SUCCESS",
-                       packageName=pkg_name, version=version, thingName=thing_name)
-
+            if not dev_items:
+                log.warning(f"Device {device_id} not found in {DEVICE_DATA_TABLE} — skipping OTA field update")
             else:
-                log.warning(json.dumps({
-                    "msg": "device_update_failed",
-                    "deviceId": device_id, "jobId": job_id,
-                    "packageName": pkg_name, "version": version,
-                    "error": error_msg, "statusDetail": status_detail,
-                }))
-                inv_table.update_item(
-                    Key={"deviceId": device_id},
-                    UpdateExpression="SET pendingJobId = :null, lastUpdatedAt = :ts",
-                    ExpressionAttributeValues={":null": None, ":ts": now_ms},
-                )
-                log.info(f"Inventory pendingJobId cleared for device={device_id} after FAILED")
+                mac_address = dev_items[0]["macAddress"]
 
-                _audit("DEVICE_UPDATE_FAILED",
-                       f"device:{device_id}",
-                       {"deviceId": device_id, "jobId": job_id},
-                       "FAILURE",
-                       packageName=pkg_name, version=version,
-                       thingName=thing_name, error=error_msg,
-                       statusDetail=status_detail,
-                       needsRecovery="NEEDS_RECOVERY" in (status_detail or ""))
+                if status == "SUCCEEDED":
+                    log.info(json.dumps({
+                        "msg": "device_update_succeeded",
+                        "deviceId": device_id, "jobId": job_id,
+                        "packageName": pkg_name, "version": version,
+                    }))
+                    data_table.update_item(
+                        Key={"deviceId": device_id, "macAddress": mac_address},
+                        UpdateExpression=(
+                            "SET installedVersions.#pkg = :ver, "
+                            "pendingJobId = :null, "
+                            "lastUpdatedAt = :ts"
+                        ),
+                        ExpressionAttributeNames={"#pkg": pkg_name},
+                        ExpressionAttributeValues={
+                            ":ver": version, ":null": None, ":ts": now_ms,
+                        },
+                    )
+                    log.info(f"device_data updated: device={device_id} {pkg_name}={version}, pendingJobId cleared")
+
+                    _audit("DEVICE_UPDATE_SUCCEEDED",
+                           f"device:{device_id}",
+                           {"deviceId": device_id, "jobId": job_id},
+                           "SUCCESS",
+                           packageName=pkg_name, version=version, thingName=thing_name)
+
+                else:
+                    log.warning(json.dumps({
+                        "msg": "device_update_failed",
+                        "deviceId": device_id, "jobId": job_id,
+                        "packageName": pkg_name, "version": version,
+                        "error": error_msg, "statusDetail": status_detail,
+                    }))
+                    data_table.update_item(
+                        Key={"deviceId": device_id, "macAddress": mac_address},
+                        UpdateExpression="SET pendingJobId = :null, lastUpdatedAt = :ts",
+                        ExpressionAttributeValues={":null": None, ":ts": now_ms},
+                    )
+                    log.info(f"device_data pendingJobId cleared for device={device_id} after FAILED")
+
+                    _audit("DEVICE_UPDATE_FAILED",
+                           f"device:{device_id}",
+                           {"deviceId": device_id, "jobId": job_id},
+                           "FAILURE",
+                           packageName=pkg_name, version=version,
+                           thingName=thing_name, error=error_msg,
+                           statusDetail=status_detail,
+                           needsRecovery="NEEDS_RECOVERY" in (status_detail or ""))
 
             jobs_table.update_item(
                 Key={"jobId": job_id},

@@ -25,7 +25,6 @@ LAMBDA_NAMES=(
 
 LAMBDA_ENV_COMMON="REGION=${REGION},ACCOUNT_ID=${ACCOUNT_ID},\
 DEVICE_DATA_TABLE=digilux_device_data,\
-INVENTORY_TABLE=digilux_device_inventory,\
 PACKAGES_TABLE=digilux_ota_packages,\
 OTA_JOBS_TABLE=digilux_ota_jobs,\
 CONSENTS_TABLE=${CONSENTS_TABLE},\

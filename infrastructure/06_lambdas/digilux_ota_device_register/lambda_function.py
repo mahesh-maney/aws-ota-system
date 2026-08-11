@@ -1,7 +1,7 @@
 """
 digilux_ota_device_register
 Triggered by IoT Rule when the OTA agent starts on a controller.
-Registers the device in digilux_device_inventory (deviceId <-> thingName mapping).
+Updates OTA fields on the existing digilux_device_data item for this device.
 Topic: iot/device/+/ota/register
 Message: {
   "deviceId": "uuid",
@@ -21,14 +21,15 @@ import os
 import time
 
 import boto3
+from boto3.dynamodb.conditions import Key
 
 log = logging.getLogger()
 log.setLevel(logging.INFO)
 
-REGION          = os.environ["REGION"]
-INVENTORY_TABLE = os.environ.get("INVENTORY_TABLE", "digilux_device_inventory")
-CANARY_GROUP    = os.environ.get("CANARY_GROUP", "DGX-Canary")
-CANARY_MAX      = int(os.environ.get("CANARY_MAX", "5"))
+REGION            = os.environ["REGION"]
+DEVICE_DATA_TABLE = os.environ.get("DEVICE_DATA_TABLE", "digilux_device_data")
+CANARY_GROUP      = os.environ.get("CANARY_GROUP", "DGX-Canary")
+CANARY_MAX        = int(os.environ.get("CANARY_MAX", "5"))
 
 dynamo = boto3.resource("dynamodb", region_name=REGION)
 iot    = boto3.client("iot", region_name=REGION)
@@ -66,27 +67,51 @@ def lambda_handler(event, context):
             log.warning(f"Register event missing deviceId or thingName — skipping. event={event}")
             return
 
-        now_ms    = int(time.time() * 1000)
-        inv_table = dynamo.Table(INVENTORY_TABLE)
+        now_ms     = int(time.time() * 1000)
+        data_table = dynamo.Table(DEVICE_DATA_TABLE)
 
-        log.debug(f"Checking inventory for deviceId={device_id}")
-        existing  = inv_table.get_item(Key={"deviceId": device_id}).get("Item")
+        # Query by deviceId (hash key) to get the full item including macAddress
+        log.debug(f"Looking up device_data for deviceId={device_id}")
+        items    = data_table.query(KeyConditionExpression=Key("deviceId").eq(device_id)).get("Items", [])
+        existing = items[0] if items else None
 
-        if existing:
-            prev_versions = existing.get("installedVersions", {})
-            changed = {k: v for k, v in installed.items() if prev_versions.get(k) != v}
+        if not existing:
+            log.warning(f"Device {device_id} not found in {DEVICE_DATA_TABLE} — OTA register skipped")
+            return
 
-            inv_table.update_item(
-                Key={"deviceId": device_id},
-                UpdateExpression=(
-                    "SET thingName = :tn, model = :m, hwRevision = :hw, "
-                    "installedVersions = :iv, lastSeen = :ts, lastUpdatedAt = :ts"
-                ),
-                ExpressionAttributeValues={
-                    ":tn": thing_name, ":m": model, ":hw": hw_rev,
-                    ":iv": installed,  ":ts": now_ms,
-                },
-            )
+        mac_address   = existing["macAddress"]
+        prev_versions = existing.get("installedVersions", {})
+        changed       = {k: v for k, v in installed.items() if prev_versions.get(k) != v}
+        first_time    = "thingName" not in existing
+
+        data_table.update_item(
+            Key={"deviceId": device_id, "macAddress": mac_address},
+            UpdateExpression=(
+                "SET thingName = :tn, model = :m, hwRevision = :hw, "
+                "installedVersions = :iv, lastSeen = :ts, lastUpdatedAt = :ts, "
+                "pendingJobId = if_not_exists(pendingJobId, :null)"
+            ),
+            ExpressionAttributeValues={
+                ":tn": thing_name, ":m": model, ":hw": hw_rev,
+                ":iv": installed,  ":ts": now_ms, ":null": None,
+            },
+        )
+
+        if first_time:
+            log.info(json.dumps({
+                "msg": "new_device_ota_registered",
+                "deviceId": device_id, "thingName": thing_name,
+                "model": model, "hwRevision": hw_rev,
+                "installedVersions": installed,
+            }))
+            assigned_group = _assign_to_thing_group(thing_name)
+            _audit("DEVICE_FIRST_REGISTRATION", f"device:{device_id}",
+                   {"deviceId": device_id, "thingName": thing_name},
+                   "SUCCESS",
+                   model=model, hwRevision=hw_rev,
+                   installedVersions=installed,
+                   assignedGroup=assigned_group)
+        else:
             log.info(json.dumps({
                 "msg": "device_reconnected",
                 "deviceId": device_id, "thingName": thing_name,
@@ -94,41 +119,12 @@ def lambda_handler(event, context):
                 "installedVersions": installed,
                 "versionChangesDetected": changed,
             }))
-
             _audit("DEVICE_RECONNECTED", f"device:{device_id}",
                    {"deviceId": device_id, "thingName": thing_name},
                    "SUCCESS",
                    model=model, hwRevision=hw_rev,
                    installedVersions=installed,
                    versionChangesDetected=changed)
-
-        else:
-            inv_table.put_item(Item={
-                "deviceId":         device_id,
-                "thingName":        thing_name,
-                "model":            model,
-                "hwRevision":       hw_rev,
-                "installedVersions": installed,
-                "pendingJobId":     None,
-                "lastSeen":         now_ms,
-                "createdAt":        now_ms,
-                "lastUpdatedAt":    now_ms,
-            })
-            log.info(json.dumps({
-                "msg": "new_device_registered",
-                "deviceId": device_id, "thingName": thing_name,
-                "model": model, "hwRevision": hw_rev,
-                "installedVersions": installed,
-            }))
-
-            assigned_group = _assign_to_thing_group(thing_name)
-
-            _audit("DEVICE_FIRST_REGISTRATION", f"device:{device_id}",
-                   {"deviceId": device_id, "thingName": thing_name},
-                   "SUCCESS",
-                   model=model, hwRevision=hw_rev,
-                   installedVersions=installed,
-                   assignedGroup=assigned_group)
 
     except Exception as e:
         log.exception(f"ERROR in device_register handler: {e}")

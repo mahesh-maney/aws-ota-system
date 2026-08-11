@@ -7,6 +7,9 @@ GET /api/v1/ota/my/updates
 Auth: Cognito ID token (any authenticated user — NOT admin only).
 The userId is extracted from the JWT `sub` claim.
 Only devices registered under that userId are returned.
+
+OTA state (installedVersions, pendingJobId, thingName, model, hwRevision) is stored
+directly on digilux_device_data items — no separate inventory table lookup needed.
 """
 import datetime
 import json
@@ -21,10 +24,9 @@ from botocore.exceptions import ClientError
 log = logging.getLogger()
 log.setLevel(os.environ.get("LOG_LEVEL", "INFO"))
 
-REGION          = os.environ["REGION"]
-DEVICE_DATA_TABLE   = os.environ.get("DEVICE_DATA_TABLE",  "digilux_device_data")
-INVENTORY_TABLE     = os.environ.get("INVENTORY_TABLE",     "digilux_device_inventory")
-PACKAGES_TABLE      = os.environ.get("PACKAGES_TABLE",      "digilux_ota_packages")
+REGION                 = os.environ["REGION"]
+DEVICE_DATA_TABLE      = os.environ.get("DEVICE_DATA_TABLE",      "digilux_device_data")
+PACKAGES_TABLE         = os.environ.get("PACKAGES_TABLE",         "digilux_ota_packages")
 DEVICE_DATA_USER_INDEX = os.environ.get("DEVICE_DATA_USER_INDEX", "userId-index")
 
 dynamo = boto3.resource("dynamodb", region_name=REGION)
@@ -90,12 +92,6 @@ def _get_user_devices(user_id: str) -> list[dict]:
     return resp.get("Items", [])
 
 
-def _get_inventory(device_id: str) -> dict | None:
-    """Fetch device inventory record (installedVersions, pendingJobId, etc.)."""
-    tbl = dynamo.Table(INVENTORY_TABLE)
-    return tbl.get_item(Key={"deviceId": device_id}).get("Item")
-
-
 def _get_latest_active_version(package_name: str) -> dict | None:
     """
     Query digilux_ota_packages for all versions of packageName with status=ACTIVE,
@@ -148,10 +144,12 @@ def lambda_handler(event, context):
                 log.warning(f"Device record missing deviceId — skipping: {dev}")
                 continue
 
-            # ── Fetch OTA inventory for this device ──────────────────────────
-            inv = _get_inventory(device_id)
-            if not inv:
-                log.info(f"Device {device_id} not yet in OTA inventory (agent not yet started)")
+            # ── OTA fields come directly from device_data item ────────────────
+            installed_versions = dev.get("installedVersions") or {}
+            pending_job_id     = dev.get("pendingJobId")
+
+            if not installed_versions:
+                log.info(f"Device {device_id} has no installedVersions (OTA agent not yet started)")
                 result_devices.append({
                     "deviceId":          device_id,
                     "otaStatus":         "NOT_REGISTERED",
@@ -162,9 +160,7 @@ def lambda_handler(event, context):
                 })
                 continue
 
-            installed_versions = inv.get("installedVersions") or {}
-            pending_job_id     = inv.get("pendingJobId")
-            available_updates  = []
+            available_updates = []
 
             # ── Compare each installed package with latest ACTIVE version ─────
             for pkg_name, installed_ver in installed_versions.items():
@@ -202,8 +198,8 @@ def lambda_handler(event, context):
             result_devices.append({
                 "deviceId":          device_id,
                 "otaStatus":         "REGISTERED",
-                "model":             inv.get("model", ""),
-                "hwRevision":        inv.get("hwRevision", ""),
+                "model":             dev.get("model", ""),
+                "hwRevision":        dev.get("hwRevision", ""),
                 "installedVersions": dict(installed_versions),
                 "pendingJobId":      pending_job_id,
                 "availableUpdates":  available_updates,

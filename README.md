@@ -77,7 +77,7 @@ Flutter App (homeowner)
         ▼
   API Gateway
         │
-        ├── GET  /ota/my/updates ────────► digilux_ota_user_check_updates
+        ├── GET  /ota/device/available-updates ► digilux_ota_user_check_updates
         │        ↑ checks device ownership via digilux_device_data
         │        ↑ compares installedVersions vs latest ACTIVE package
         │
@@ -182,7 +182,7 @@ USER_TOKEN=$(aws cognito-idp initiate-auth \
   --output text)
 
 # Check available updates for the user's devices
-curl -s "https://ds6nxf8ac5.execute-api.ap-south-1.amazonaws.com/smarthome/api/v1/ota/my/updates" \
+curl -s "https://ds6nxf8ac5.execute-api.ap-south-1.amazonaws.com/smarthome/api/v1/ota/device/available-updates" \
   -H "Authorization: $USER_TOKEN" | jq '.devices[].availableUpdates'
 
 # Give consent (triggers download + install on the device)
@@ -470,7 +470,7 @@ Cancels the deployment for devices not yet in a terminal state. Devices already 
 
 ---
 
-### GET /api/v1/ota/my/updates
+### GET /api/v1/ota/device/available-updates
 
 Returns all controller devices owned by the calling user and any available updates.
 
