@@ -102,18 +102,7 @@
                 "value": "AmazonCognitoIdentityProviderService.InitiateAuth"
               }
             ],
-            "url": {
-              "raw": "https://cognito-idp.ap-south-1.amazonaws.com/",
-              "host": [
-                "cognito-idp",
-                "ap-south-1",
-                "amazonaws",
-                "com"
-              ],
-              "path": [
-                "/"
-              ]
-            },
+            "url": "https://cognito-idp.ap-south-1.amazonaws.com/",
             "body": {
               "mode": "raw",
               "raw": "{\n  \"AuthFlow\": \"USER_PASSWORD_AUTH\",\n  \"ClientId\": \"{{ota_admin_pool_client_id}}\",\n  \"AuthParameters\": {\n    \"USERNAME\": \"mahesh.maney@gmail.com\",\n    \"PASSWORD\": \"DigiluxOTA@Admin1\"\n  }\n}",
@@ -160,18 +149,7 @@
                 "value": "AmazonCognitoIdentityProviderService.InitiateAuth"
               }
             ],
-            "url": {
-              "raw": "https://cognito-idp.ap-south-1.amazonaws.com/",
-              "host": [
-                "cognito-idp",
-                "ap-south-1",
-                "amazonaws",
-                "com"
-              ],
-              "path": [
-                "/"
-              ]
-            },
+            "url": "https://cognito-idp.ap-south-1.amazonaws.com/",
             "body": {
               "mode": "raw",
               "raw": "{\n  \"AuthFlow\": \"USER_PASSWORD_AUTH\",\n  \"ClientId\": \"{{app_pool_client_id}}\",\n  \"AuthParameters\": {\n    \"USERNAME\": \"demotesthw5@yopmail.com\",\n    \"PASSWORD\": \"DigiluxOTA@Test1\"\n  }\n}",
