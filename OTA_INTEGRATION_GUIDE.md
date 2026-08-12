@@ -1,6 +1,6 @@
 # Digilux OTA (Over-The-Air) Update System — Integration Guide
 
-**Version:** 1.5
+**Version:** 1.6
 **Date:** 2026-08-12
 **Audience:** Integration / QA Team
 **Base URL:** `https://iot.digilux.co.in/smarthome` (custom domain)
@@ -113,20 +113,21 @@ Admin (API)                  AWS Cloud                        Controller Device
 
 ### Admin endpoints (Sections 4.1–4.8)
 
-Require a **Cognito ID Token** from the `admin` group.
+Require a **Cognito ID Token** from the **OTA Admin user pool** (`ap-south-1_jUErEu7CL`). The token must belong to the `ota-admin` group.
 
 ```http
-Authorization: <Cognito ID Token>
+Authorization: <OTA Admin Cognito ID Token>
 ```
 
-Non-admin tokens receive `HTTP 403 — Admin access required`.
+- Tokens from the main app pool are rejected at **API Gateway** level with `HTTP 401`.
+- Tokens from the OTA admin pool but without `ota-admin` group membership receive `HTTP 403 — Admin access required`.
 
 ### End-user endpoints (Sections 4.9–4.11)
 
-Require any valid **Cognito ID Token** — no admin group needed. The `userId` is extracted from the JWT `sub` claim to determine device ownership.
+Require any valid **Cognito ID Token** from the main app pool (`ap-south-1_h1o8s7257`) — no admin group needed. The `userId` is extracted from the JWT `sub` claim to determine device ownership.
 
 ```http
-Authorization: <Cognito ID Token>
+Authorization: <App Pool Cognito ID Token>
 ```
 
 Users can only see and update devices registered under their own `userId`.
@@ -134,16 +135,18 @@ Users can only see and update devices registered under their own `userId`.
 ### How to obtain a token
 
 ```bash
-# Admin token (for sections 4.1–4.8)
+# Admin token — OTA admin pool (for sections 4.1–4.8)
+# Pool: ap-south-1_jUErEu7CL  |  Client: 2qmig1uh220ttntbl0gfvcde4f
 aws cognito-idp initiate-auth \
   --auth-flow USER_PASSWORD_AUTH \
-  --client-id q7189jitfkk4ttesepkgls491 \
+  --client-id 2qmig1uh220ttntbl0gfvcde4f \
   --auth-parameters USERNAME=<admin-email>,PASSWORD=<password> \
   --region ap-south-1 \
   --query 'AuthenticationResult.IdToken' \
   --output text
 
-# End-user token (for sections 4.9–4.12)
+# End-user token — main app pool (for sections 4.9–4.12)
+# Pool: ap-south-1_h1o8s7257  |  Client: q7189jitfkk4ttesepkgls491
 aws cognito-idp initiate-auth \
   --auth-flow USER_PASSWORD_AUTH \
   --client-id q7189jitfkk4ttesepkgls491 \
@@ -205,34 +208,43 @@ POST /api/v1/ota/packages/upload-url
 
 ```json
 {
-  "deviceType":  "Network_controller_firmware",
-  "version":     "1.2.3",
-  "releaseType": "PROD"
+  "deviceType":   "Network_controller_firmware",
+  "version":      "1.2.3",
+  "releaseType":  "PROD",
+  "checksum":     "a1b2c3d4e5f6...",
+  "releaseNotes": "Bug fixes and performance improvements"
 }
 ```
 
 | Field | Required | Description |
 |---|---|---|
-| `deviceType` | Yes | One of the 4 supported device types (see table above) |
+| `deviceType` | Yes | One of the 4 supported device types (see table in Section 1) |
 | `version` | Yes | Semantic version string (e.g. `1.2.3`) |
 | `releaseType` | Yes | `PROD` (all devices) or `BETA` (canary group only) |
+| `checksum` | No | SHA256 hex of the binary. If provided, the artifact processor verifies it on upload — mismatch marks the package `CORRUPTED` and deletes the file |
+| `releaseNotes` | No | Free-text description shown to users |
 
 `packageName` and `fileName` are derived automatically from `deviceType` — you do not supply them.
 
 **Response `200`:**
 ```json
 {
-  "uploadUrl":   "https://digilux-ota-artifacts.s3.ap-south-1.amazonaws.com/...",
-  "s3Key":       "Network_controller_firmware/HomeAssistantUtility/1.2.3/HomeAssistantUtility-1.2.3.jar",
-  "expiresIn":   3600,
-  "packageName": "HomeAssistantUtility",
-  "version":     "1.2.3",
-  "deviceType":  "Network_controller_firmware",
-  "releaseType": "PROD",
-  "activated":   false,
-  "status":      "PENDING"
+  "uploadUrl":    "https://digilux-ota-artifacts.s3.ap-south-1.amazonaws.com/...?X-Amz-Signature=...",
+  "uploadToken":  "550e8400-e29b-41d4-a716-446655440000",
+  "s3Key":        "Network_controller_firmware/HomeAssistantUtility/1.2.3/HomeAssistantUtility-1.2.3.jar",
+  "expiresIn":    300,
+  "packageName":  "HomeAssistantUtility",
+  "version":      "1.2.3",
+  "deviceType":   "Network_controller_firmware",
+  "releaseType":  "PROD",
+  "activated":    false,
+  "status":       "PENDING"
 }
 ```
+
+> **`uploadToken`** is a UUID that must be sent as the `x-amz-meta-upload-token` header on the S3 PUT. S3 enforces this — any PUT without the exact token returns `403`. The artifact processor also re-verifies the token after upload as a second check against rogue uploads.
+
+> **`expiresIn: 300`** — the presigned URL expires in **5 minutes**. The binary must be uploaded within this window.
 
 **Response `409`** — Version already exists and is ACTIVE:
 ```json
@@ -241,8 +253,10 @@ POST /api/v1/ota/packages/upload-url
 
 **After receiving this response**, the integration must:
 
-1. `PUT <uploadUrl>` with the binary file and header `Content-Type: application/octet-stream`
-2. Poll `GET /api/v1/ota/packages?packageName=HomeAssistantUtility` until `status` changes from `PENDING` → `ACTIVE` (typically within 2–5 seconds)
+1. `PUT <uploadUrl>` with two required headers:
+   - `Content-Type: application/octet-stream`
+   - `x-amz-meta-upload-token: <uploadToken>` ← **required — S3 rejects the PUT without this**
+2. Poll `GET /api/v1/ota/packages?packageName=HomeAssistantUtility` until `status` changes from `PENDING` → `ACTIVE` (typically within 2–5 seconds). If checksum was provided and mismatches, status becomes `CORRUPTED` instead — do not proceed.
 3. Call `PATCH /api/v1/ota/packages/HomeAssistantUtility/1.2.3/activate` with `{"activated": true}` to publish the package to users
 
 ---

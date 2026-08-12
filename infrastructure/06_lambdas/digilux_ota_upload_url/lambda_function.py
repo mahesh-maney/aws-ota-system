@@ -13,6 +13,7 @@ Request body (POST):
   "deviceType":   "Network_controller_zigbee_firmware",   # required
   "version":      "4.2.2",                                # required
   "releaseType":  "BETA" | "PROD",                        # required
+  "checksum":     "a1b2c3d4...",                          # optional SHA256 hex — verified on upload
   "releaseNotes": "Bug fixes"                             # optional
 }
 
@@ -20,28 +21,22 @@ packageName and fileName are derived automatically:
   packageName = baseName from DEVICE_TYPE_MAP  (e.g. ZigbeeFirmware)
   fileName    = {baseName}-{version}{ext}       (e.g. ZigbeeFirmware-4.2.2.tar)
 
+Security:
+  - uploadToken (UUID) is generated and baked into the presigned URL as a required
+    signed metadata header (x-amz-meta-upload-token). Any PUT without the exact token
+    is rejected by S3 with 403.
+  - artifact_processor verifies the token and optionally the checksum before promoting.
+
 Packages are created with activated=False. An admin must explicitly call
 PATCH /api/v1/ota/packages/{packageName}/{version}/activate to make them
 visible to end users.
-
-Response:
-{
-  "uploadUrl":   "https://...",
-  "s3Key":       "...",
-  "expiresIn":   3600,
-  "packageName": "ZigbeeFirmware",
-  "version":     "4.2.2",
-  "deviceType":  "Network_controller_zigbee_firmware",
-  "releaseType": "BETA",
-  "activated":   false,
-  "status":      "PENDING"
-}
 """
 import datetime
 import json
 import logging
 import os
 import time
+import uuid
 
 import boto3
 
@@ -51,7 +46,7 @@ log.setLevel(logging.INFO)
 REGION          = os.environ["REGION"]
 PACKAGES_TABLE  = os.environ.get("PACKAGES_TABLE",  "digilux_ota_packages")
 ARTIFACT_BUCKET = os.environ.get("ARTIFACT_BUCKET", "digilux-ota-artifacts")
-UPLOAD_EXPIRY   = int(os.environ.get("UPLOAD_EXPIRY_SEC", "3600"))
+UPLOAD_EXPIRY   = int(os.environ.get("UPLOAD_EXPIRY_SEC", "300"))  # 5 min — short window
 
 # Maps deviceType → packageName (baseName) and file extension.
 # fileName is derived as: {baseName}-{version}{ext}
@@ -119,6 +114,7 @@ def lambda_handler(event, context):
         device_type  = body["deviceType"].strip()
         version      = body["version"].strip()
         release_type = body["releaseType"].strip().upper()
+        checksum     = (body.get("checksum") or "").strip().lower() or None
 
         if device_type not in DEVICE_TYPE_MAP:
             return _response(400, {
@@ -137,12 +133,13 @@ def lambda_handler(event, context):
         s3_key       = f"{device_type}/{package_name}/{version}/{file_name}"
 
         log.info(json.dumps({
-            "msg":         "upload_url_request",
-            "deviceType":  device_type,
-            "packageName": package_name,
-            "version":     version,
-            "releaseType": release_type,
-            "fileName":    file_name,
+            "msg":          "upload_url_request",
+            "deviceType":   device_type,
+            "packageName":  package_name,
+            "version":      version,
+            "releaseType":  release_type,
+            "fileName":     file_name,
+            "checksumProvided": checksum is not None,
         }))
 
         # ── Reject duplicate active versions ──────────────────────────────────
@@ -158,53 +155,68 @@ def lambda_handler(event, context):
                 "error": f"{package_name} v{version} already exists and is ACTIVE. Use a new version number."
             })
 
-        # ── Generate pre-signed PUT URL ───────────────────────────────────────
+        # ── Generate upload token — baked into presigned URL as signed header ─
+        # artifact_processor verifies this token from S3 object metadata.
+        # Any PUT request missing or forging this header is rejected by S3 (403).
+        upload_token = str(uuid.uuid4())
+
         upload_url = s3.generate_presigned_url(
             "put_object",
             Params={
                 "Bucket":      ARTIFACT_BUCKET,
                 "Key":         s3_key,
                 "ContentType": "application/octet-stream",
+                "Metadata":    {"upload-token": upload_token},
             },
             ExpiresIn=UPLOAD_EXPIRY,
             HttpMethod="PUT",
         )
 
-        # ── Write PENDING record — artifact_processor promotes to ACTIVE ──────
+        # ── Write PENDING record ──────────────────────────────────────────────
         now_ms = int(time.time() * 1000)
-        table.put_item(Item={
+        item = {
+            "packageName":   package_name,
+            "version":       version,
+            "deviceType":    device_type,
+            "releaseType":   release_type,
+            "fileName":      file_name,
+            "s3Key":         s3_key,
+            "s3Bucket":      ARTIFACT_BUCKET,
+            "status":        "PENDING",
+            "activated":     False,
+            "uploadToken":   upload_token,
+            "releaseNotes":  body.get("releaseNotes", ""),
+            "createdAt":     now_ms,
+            "createdBy":     caller,
+        }
+        if checksum:
+            item["expectedChecksum"] = checksum
+
+        table.put_item(Item=item)
+
+        _audit("PACKAGE_UPLOAD_URL_REQUESTED", caller,
+               {"packageName": package_name, "version": version},
+               "SUCCESS",
+               deviceType=device_type, releaseType=release_type,
+               s3Key=s3_key, checksumProvided=checksum is not None)
+
+        return _response(200, {
+            "uploadUrl":    upload_url,
+            "s3Key":        s3_key,
+            "expiresIn":    UPLOAD_EXPIRY,
             "packageName":  package_name,
             "version":      version,
             "deviceType":   device_type,
             "releaseType":  release_type,
-            "fileName":     file_name,
-            "s3Key":        s3_key,
-            "s3Bucket":     ARTIFACT_BUCKET,
-            "status":       "PENDING",
             "activated":    False,
-            "releaseNotes": body.get("releaseNotes", ""),
-            "createdAt":    now_ms,
-            "createdBy":    caller,
-        })
-
-        _audit("PACKAGE_UPLOAD_URL_REQUESTED", caller,
-               {"packageName": package_name, "version": version},
-               "SUCCESS", deviceType=device_type, releaseType=release_type, s3Key=s3_key)
-
-        return _response(200, {
-            "uploadUrl":   upload_url,
-            "s3Key":       s3_key,
-            "expiresIn":   UPLOAD_EXPIRY,
-            "packageName": package_name,
-            "version":     version,
-            "deviceType":  device_type,
-            "releaseType": release_type,
-            "activated":   False,
-            "status":      "PENDING",
+            "status":       "PENDING",
+            "uploadToken":  upload_token,
             "instructions": (
-                "PUT your binary to uploadUrl with Content-Type: application/octet-stream. "
+                "PUT your binary to uploadUrl with headers: "
+                "Content-Type: application/octet-stream AND "
+                "x-amz-meta-upload-token: <uploadToken>. "
                 "Status becomes ACTIVE automatically within seconds. "
-                "Then call PATCH /packages/{packageName}/{version}/activate to make it visible to users."
+                "Then call PATCH /packages/{packageName}/{version}/activate to publish."
             ),
         })
 
@@ -216,10 +228,10 @@ def lambda_handler(event, context):
 def _list_packages(event: dict, caller: str) -> dict:
     """GET /api/v1/ota/packages — list packages, optionally filtered."""
     from boto3.dynamodb.conditions import Attr
-    params       = event.get("queryStringParameters") or {}
-    status_f     = params.get("status", "ACTIVE").upper()
+    params        = event.get("queryStringParameters") or {}
+    status_f      = params.get("status", "ACTIVE").upper()
     device_type_f = params.get("deviceType")
-    release_f    = (params.get("releaseType") or "").upper() or None
+    release_f     = (params.get("releaseType") or "").upper() or None
 
     table = dynamo.Table(PACKAGES_TABLE)
 

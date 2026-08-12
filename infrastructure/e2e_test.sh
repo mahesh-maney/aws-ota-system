@@ -74,7 +74,9 @@ _section "T01 — AUTHENTICATION"
 # ─────────────────────────────────────────────────────────────────────────────
 
 code=$(http_code GET "/api/v1/ota/packages" "" "$NON_ADMIN_TOKEN")
-assert_code "$code" "403" "Non-admin token rejected on GET /packages"
+# Admin routes use the OTA admin pool authorizer — tokens from the app pool are rejected
+# at API Gateway level with 401 (not 403 from Lambda) because they come from a different pool.
+assert_code "$code" "401" "Non-admin token rejected on GET /packages"
 
 code=$(http_code GET "/api/v1/ota/packages")
 assert_code "$code" "200" "Admin token accepted on GET /packages"
@@ -133,27 +135,41 @@ _section "T05 — PACKAGE UPLOAD FLOW"
 
 # Use a unique version to avoid collision
 TEST_VERSION="5.0.$(date +%s)-$RANDOM"
-UPLOAD_RESP=$(call POST "/api/v1/ota/packages/upload-url" \
-  "{\"deviceType\":\"Network_controller_firmware\",\"version\":\"${TEST_VERSION}\",\"releaseType\":\"PROD\",\"releaseNotes\":\"E2E test package\"}")
 
-code=$(http_code POST "/api/v1/ota/packages/upload-url" \
-  "{\"deviceType\":\"Network_controller_firmware\",\"version\":\"${TEST_VERSION}\",\"releaseType\":\"PROD\"}")
-assert_code "$code" "200" "Upload URL request returns 200"
+# Generate test artifact and compute its SHA256 checksum upfront
+echo "test content for OTA E2E validation $(date)" | gzip > /tmp/test_artifact.bin
+TEST_CHECKSUM=$(sha256sum /tmp/test_artifact.bin | awk '{print $1}')
+echo "  → test artifact SHA256: ${TEST_CHECKSUM:0:16}..."
+
+UPLOAD_RESP=$(call POST "/api/v1/ota/packages/upload-url" \
+  "{\"deviceType\":\"Network_controller_firmware\",\"version\":\"${TEST_VERSION}\",\"releaseType\":\"PROD\",\"checksum\":\"${TEST_CHECKSUM}\",\"releaseNotes\":\"E2E test package\"}")
+
+# Extract HTTP code from UPLOAD_RESP directly — do NOT make a second call
+# (a second call would overwrite the uploadToken in DynamoDB, causing a token mismatch)
+UPLOAD_CODE=$(echo "$UPLOAD_RESP" | python3 -c "
+import json,sys
+d=json.load(sys.stdin)
+# If it has uploadUrl it's a 200; if it has 'message' or 'error' it failed
+print('200' if 'uploadUrl' in d else '400')
+" 2>/dev/null || echo "500")
+assert_code "$UPLOAD_CODE" "200" "Upload URL request returns 200"
 
 assert_field "$UPLOAD_RESP" "status" "PENDING" "Package starts as PENDING"
 assert_has_field "$UPLOAD_RESP" "uploadUrl" "Response has uploadUrl"
 assert_has_field "$UPLOAD_RESP" "s3Key" "Response has s3Key"
+assert_has_field "$UPLOAD_RESP" "uploadToken" "Response has uploadToken"
 
-# Derive packageName from response (determined by deviceType map)
+# Derive packageName, uploadUrl, uploadToken from response
 TEST_PKG_NAME=$(echo "$UPLOAD_RESP" | python3 -c "import json,sys; print(json.load(sys.stdin).get('packageName',''))")
 UPLOAD_URL=$(echo "$UPLOAD_RESP" | python3 -c "import json,sys; print(json.load(sys.stdin).get('uploadUrl',''))")
 S3_KEY=$(echo "$UPLOAD_RESP" | python3 -c "import json,sys; print(json.load(sys.stdin).get('s3Key',''))")
+UPLOAD_TOKEN=$(echo "$UPLOAD_RESP" | python3 -c "import json,sys; print(json.load(sys.stdin).get('uploadToken',''))")
 echo "  → packageName: $TEST_PKG_NAME  s3Key: $S3_KEY"
 
-# Upload a real gzip tarball
-echo "test content for OTA E2E validation $(date)" | gzip > /tmp/test_artifact.bin
+# PUT binary to S3 — must include x-amz-meta-upload-token (baked into presigned URL signature)
 HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" -X PUT "$UPLOAD_URL" \
   -H "Content-Type: application/octet-stream" \
+  -H "x-amz-meta-upload-token: ${UPLOAD_TOKEN}" \
   --data-binary @/tmp/test_artifact.bin)
 assert_code "$HTTP_CODE" "200" "Binary PUT to S3 pre-signed URL → 200"
 

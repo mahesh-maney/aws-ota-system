@@ -1,6 +1,6 @@
 # Digilux OTA System — Flow Document
 
-**Version:** 1.1
+**Version:** 1.2
 **Date:** 2026-08-12
 **Audience:** Engineering, Integration, QA Teams
 
@@ -15,7 +15,7 @@ This document describes all key flows in the Digilux OTA update system — from 
 | **Admin / Integration App** | Client | Uploads packages, triggers deployments, monitors status |
 | **API Gateway** | AWS | Routes HTTP requests to Lambda functions |
 | `digilux_ota_upload_url` | Lambda | Issues pre-signed S3 upload URLs, writes PENDING record. Derives `packageName` and `fileName` from `deviceType` automatically. |
-| `digilux_ota_artifact_processor` | Lambda | Triggered by S3 event; computes SHA256, signs with ECDSA, promotes package to ACTIVE (still hidden until activated) |
+| `digilux_ota_artifact_processor` | Lambda | Triggered by S3 event; verifies upload token + checksum; computes SHA256, signs with ECDSA, promotes package to ACTIVE (still hidden until activated). Quarantines invalid uploads (deletes S3 object, marks `CORRUPTED`). |
 | `digilux_ota_job_create` | Lambda | Creates IoT Jobs, lists/gets/aborts deployments |
 | `digilux_ota_compatibility_check` | Lambda | Returns available updates for a specific device |
 | `digilux_ota_status_handler` | Lambda | Receives device status via IoT Rule; updates DynamoDB |
@@ -39,49 +39,65 @@ Admin                  API Gateway         upload_url Lambda    DynamoDB (packag
   │                        │                     │                     │                │
   │  POST /packages/       │                     │                     │                │
   │  upload-url            │                     │                     │                │
-  │  {packageName,         │                     │                     │                │
+  │  {deviceType,          │                     │                     │                │
   │   version,             │                     │                     │                │
-  │   deviceType, ...}    │                     │                     │                │
+  │   releaseType,         │                     │                     │                │
+  │   checksum?}           │                     │                     │                │
   │───────────────────────>│                     │                     │                │
-  │                        │  Validate admin     │                     │                │
-  │                        │  Cognito token      │                     │                │
+  │                        │  Validate OTA admin │                     │                │
+  │                        │  pool Cognito token │                     │                │
+  │                        │  + ota-admin group  │                     │                │
   │                        │────────────────────>│                     │                │
   │                        │                     │  Check duplicate    │                │
   │                        │                     │  (409 if ACTIVE)    │                │
   │                        │                     │────────────────────>│                │
-  │                        │                     │  Write PENDING      │                │
-  │                        │                     │  record + compat    │                │
-  │                        │                     │  metadata           │                │
-  │                        │                     │────────────────────>│                │
+  │                        │                     │  Generate UUID      │                │
+  │                        │                     │  uploadToken        │                │
+  │                        │                     │                     │                │
   │                        │                     │  Generate pre-      │                │
   │                        │                     │  signed PUT URL     │                │
-  │                        │                     │  (expires 1 hour)   │                │
+  │                        │                     │  (token baked in,   │                │
+  │                        │                     │   expires 5 min)    │                │
   │                        │                     │─────────────────────────────────────>│
   │                        │                     │  ← signed URL                        │
+  │                        │                     │                     │                │
+  │                        │                     │  Write PENDING      │                │
+  │                        │                     │  record (stores     │                │
+  │                        │                     │  uploadToken +      │                │
+  │                        │                     │  expectedChecksum)  │                │
+  │                        │                     │────────────────────>│                │
   │  ← 200 { uploadUrl,    │                     │                     │                │
+  │    uploadToken,        │                     │                     │                │
   │    s3Key, status:      │                     │                     │                │
-  │    "PENDING" }         │                     │                     │                │
+  │    "PENDING",          │                     │                     │                │
+  │    expiresIn: 300 }    │                     │                     │                │
   │<───────────────────────│                     │                     │                │
   │                        │                     │                     │                │
   │  PUT <uploadUrl>       │                     │                     │                │
-  │  (binary,              │                     │                     │                │
-  │   Content-Type:        │                     │                     │                │
-  │   Network_controller_firmware/         │                     │                     │                │
-  │   octet-stream)        │                     │                     │                │
+  │  Content-Type:         │                     │                     │                │
+  │   application/         │                     │                     │                │
+  │   octet-stream         │                     │                     │                │
+  │  x-amz-meta-           │                     │                     │                │
+  │   upload-token: <tok>  │                     │                     │                │
+  │  (S3 verifies token    │                     │                     │                │
+  │   is in URL signature  │                     │                     │                │
+  │   → 403 if wrong)      │                     │                     │                │
   │──────────────────────────────────────────────────────────────────>│                │
   │  ← HTTP 200            │                     │                     │                │
 ```
 
 ### Step-by-step
 
-1. Admin calls `POST /api/v1/ota/packages/upload-url` with package metadata
-2. `upload_url` Lambda validates the Cognito admin token
-3. Lambda checks DynamoDB — rejects with `409` if version already exists and is `ACTIVE`
-4. Lambda writes a `PENDING` record to `digilux_ota_packages` and compatibility metadata to `digilux_ota_compatibility`
-5. Lambda generates a pre-signed S3 `PUT` URL (1-hour expiry)
-6. Admin receives `{ uploadUrl, s3Key, status: "PENDING" }`
-7. Admin `PUT`s the binary directly to S3 using the pre-signed URL
-8. S3 responds `200` — upload complete → **triggers Flow 2**
+1. Admin calls `POST /api/v1/ota/packages/upload-url` with `deviceType`, `version`, `releaseType`, and optional `checksum`
+2. API Gateway validates the token against the **OTA admin Cognito pool** (`ap-south-1_jUErEu7CL`) — rejects unknown pool tokens with `401`
+3. `upload_url` Lambda checks `ota-admin` group membership — rejects with `403` if not an admin
+4. Lambda checks DynamoDB — rejects with `409` if version already exists and is `ACTIVE`
+5. Lambda generates a UUID `uploadToken` and bakes it into the presigned URL as a required signed header (`x-amz-meta-upload-token`)
+6. Lambda generates a pre-signed S3 `PUT` URL (**5-minute expiry**)
+7. Lambda writes a `PENDING` record to `digilux_ota_packages` storing `uploadToken` and `expectedChecksum` (if provided)
+8. Admin receives `{ uploadUrl, uploadToken, s3Key, expiresIn: 300, status: "PENDING" }`
+9. Admin `PUT`s the binary to S3 with `Content-Type: application/octet-stream` AND `x-amz-meta-upload-token: <uploadToken>`. S3 enforces the token — wrong or missing = `403`
+10. S3 responds `200` — upload complete → **triggers Flow 2**
 
 ---
 
@@ -103,11 +119,28 @@ S3                  artifact_processor Lambda    Secrets Manager    DynamoDB (pa
  │                           │  Look up PENDING        │                    │
  │                           │  record                 │                    │
  │                           │────────────────────────────────────────────>│
- │                           │  ← PENDING item found   │                    │
+ │                           │  ← item (has uploadToken│                    │
+ │                           │    + expectedChecksum)  │                    │
+ │                           │                         │                    │
+ │                           │  head_object: read      │                    │
+ │                           │  x-amz-meta-upload-token│                    │
+ │<──────────────────────────│  from S3 metadata       │                    │
+ │                           │                         │                    │
+ │                           │  ── Security check 1 ── │                    │
+ │                           │  Token from S3 metadata │                    │
+ │                           │  vs stored uploadToken  │                    │
+ │                           │  Mismatch → quarantine  │                    │
+ │                           │  (delete S3 + CORRUPTED)│                    │
  │                           │                         │                    │
  │                           │  Stream binary from S3  │                    │
  │                           │  Compute SHA256         │                    │
  │<──────────────────────────│  (chunked, 1MB blocks)  │                    │
+ │                           │                         │                    │
+ │                           │  ── Security check 2 ── │                    │
+ │                           │  Computed SHA256 vs     │                    │
+ │                           │  expectedChecksum       │                    │
+ │                           │  Mismatch → quarantine  │                    │
+ │                           │  (delete S3 + CORRUPTED)│                    │
  │                           │                         │                    │
  │                           │  Get ECDSA private key  │                    │
  │                           │─────────────────────────>                   │
@@ -120,6 +153,8 @@ S3                  artifact_processor Lambda    Secrets Manager    DynamoDB (pa
  │                           │  status PENDING→ACTIVE  │                    │
  │                           │  + sha256, signature,   │                    │
  │                           │  artifactSize           │                    │
+ │                           │  REMOVE uploadToken,    │                    │
+ │                           │  expectedChecksum       │                    │
  │                           │────────────────────────────────────────────>│
  │                           │                         │                    │
  │                           │  Emit audit log:        │                    │
@@ -131,12 +166,16 @@ S3                  artifact_processor Lambda    Secrets Manager    DynamoDB (pa
 
 1. S3 fires `s3:ObjectCreated:Put` event to `artifact_processor` Lambda
 2. Lambda parses the S3 key: `{prefix}/{packageName}/{version}/{fileName}`
-3. Lambda looks up the `PENDING` DynamoDB record (skips if already `ACTIVE` — idempotent)
-4. Lambda streams the binary from S3 and computes SHA256 (chunked, 1 MB blocks)
-5. Lambda fetches the ECDSA P-256 private key from Secrets Manager
-6. Lambda signs the SHA256 hex string with ECDSA → base64 signature
-7. Lambda updates the DynamoDB record: `status = ACTIVE`, writes `sha256`, `signature`, `artifactSize`
-8. Lambda emits `PACKAGE_REGISTERED_ACTIVE` audit log
+3. Lambda looks up the `PENDING` DynamoDB record. Skips if already `ACTIVE` (idempotent). Deletes S3 object if no record found (orphan upload protection).
+4. **Security check 1 — Upload token binding:** Lambda calls `head_object` to read `x-amz-meta-upload-token` from S3 object metadata, compares against `uploadToken` stored in DynamoDB. Mismatch = rogue upload → quarantine (delete S3 object, mark `CORRUPTED`, emit audit log)
+5. Lambda streams the binary from S3 and computes SHA256 (chunked, 1 MB blocks)
+6. **Security check 2 — Checksum validation:** If `expectedChecksum` was stored, compares computed SHA256 against it. Mismatch = corrupted/tampered binary → quarantine
+7. Lambda fetches the ECDSA P-256 private key from Secrets Manager
+8. Lambda signs the SHA256 hex string with ECDSA → base64 signature
+9. Lambda updates the DynamoDB record: `status = ACTIVE`, writes `sha256`, `signature`, `artifactSize`; **removes** `uploadToken` and `expectedChecksum` (no longer needed)
+10. Lambda emits `PACKAGE_REGISTERED_ACTIVE` audit log
+
+> **CORRUPTED status:** A package marked `CORRUPTED` is permanently rejected. Any future upload attempts to the same `packageName@version` are automatically deleted by the processor.
 9. Package is now deployable — typically completes within **2–3 seconds** of S3 upload
 
 > **Idempotency:** If S3 fires a duplicate event (e.g. retry), the Lambda skips processing if the record is already `ACTIVE`.

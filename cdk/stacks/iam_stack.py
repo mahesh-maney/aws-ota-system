@@ -64,7 +64,7 @@ class IamStack(cdk.Stack):
                     # S3 — artifact bucket
                     iam.PolicyStatement(
                         sid="S3",
-                        actions=["s3:GetObject", "s3:PutObject", "s3:ListBucket"],
+                        actions=["s3:GetObject", "s3:PutObject", "s3:ListBucket", "s3:DeleteObject"],
                         resources=[
                             storage.artifact_bucket.bucket_arn,
                             f"{storage.artifact_bucket.bucket_arn}/*",

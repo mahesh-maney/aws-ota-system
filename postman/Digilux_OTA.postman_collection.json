@@ -1,6 +1,6 @@
 {
   "info": {
-    "name": "Digilux OTA Update System v1.5",
+    "name": "Digilux OTA API v1.6",
     "description": "REST API collection for the Digilux Over-The-Air (OTA) update system.\n\n**Base URL:** `https://iot.digilux.co.in/smarthome`\n\n---\n\n## Auth Tokens\n\n**Admin token** (for Packages, Deployments, Device folders):\n```\naws cognito-idp initiate-auth \\\n  --auth-flow USER_PASSWORD_AUTH \\\n  --client-id q7189jitfkk4ttesepkgls491 \\\n  --auth-parameters USERNAME=mahesh.maney@gmail.com,PASSWORD=Admin@1234 \\\n  --region ap-south-1 \\\n  --query 'AuthenticationResult.IdToken' \\\n  --output text\n```\nPaste into the `admin_token` collection variable.\n\n**User token** (for End User Updates folder):\n```\naws cognito-idp initiate-auth \\\n  --auth-flow USER_PASSWORD_AUTH \\\n  --client-id q7189jitfkk4ttesepkgls491 \\\n  --auth-parameters USERNAME=demotesthw5@yopmail.com,PASSWORD=DigiluxOTA@Test1 \\\n  --region ap-south-1 \\\n  --query 'AuthenticationResult.IdToken' \\\n  --output text\n```\nPaste into the `user_token` collection variable.\n\n---\n\n## Folder Structure\n\n| Folder | Auth | Description |\n|--------|------|-------------|\n| Packages | `admin_token` | Upload & manage firmware packages |\n| Device (Admin) | `admin_token` | Admin device update check |\n| Deployments | `admin_token` | Create & manage fleet deployments |\n| Full Deployment Flow | `admin_token` | End-to-end admin upload \u2192 deploy sequence |\n| End User Updates | `user_token` | User-initiated update flow (Flutter app) |\n\n---\n\n## Collection Variables\n\n| Variable | Description |\n|----------|-------------|\n| `base_url` | API base URL |\n| `admin_token` | Cognito ID token \u2014 admin group user |\n| `user_token` | Cognito ID token \u2014 regular user (owns test device) |\n| `device_id` | Test device UUID |\n| `job_id` | Auto-populated by Create Deployment / Give Consent |\n| `consent_id` | Auto-populated by Give Consent |\n| `upload_url` | Auto-populated by Get Upload URL |\n| `package_name` | Package name for requests |\n| `package_version` | Package version for requests |",
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json",
     "_postman_id": "digilux-ota-v1-4"
@@ -81,6 +81,11 @@
       "value": "q7189jitfkk4ttesepkgls491",
       "type": "string",
       "description": "Cognito client ID for the main Digilux app user pool (end users)"
+    },
+    {
+      "key": "upload_token",
+      "value": "",
+      "type": "string"
     }
   ],
   "item": [
@@ -310,6 +315,7 @@
                 "exec": [
                   "var res = pm.response.json();",
                   "if (res.uploadUrl)    { pm.collectionVariables.set(\"upload_url\",    res.uploadUrl); }",
+                  "if (res.uploadToken)  { pm.collectionVariables.set(\"upload_token\",  res.uploadToken); }",
                   "if (res.packageName)  { pm.collectionVariables.set(\"package_name\",  res.packageName); }",
                   "if (res.s3Key)        { pm.collectionVariables.set(\"s3_key\",        res.s3Key); }",
                   "pm.test(\"Status 200\", () => pm.response.to.have.status(200));"
@@ -332,7 +338,7 @@
             ],
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"deviceType\": \"{{device_type}}\",\n  \"version\": \"{{package_version}}\",\n  \"releaseType\": \"{{release_type}}\"\n}",
+              "raw": "{\n  \"deviceType\":   \"{{device_type}}\",\n  \"version\":      \"{{package_version}}\",\n  \"releaseType\":  \"{{release_type}}\"\n  // \"checksum\": \"<sha256-hex>\"\n}",
               "options": {
                 "raw": {
                   "language": "json"
@@ -438,13 +444,14 @@
             },
             "header": [
               {
-                "key": "Authorization",
-                "value": "{{admin_token}}",
-                "type": "text"
-              },
-              {
                 "key": "Content-Type",
                 "value": "application/octet-stream"
+              },
+              {
+                "key": "x-amz-meta-upload-token",
+                "value": "{{upload_token}}",
+                "type": "text",
+                "description": "Required \u2014 must match token from Get Upload URL response"
               }
             ],
             "body": {
@@ -1081,6 +1088,7 @@
                 "exec": [
                   "var res = pm.response.json();",
                   "if (res.uploadUrl)    { pm.collectionVariables.set(\"upload_url\",    res.uploadUrl); }",
+                  "if (res.uploadToken)  { pm.collectionVariables.set(\"upload_token\",  res.uploadToken); }",
                   "if (res.packageName)  { pm.collectionVariables.set(\"package_name\",  res.packageName); }",
                   "if (res.s3Key)        { pm.collectionVariables.set(\"s3_key\",        res.s3Key); }",
                   "pm.test(\"Status 200\", () => pm.response.to.have.status(200));"
@@ -1103,7 +1111,7 @@
             ],
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"deviceType\": \"{{device_type}}\",\n  \"version\": \"{{package_version}}\",\n  \"releaseType\": \"{{release_type}}\"\n}",
+              "raw": "{\n  \"deviceType\":   \"{{device_type}}\",\n  \"version\":      \"{{package_version}}\",\n  \"releaseType\":  \"{{release_type}}\"\n  // \"checksum\": \"<sha256-hex>\"\n}",
               "options": {
                 "raw": {
                   "language": "json"
@@ -1136,13 +1144,14 @@
             },
             "header": [
               {
-                "key": "Authorization",
-                "value": "{{admin_token}}",
-                "type": "text"
-              },
-              {
                 "key": "Content-Type",
                 "value": "application/octet-stream"
+              },
+              {
+                "key": "x-amz-meta-upload-token",
+                "value": "{{upload_token}}",
+                "type": "text",
+                "description": "Required \u2014 must match token from Get Upload URL response"
               }
             ],
             "body": {
