@@ -115,6 +115,8 @@ def lambda_handler(event, context):
         version      = body["version"].strip()
         release_type = body["releaseType"].strip().upper()
         checksum     = (body.get("checksum") or "").strip().lower() or None
+        total_size   = body.get("totalSize") or body.get("totalsize") or None  # bytes, optional
+        file_name_override = (body.get("fileName") or "").strip() or None
 
         if device_type not in DEVICE_TYPE_MAP:
             return _response(400, {
@@ -129,17 +131,20 @@ def lambda_handler(event, context):
         # ── Derive packageName and fileName from deviceType ───────────────────
         type_cfg     = DEVICE_TYPE_MAP[device_type]
         package_name = type_cfg["baseName"]
-        file_name    = f"{package_name}-{version}{type_cfg['ext']}"
+        # fileName: use caller-provided name if given, otherwise auto-derive
+        file_name    = file_name_override or f"{package_name}-{version}{type_cfg['ext']}"
         s3_key       = f"{device_type}/{package_name}/{version}/{file_name}"
 
         log.info(json.dumps({
-            "msg":          "upload_url_request",
-            "deviceType":   device_type,
-            "packageName":  package_name,
-            "version":      version,
-            "releaseType":  release_type,
-            "fileName":     file_name,
+            "msg":             "upload_url_request",
+            "deviceType":      device_type,
+            "packageName":     package_name,
+            "version":         version,
+            "releaseType":     release_type,
+            "fileName":        file_name,
+            "fileNameOverride": file_name_override is not None,
             "checksumProvided": checksum is not None,
+            "totalSize":       total_size,
         }))
 
         # ── Reject duplicate active versions ──────────────────────────────────
@@ -191,6 +196,8 @@ def lambda_handler(event, context):
         }
         if checksum:
             item["expectedChecksum"] = checksum
+        if total_size is not None:
+            item["totalSize"] = int(total_size)
 
         table.put_item(Item=item)
 
@@ -200,9 +207,10 @@ def lambda_handler(event, context):
                deviceType=device_type, releaseType=release_type,
                s3Key=s3_key, checksumProvided=checksum is not None)
 
-        return _response(200, {
+        resp = {
             "uploadUrl":    upload_url,
             "s3Key":        s3_key,
+            "fileName":     file_name,
             "expiresIn":    UPLOAD_EXPIRY,
             "packageName":  package_name,
             "version":      version,
@@ -218,7 +226,10 @@ def lambda_handler(event, context):
                 "Status becomes ACTIVE automatically within seconds. "
                 "Then call PATCH /packages/{packageName}/{version}/activate to publish."
             ),
-        })
+        }
+        if total_size is not None:
+            resp["totalSize"] = int(total_size)
+        return _response(200, resp)
 
     except Exception as e:
         log.exception(f"Unhandled error: {e}")

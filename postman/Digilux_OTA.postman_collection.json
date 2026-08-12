@@ -338,7 +338,7 @@
             ],
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"deviceType\": \"{{device_type}}\",\n  \"version\": \"{{package_version}}\",\n  \"releaseType\": \"{{release_type}}\",\n  \"checksum\": \"\",\n  \"releaseNotes\": \"\"\n}",
+              "raw": "{\n  \"deviceType\": \"{{device_type}}\",\n  \"version\": \"{{package_version}}\",\n  \"releaseType\": \"{{release_type}}\",\n  \"fileName\": \"\",\n  \"checksum\": \"\",\n  \"totalSize\": 0,\n  \"releaseNotes\": \"\"\n}",
               "options": {
                 "raw": {
                   "language": "json"
@@ -1111,7 +1111,7 @@
             ],
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"deviceType\": \"{{device_type}}\",\n  \"version\": \"{{package_version}}\",\n  \"releaseType\": \"{{release_type}}\",\n  \"checksum\": \"\",\n  \"releaseNotes\": \"\"\n}",
+              "raw": "{\n  \"deviceType\": \"{{device_type}}\",\n  \"version\": \"{{package_version}}\",\n  \"releaseType\": \"{{release_type}}\",\n  \"fileName\": \"\",\n  \"checksum\": \"\",\n  \"totalSize\": 0,\n  \"releaseNotes\": \"\"\n}",
               "options": {
                 "raw": {
                   "language": "json"
