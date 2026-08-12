@@ -69,6 +69,18 @@
       "value": "PROD",
       "type": "string",
       "description": "PROD (all devices) or BETA (canary group only)"
+    },
+    {
+      "key": "ota_admin_pool_client_id",
+      "value": "2qmig1uh220ttntbl0gfvcde4f",
+      "type": "string",
+      "description": "Cognito client ID for the dedicated OTA admin user pool"
+    },
+    {
+      "key": "app_pool_client_id",
+      "value": "q7189jitfkk4ttesepkgls491",
+      "type": "string",
+      "description": "Cognito client ID for the main Digilux app user pool (end users)"
     }
   ],
   "item": [
@@ -1968,6 +1980,80 @@
           ]
         }
       ]
+    }
+  ],
+  "event": [
+    {
+      "listen": "prerequest",
+      "script": {
+        "type": "text/javascript",
+        "exec": [
+          "// \u2500\u2500 Admin token (OTA admin pool \u2014 dedicated pool for OTA admins) \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500",
+          "function isExpired(jwt) {",
+          "    try {",
+          "        var payload = JSON.parse(atob(jwt.split(\".\")[1]));",
+          "        return Date.now() / 1000 >= payload.exp - 60;",
+          "    } catch (e) { return true; }",
+          "}",
+          "",
+          "var adminToken = pm.collectionVariables.get(\"admin_token\");",
+          "if (!adminToken || isExpired(adminToken)) {",
+          "    pm.sendRequest({",
+          "        url: \"https://cognito-idp.ap-south-1.amazonaws.com/\",",
+          "        method: \"POST\",",
+          "        header: {",
+          "            \"Content-Type\": \"application/x-amz-json-1.1\",",
+          "            \"X-Amz-Target\": \"AmazonCognitoIdentityProviderService.InitiateAuth\"",
+          "        },",
+          "        body: {",
+          "            mode: \"raw\",",
+          "            raw: JSON.stringify({",
+          "                AuthFlow: \"USER_PASSWORD_AUTH\",",
+          "                ClientId: pm.collectionVariables.get(\"ota_admin_pool_client_id\"),",
+          "                AuthParameters: {",
+          "                    USERNAME: \"mahesh.maney@gmail.com\",",
+          "                    PASSWORD: \"DigiluxOTA@Admin1\"",
+          "                }",
+          "            })",
+          "        }",
+          "    }, (err, res) => {",
+          "        if (!err) {",
+          "            var id = res.json()?.AuthenticationResult?.IdToken;",
+          "            if (id) { pm.collectionVariables.set(\"admin_token\", id); console.log(\"admin_token refreshed\"); }",
+          "        }",
+          "    });",
+          "}",
+          "",
+          "// \u2500\u2500 User token (main Digilux app pool \u2014 end users / Flutter app) \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500",
+          "var userToken = pm.collectionVariables.get(\"user_token\");",
+          "if (!userToken || isExpired(userToken)) {",
+          "    pm.sendRequest({",
+          "        url: \"https://cognito-idp.ap-south-1.amazonaws.com/\",",
+          "        method: \"POST\",",
+          "        header: {",
+          "            \"Content-Type\": \"application/x-amz-json-1.1\",",
+          "            \"X-Amz-Target\": \"AmazonCognitoIdentityProviderService.InitiateAuth\"",
+          "        },",
+          "        body: {",
+          "            mode: \"raw\",",
+          "            raw: JSON.stringify({",
+          "                AuthFlow: \"USER_PASSWORD_AUTH\",",
+          "                ClientId: pm.collectionVariables.get(\"app_pool_client_id\"),",
+          "                AuthParameters: {",
+          "                    USERNAME: \"demotesthw5@yopmail.com\",",
+          "                    PASSWORD: \"DigiluxOTA@Test1\"",
+          "                }",
+          "            })",
+          "        }",
+          "    }, (err, res) => {",
+          "        if (!err) {",
+          "            var id = res.json()?.AuthenticationResult?.IdToken;",
+          "            if (id) { pm.collectionVariables.set(\"user_token\", id); console.log(\"user_token refreshed\"); }",
+          "        }",
+          "    });",
+          "}"
+        ]
+      }
     }
   ]
 }

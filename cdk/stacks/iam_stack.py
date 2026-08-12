@@ -25,9 +25,10 @@ class IamStack(cdk.Stack):
         region = config["region"]
         account = config["account"]
         prefix = config["namePrefix"]
-        cognito_pool_arn = (
-            f"arn:aws:cognito-idp:{region}:{account}:userpool/{config['cognitoUserPoolId']}"
-        )
+        cognito_pool_arns = [
+            f"arn:aws:cognito-idp:{region}:{account}:userpool/{config['cognitoUserPoolId']}",
+            f"arn:aws:cognito-idp:{region}:{account}:userpool/{config['otaAdminUserPoolId']}",
+        ]
         lambda_trust = iam.ServicePrincipal("lambda.amazonaws.com")
 
         # ── Admin Lambda Role ─────────────────────────────────────────────────
@@ -98,7 +99,7 @@ class IamStack(cdk.Stack):
                             "cognito-idp:AdminGetUser",
                             "cognito-idp:AdminListGroupsForUser",
                         ],
-                        resources=[cognito_pool_arn],
+                        resources=cognito_pool_arns,
                     ),
                     # X-Ray
                     iam.PolicyStatement(
@@ -108,7 +109,6 @@ class IamStack(cdk.Stack):
                     ),
                 ]),
             },
-        )
 
         # ── User Lambda Role ──────────────────────────────────────────────────
         self.user_role = iam.Role(
@@ -201,7 +201,6 @@ class IamStack(cdk.Stack):
                     ),
                 ]),
             },
-        )
 
         # ── IoT Rule Role ─────────────────────────────────────────────────────
         # Used by IoT topic rules to invoke Lambda functions and write error logs
@@ -229,4 +228,3 @@ class IamStack(cdk.Stack):
                     ),
                 ]),
             },
-        )

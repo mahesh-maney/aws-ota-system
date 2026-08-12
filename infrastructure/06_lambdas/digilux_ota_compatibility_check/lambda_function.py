@@ -30,7 +30,7 @@ dynamo = boto3.resource("dynamodb", region_name=REGION)
 def lambda_handler(event, context):
     try:
         claims = event.get("requestContext", {}).get("authorizer", {}).get("claims", {})
-        if "admin" not in claims.get("cognito:groups", ""):
+        if "ota-admin" not in claims.get("cognito:groups", ""):
             return _response(403, {"error": "Admin access required"})
 
         device_id = (event.get("pathParameters") or {}).get("deviceId")

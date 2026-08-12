@@ -61,7 +61,7 @@ def lambda_handler(event, context):
     try:
         # ── Auth: admin only ──────────────────────────────────────────────────
         claims = event.get("requestContext", {}).get("authorizer", {}).get("claims", {})
-        if "admin" not in claims.get("cognito:groups", ""):
+        if "ota-admin" not in claims.get("cognito:groups", ""):
             return _resp(403, {"error": "Admin access required"})
 
         caller = claims.get("email", claims.get("sub", "unknown"))

@@ -110,7 +110,7 @@ def lambda_handler(event, context):
 
     try:
         claims = event.get("requestContext", {}).get("authorizer", {}).get("claims", {})
-        if "admin" not in claims.get("cognito:groups", ""):
+        if "ota-admin" not in claims.get("cognito:groups", ""):
             log.warning("Unauthorized access attempt — not in admin group")
             return _response(403, {"error": "Admin access required"})
 

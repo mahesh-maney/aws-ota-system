@@ -2,28 +2,27 @@
   "account": "986906626244",
   "region": "ap-south-1",
   "namePrefix": "digilux",
-
   "cognitoUserPoolId": "ap-south-1_h1o8s7257",
   "deviceDataTableName": "digilux_device_data",
-
   "artifactBucketName": "digilux-ota-artifacts",
   "signingSecretName": "digilux-ota-signing-key",
-
   "cloudfrontDomain": "d2lr14tk4wqz8z.cloudfront.net",
   "cloudfrontKeyPairId": "K3CL07APICBEMS",
   "cloudfrontKeySecretName": "digilux-ota-cloudfront-key",
-
   "iotJobTimeoutMinutes": 1440,
   "canaryGroup": "DGX-Canary",
   "canaryMax": 5,
-
   "presignExpiryTiers": {
-    "tier1MaxMb": 50,  "tier1Sec": 3600,
-    "tier2MaxMb": 200, "tier2Sec": 21600,
-    "tier3MaxMb": 500, "tier3Sec": 86400,
+    "tier1MaxMb": 50,
+    "tier1Sec": 3600,
+    "tier2MaxMb": 200,
+    "tier2Sec": 21600,
+    "tier3MaxMb": 500,
+    "tier3Sec": 86400,
     "tier4Sec": 172800
   },
-
   "apiStageName": "prod",
-  "alertEmail": "ops@digilux.co.in"
+  "alertEmail": "ops@digilux.co.in",
+  "otaAdminUserPoolId": "ap-south-1_jUErEu7CL",
+  "otaAdminClientId": "2qmig1uh220ttntbl0gfvcde4f"
 }
