@@ -85,6 +85,128 @@
   ],
   "item": [
     {
+      "name": "Auth",
+      "description": "Run these once before testing. Tokens are valid for 24 hours and saved as collection variables.",
+      "item": [
+        {
+          "name": "Get Admin Token",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/x-amz-json-1.1"
+              },
+              {
+                "key": "X-Amz-Target",
+                "value": "AmazonCognitoIdentityProviderService.InitiateAuth"
+              }
+            ],
+            "url": {
+              "raw": "https://cognito-idp.ap-south-1.amazonaws.com/",
+              "host": [
+                "cognito-idp",
+                "ap-south-1",
+                "amazonaws",
+                "com"
+              ],
+              "path": [
+                "/"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"AuthFlow\": \"USER_PASSWORD_AUTH\",\n  \"ClientId\": \"{{ota_admin_pool_client_id}}\",\n  \"AuthParameters\": {\n    \"USERNAME\": \"mahesh.maney@gmail.com\",\n    \"PASSWORD\": \"DigiluxOTA@Admin1\"\n  }\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "description": "Fetches an admin token from the dedicated OTA admin Cognito pool and saves it to {{admin_token}}.\n\nRun this once before using any admin endpoint. The token is valid for 24 hours."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "var res = pm.response.json();",
+                  "var token = res?.AuthenticationResult?.IdToken;",
+                  "if (token) {",
+                  "    pm.collectionVariables.set('admin_token', token);",
+                  "    pm.test('Admin token saved', () => pm.expect(token).to.be.a('string'));",
+                  "    console.log('admin_token saved \u2713');",
+                  "} else {",
+                  "    pm.test('Admin token fetch failed', () => { throw new Error(JSON.stringify(res)); });",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "response": []
+        },
+        {
+          "name": "Get User Token",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/x-amz-json-1.1"
+              },
+              {
+                "key": "X-Amz-Target",
+                "value": "AmazonCognitoIdentityProviderService.InitiateAuth"
+              }
+            ],
+            "url": {
+              "raw": "https://cognito-idp.ap-south-1.amazonaws.com/",
+              "host": [
+                "cognito-idp",
+                "ap-south-1",
+                "amazonaws",
+                "com"
+              ],
+              "path": [
+                "/"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"AuthFlow\": \"USER_PASSWORD_AUTH\",\n  \"ClientId\": \"{{app_pool_client_id}}\",\n  \"AuthParameters\": {\n    \"USERNAME\": \"demotesthw5@yopmail.com\",\n    \"PASSWORD\": \"DigiluxOTA@Test1\"\n  }\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "description": "Fetches a user token from the main Digilux app Cognito pool and saves it to {{user_token}}.\n\nRun this once before using any End User endpoint. The token is valid for 24 hours."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "var res = pm.response.json();",
+                  "var token = res?.AuthenticationResult?.IdToken;",
+                  "if (token) {",
+                  "    pm.collectionVariables.set('user_token', token);",
+                  "    pm.test('User token saved', () => pm.expect(token).to.be.a('string'));",
+                  "    console.log('user_token saved \u2713');",
+                  "} else {",
+                  "    pm.test('User token fetch failed', () => { throw new Error(JSON.stringify(res)); });",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "response": []
+        }
+      ]
+    },
+    {
       "name": "Packages",
       "description": "Manage OTA firmware packages. Admin-only. Upload artifacts, list packages, and check processing status.\n\n**Auth:** `admin_token` (must be in Cognito `admin` group).",
       "auth": {
@@ -2116,70 +2238,13 @@
       "script": {
         "type": "text/javascript",
         "exec": [
-          "// \u2500\u2500 Admin token (OTA admin pool \u2014 dedicated pool for OTA admins) \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500",
+          "// Warn if tokens are missing \u2014 run '0. Get Tokens' first",
           "function isExpired(jwt) {",
-          "    try {",
-          "        var payload = JSON.parse(atob(jwt.split(\".\")[1]));",
-          "        return Date.now() / 1000 >= payload.exp - 60;",
-          "    } catch (e) { return true; }",
+          "    try { var p = JSON.parse(atob(jwt.split('.')[1])); return Date.now()/1000 >= p.exp - 60; }",
+          "    catch(e) { return true; }",
           "}",
-          "",
-          "var adminToken = pm.collectionVariables.get(\"admin_token\");",
-          "if (!adminToken || isExpired(adminToken)) {",
-          "    pm.sendRequest({",
-          "        url: \"https://cognito-idp.ap-south-1.amazonaws.com/\",",
-          "        method: \"POST\",",
-          "        header: {",
-          "            \"Content-Type\": \"application/x-amz-json-1.1\",",
-          "            \"X-Amz-Target\": \"AmazonCognitoIdentityProviderService.InitiateAuth\"",
-          "        },",
-          "        body: {",
-          "            mode: \"raw\",",
-          "            raw: JSON.stringify({",
-          "                AuthFlow: \"USER_PASSWORD_AUTH\",",
-          "                ClientId: pm.collectionVariables.get(\"ota_admin_pool_client_id\"),",
-          "                AuthParameters: {",
-          "                    USERNAME: \"mahesh.maney@gmail.com\",",
-          "                    PASSWORD: \"DigiluxOTA@Admin1\"",
-          "                }",
-          "            })",
-          "        }",
-          "    }, (err, res) => {",
-          "        if (!err) {",
-          "            var id = res.json()?.AuthenticationResult?.IdToken;",
-          "            if (id) { pm.collectionVariables.set(\"admin_token\", id); console.log(\"admin_token refreshed\"); }",
-          "        }",
-          "    });",
-          "}",
-          "",
-          "// \u2500\u2500 User token (main Digilux app pool \u2014 end users / Flutter app) \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500",
-          "var userToken = pm.collectionVariables.get(\"user_token\");",
-          "if (!userToken || isExpired(userToken)) {",
-          "    pm.sendRequest({",
-          "        url: \"https://cognito-idp.ap-south-1.amazonaws.com/\",",
-          "        method: \"POST\",",
-          "        header: {",
-          "            \"Content-Type\": \"application/x-amz-json-1.1\",",
-          "            \"X-Amz-Target\": \"AmazonCognitoIdentityProviderService.InitiateAuth\"",
-          "        },",
-          "        body: {",
-          "            mode: \"raw\",",
-          "            raw: JSON.stringify({",
-          "                AuthFlow: \"USER_PASSWORD_AUTH\",",
-          "                ClientId: pm.collectionVariables.get(\"app_pool_client_id\"),",
-          "                AuthParameters: {",
-          "                    USERNAME: \"demotesthw5@yopmail.com\",",
-          "                    PASSWORD: \"DigiluxOTA@Test1\"",
-          "                }",
-          "            })",
-          "        }",
-          "    }, (err, res) => {",
-          "        if (!err) {",
-          "            var id = res.json()?.AuthenticationResult?.IdToken;",
-          "            if (id) { pm.collectionVariables.set(\"user_token\", id); console.log(\"user_token refreshed\"); }",
-          "        }",
-          "    });",
-          "}"
+          "var t = pm.collectionVariables.get('admin_token');",
+          "if (!t || isExpired(t)) { console.warn('admin_token missing or expired \u2014 run 0. Get Tokens first'); }"
         ]
       }
     }
