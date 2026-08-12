@@ -107,14 +107,14 @@ def lambda_handler(event, context):
         body = json.loads(event.get("body") or "{}")
 
         # ── Validate required fields ──────────────────────────────────────────
-        for field in ["deviceType", "version", "releaseType"]:
+        for field in ["deviceType", "version", "releaseType", "checksum"]:
             if not body.get(field):
                 return _response(400, {"error": f"Missing required field: {field}"})
 
         device_type  = body["deviceType"].strip()
         version      = body["version"].strip()
         release_type = body["releaseType"].strip().upper()
-        checksum     = (body.get("checksum") or "").strip().lower() or None
+        checksum     = body["checksum"].strip().lower()
         total_size   = body.get("totalSize") or body.get("totalsize") or None  # bytes, optional
         file_name_override = (body.get("fileName") or "").strip() or None
 
@@ -194,8 +194,7 @@ def lambda_handler(event, context):
             "createdAt":     now_ms,
             "createdBy":     caller,
         }
-        if checksum:
-            item["expectedChecksum"] = checksum
+        item["expectedChecksum"] = checksum
         if total_size is not None:
             item["totalSize"] = int(total_size)
 
@@ -205,7 +204,7 @@ def lambda_handler(event, context):
                {"packageName": package_name, "version": version},
                "SUCCESS",
                deviceType=device_type, releaseType=release_type,
-               s3Key=s3_key, checksumProvided=checksum is not None)
+               s3Key=s3_key, checksum=checksum[:16] + "...")
 
         resp = {
             "uploadUrl":    upload_url,
