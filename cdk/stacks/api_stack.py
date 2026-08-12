@@ -16,8 +16,9 @@ class ApiStack(cdk.Stack):
       POST /api/v1/ota/deployments                           Create OTA job
       GET  /api/v1/ota/deployments                           List jobs
       GET  /api/v1/ota/deployments/{jobId}                   Job status + device progress
-      POST /api/v1/ota/deployments/{jobId}/abort             Abort job
-      GET  /api/v1/controllers/{deviceId}/updates/available  Check device compatibility
+      POST  /api/v1/ota/deployments/{jobId}/abort                       Abort job
+      GET   /api/v1/controllers/{deviceId}/updates/available            Check device compatibility
+      PATCH /api/v1/ota/packages/{packageName}/{version}/activate       Publish/withdraw package
 
     User endpoints:
       GET  /api/v1/ota/device/available-updates              Check pending updates for device
@@ -87,6 +88,12 @@ class ApiStack(cdk.Stack):
 
         upload_url = packages.add_resource("upload-url")
         add_method(upload_url, "POST", lambdas.upload_url)
+
+        # PATCH /api/v1/ota/packages/{packageName}/{version}/activate
+        pkg_name_res = packages.add_resource("{packageName}")
+        pkg_ver_res  = pkg_name_res.add_resource("{version}")
+        activate_res = pkg_ver_res.add_resource("activate")
+        add_method(activate_res, "PATCH", lambdas.package_activate)
 
         # ── Admin: /api/v1/ota/deployments ────────────────────────────────────
         deployments = ota.add_resource("deployments")

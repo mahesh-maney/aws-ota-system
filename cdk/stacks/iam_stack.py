@@ -159,10 +159,13 @@ class IamStack(cdk.Stack):
                             f"{storage.consents_table.table_arn}/index/*",
                         ],
                     ),
-                    # IoT — create job + tag
+                    # IoT — create job + check canary group membership
                     iam.PolicyStatement(
                         sid="IoTJobs",
-                        actions=["iot:CreateJob", "iot:DescribeJob", "iot:TagResource"],
+                        actions=[
+                            "iot:CreateJob", "iot:DescribeJob", "iot:TagResource",
+                            "iot:ListThingGroupsForThing",
+                        ],
                         resources=[
                             f"arn:aws:iot:{region}:{account}:job/{prefix}-ota-*",
                             f"arn:aws:iot:{region}:{account}:thing/*",

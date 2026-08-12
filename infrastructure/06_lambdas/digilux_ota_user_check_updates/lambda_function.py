@@ -18,7 +18,7 @@ import os
 from decimal import Decimal
 
 import boto3
-from boto3.dynamodb.conditions import Key
+from boto3.dynamodb.conditions import Attr, Key
 from botocore.exceptions import ClientError
 
 log = logging.getLogger()
@@ -28,8 +28,10 @@ REGION                 = os.environ["REGION"]
 DEVICE_DATA_TABLE      = os.environ.get("DEVICE_DATA_TABLE",      "digilux_device_data")
 PACKAGES_TABLE         = os.environ.get("PACKAGES_TABLE",         "digilux_ota_packages")
 DEVICE_DATA_USER_INDEX = os.environ.get("DEVICE_DATA_USER_INDEX", "userId-index")
+CANARY_GROUP           = os.environ.get("CANARY_GROUP",           "DGX-Canary")
 
 dynamo = boto3.resource("dynamodb", region_name=REGION)
+iot    = boto3.client("iot",        region_name=REGION)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -92,17 +94,39 @@ def _get_user_devices(user_id: str) -> list[dict]:
     return resp.get("Items", [])
 
 
-def _get_latest_active_version(package_name: str) -> dict | None:
+def _is_beta_device(thing_name: str) -> bool:
+    """Return True if the device's IoT thing is in the canary group."""
+    if not thing_name:
+        return False
+    try:
+        resp   = iot.list_thing_groups_for_thing(thingName=thing_name)
+        groups = [g.get("groupName", "") for g in resp.get("thingGroups", [])]
+        return CANARY_GROUP in groups
+    except Exception:
+        log.warning(f"Could not check canary group for thing={thing_name} — defaulting to non-beta")
+        return False
+
+
+def _get_latest_available_version(package_name: str, include_beta: bool) -> dict | None:
     """
-    Query digilux_ota_packages for all versions of packageName with status=ACTIVE,
-    then return the item with the highest semver version, or None if none found.
+    Query packages for packageName where:
+      - status = ACTIVE  (binary has been processed by artifact_processor)
+      - activated = True (admin has explicitly published this version)
+      - releaseType = PROD always; also BETA if device is in the canary group
+    Returns the highest semver version that matches, or None.
     """
     tbl = dynamo.Table(PACKAGES_TABLE)
-    resp = tbl.query(
+
+    filter_expr = (
+        Attr("status").eq("ACTIVE") &
+        Attr("activated").eq(True)
+    )
+    if not include_beta:
+        filter_expr = filter_expr & Attr("releaseType").eq("PROD")
+
+    resp  = tbl.query(
         KeyConditionExpression=Key("packageName").eq(package_name),
-        FilterExpression="#s = :active",
-        ExpressionAttributeNames={"#s": "status"},
-        ExpressionAttributeValues={":active": "ACTIVE"},
+        FilterExpression=filter_expr,
     )
     items = resp.get("Items", [])
     if not items:
@@ -160,13 +184,21 @@ def lambda_handler(event, context):
                 })
                 continue
 
+            # ── Determine if this device sees BETA packages ───────────────────
+            thing_name   = dev.get("thingName")
+            include_beta = _is_beta_device(thing_name)
+            log.info(json.dumps({
+                "msg": "device_beta_status",
+                "deviceId": device_id, "thingName": thing_name, "includeBeta": include_beta,
+            }))
+
             available_updates = []
 
-            # ── Compare each installed package with latest ACTIVE version ─────
+            # ── Compare each installed package with latest available version ──
             for pkg_name, installed_ver in installed_versions.items():
-                latest_pkg = _get_latest_active_version(pkg_name)
+                latest_pkg = _get_latest_available_version(pkg_name, include_beta)
                 if not latest_pkg:
-                    log.debug(f"No ACTIVE package found for {pkg_name}")
+                    log.debug(f"No available package found for {pkg_name}")
                     continue
 
                 latest_ver = latest_pkg.get("version", "")
@@ -181,7 +213,8 @@ def lambda_handler(event, context):
 
                 available_updates.append({
                     "packageName":      pkg_name,
-                    "packageType":      latest_pkg.get("packageType", ""),
+                    "deviceType":       latest_pkg.get("deviceType", ""),
+                    "releaseType":      latest_pkg.get("releaseType", "PROD"),
                     "currentVersion":   installed_ver,
                     "availableVersion": latest_ver,
                     "releaseNotes":     latest_pkg.get("releaseNotes", ""),
