@@ -1,7 +1,7 @@
 # Digilux OTA System — Flow Document
 
-**Version:** 1.0
-**Date:** 2026-07-31
+**Version:** 1.1
+**Date:** 2026-08-12
 **Audience:** Engineering, Integration, QA Teams
 
 This document describes all key flows in the Digilux OTA update system — from package upload through to device installation and failure recovery. Each flow shows the components involved, the sequence of operations, and the MQTT topics or API calls used.
@@ -14,13 +14,13 @@ This document describes all key flows in the Digilux OTA update system — from 
 |---|---|---|
 | **Admin / Integration App** | Client | Uploads packages, triggers deployments, monitors status |
 | **API Gateway** | AWS | Routes HTTP requests to Lambda functions |
-| `digilux_ota_upload_url` | Lambda | Issues pre-signed S3 upload URLs, writes PENDING record |
-| `digilux_ota_artifact_processor` | Lambda | Triggered by S3 event; computes SHA256, signs with ECDSA, promotes package to ACTIVE |
+| `digilux_ota_upload_url` | Lambda | Issues pre-signed S3 upload URLs, writes PENDING record. Derives `packageName` and `fileName` from `deviceType` automatically. |
+| `digilux_ota_artifact_processor` | Lambda | Triggered by S3 event; computes SHA256, signs with ECDSA, promotes package to ACTIVE (still hidden until activated) |
 | `digilux_ota_job_create` | Lambda | Creates IoT Jobs, lists/gets/aborts deployments |
 | `digilux_ota_compatibility_check` | Lambda | Returns available updates for a specific device |
 | `digilux_ota_status_handler` | Lambda | Receives device status via IoT Rule; updates DynamoDB |
 | `digilux_ota_device_register` | Lambda | Receives device registration on agent startup; upserts OTA fields (`thingName`, `installedVersions`, `pendingJobId`) on `digilux_device_data` |
-| **S3** (`digilux-ota-artifacts`) | Storage | Stores firmware/app binaries |
+| **S3** (`digilux-ota-artifacts`) | Storage | Stores Network_controller_firmware/app binaries |
 | **DynamoDB** | Storage | `digilux_ota_packages`, `digilux_ota_jobs`, `digilux_ota_compatibility`, `digilux_device_data` (OTA fields: `installedVersions`, `pendingJobId`, `thingName`) |
 | **AWS IoT Core** | Messaging | Delivers jobs to devices over MQTT (port 8883, mTLS) |
 | **IoT Rule** `digilux_ota_status_ingest` | Rule | Topic `iot/device/+/ota/status` → `status_handler` Lambda |
@@ -41,7 +41,7 @@ Admin                  API Gateway         upload_url Lambda    DynamoDB (packag
   │  upload-url            │                     │                     │                │
   │  {packageName,         │                     │                     │                │
   │   version,             │                     │                     │                │
-  │   packageType, ...}    │                     │                     │                │
+  │   deviceType, ...}    │                     │                     │                │
   │───────────────────────>│                     │                     │                │
   │                        │  Validate admin     │                     │                │
   │                        │  Cognito token      │                     │                │
@@ -66,7 +66,7 @@ Admin                  API Gateway         upload_url Lambda    DynamoDB (packag
   │  PUT <uploadUrl>       │                     │                     │                │
   │  (binary,              │                     │                     │                │
   │   Content-Type:        │                     │                     │                │
-  │   application/         │                     │                     │                │
+  │   Network_controller_firmware/         │                     │                     │                │
   │   octet-stream)        │                     │                     │                │
   │──────────────────────────────────────────────────────────────────>│                │
   │  ← HTTP 200            │                     │                     │                │

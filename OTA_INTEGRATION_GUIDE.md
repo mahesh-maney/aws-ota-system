@@ -1,7 +1,7 @@
 # Digilux OTA (Over-The-Air) Update System — Integration Guide
 
-**Version:** 1.4
-**Date:** 2026-08-04
+**Version:** 1.5
+**Date:** 2026-08-12
 **Audience:** Integration / QA Team
 **Base URL:** `https://iot.digilux.co.in/smarthome` (custom domain)
 **Alternate URL:** `https://ds6nxf8ac5.execute-api.ap-south-1.amazonaws.com/smarthome`
@@ -17,16 +17,23 @@ The Digilux OTA system supports two update modes:
 
 **User-initiated:** The homeowner opens the Flutter app, sees an available update, gives explicit consent, and the device downloads and installs the update over HTTPS. The admin must have published the package first — users only control *when* to apply it, not *what* is available.
 
-### Update Types Supported
+### Device Types
 
-| Type | Description |
+Each upload is tied to a `deviceType` which determines the package name and file extension automatically:
+
+| `deviceType` | Derived `packageName` | File extension |
+|---|---|---|
+| `Network_controller_firmware` | `HomeAssistantUtility` | `.jar` |
+| `Network_controller_zigbee_firmware` | `ZigbeeFirmware` | `.tar` |
+| `Network_controller_Z2M_Firmware` | `Z2MFirmware` | `.bin` |
+| `Network_controller_Miscellaneous` | `NetControllerMisc` | `.py` |
+
+### Release Types
+
+| `releaseType` | Visibility |
 |---|---|
-| `CONTROLLER_FIRMWARE` | Core OS-level firmware for the controller |
-| `CONTROLLER_APP` | Main controller application (Python service) |
-| `DRIVER` | Hardware/peripheral drivers |
-| `ZIGBEE_DEVICE` | Firmware for Zigbee-connected end devices (via zigbee2mqtt) |
-| `CONFIG` | Configuration file updates |
-| `RULES` | Automation rules updates |
+| `PROD` | All registered devices |
+| `BETA` | Devices in the `DGX-Canary` IoT Thing Group only |
 
 ### Rollout Stages
 
@@ -43,8 +50,9 @@ The Digilux OTA system supports two update modes:
 | Method | Path | Auth | Description |
 |--------|------|------|-------------|
 | **Admin** | | `admin` group token | |
-| GET | `/api/v1/ota/packages` | Admin | List packages |
+| GET | `/api/v1/ota/packages` | Admin | List packages (filter: `?deviceType=`, `?status=`) |
 | POST | `/api/v1/ota/packages/upload-url` | Admin | Get pre-signed S3 upload URL |
+| PATCH | `/api/v1/ota/packages/{packageName}/{version}/activate` | Admin | Publish or withdraw a package |
 | GET | `/api/v1/controllers/{deviceId}/updates/available` | Admin | Compatibility check for a device |
 | POST | `/api/v1/ota/deployments` | Admin | Create deployment (push update) |
 | GET | `/api/v1/ota/deployments` | Admin | List all deployments |
@@ -74,6 +82,9 @@ Admin (API)                  AWS Cloud                        Controller Device
     │                            │    (SHA256 + ECDSA sign)           │
     │                            │    Package: PENDING → ACTIVE       │
     │                            │                                    │
+    │  PATCH /packages/.../activate │                                 │
+    │──────────────────────────>│  (publish package to users)        │
+    │                            │                                    │
     │  POST /deployments         │                                    │
     │──────────────────────────>│                                    │
     │  ← { jobId, QUEUED }      │                                    │
@@ -100,7 +111,7 @@ Admin (API)                  AWS Cloud                        Controller Device
 
 ## 3. Authentication
 
-### Admin endpoints (Sections 4.1–4.7)
+### Admin endpoints (Sections 4.1–4.8)
 
 Require a **Cognito ID Token** from the `admin` group.
 
@@ -110,7 +121,7 @@ Authorization: <Cognito ID Token>
 
 Non-admin tokens receive `HTTP 403 — Admin access required`.
 
-### End-user endpoints (Sections 4.8–4.11)
+### End-user endpoints (Sections 4.9–4.11)
 
 Require any valid **Cognito ID Token** — no admin group needed. The `userId` is extracted from the JWT `sub` claim to determine device ownership.
 
@@ -123,7 +134,7 @@ Users can only see and update devices registered under their own `userId`.
 ### How to obtain a token
 
 ```bash
-# Admin token (for sections 4.1–4.7)
+# Admin token (for sections 4.1–4.8)
 aws cognito-idp initiate-auth \
   --auth-flow USER_PASSWORD_AUTH \
   --client-id q7189jitfkk4ttesepkgls491 \
@@ -132,7 +143,7 @@ aws cognito-idp initiate-auth \
   --query 'AuthenticationResult.IdToken' \
   --output text
 
-# End-user token (for sections 4.8–4.11)
+# End-user token (for sections 4.9–4.12)
 aws cognito-idp initiate-auth \
   --auth-flow USER_PASSWORD_AUTH \
   --client-id q7189jitfkk4ttesepkgls491 \
@@ -160,18 +171,20 @@ GET /api/v1/ota/packages
 |---|---|---|
 | `status` | `ACTIVE` | Filter by status: `ACTIVE`, `PENDING` |
 | `packageName` | — | List all versions of a specific package |
+| `deviceType` | — | Filter by device type (e.g. `Network_controller_firmware`) |
 
 **Response `200`:**
 ```json
 {
   "packages": [
     {
-      "packageName": "controller-app",
-      "version": "4.0.0",
-      "packageType": "CONTROLLER_APP",
+      "packageName": "HomeAssistantUtility",
+      "version": "1.2.3",
+      "deviceType": "Network_controller_firmware",
+      "releaseType": "PROD",
       "status": "ACTIVE",
+      "activated": true,
       "artifactSize": 2097810,
-      "releaseNotes": "Zigbee 3.0 support",
       "createdBy": "admin@example.com",
       "createdAt": 1785475706560
     }
@@ -192,57 +205,94 @@ POST /api/v1/ota/packages/upload-url
 
 ```json
 {
-  "packageName": "controller-app",
-  "version": "4.0.0",
-  "packageType": "CONTROLLER_APP",
-  "fileName": "controller-app-4.0.0.tar.gz",
-  "releaseNotes": "Zigbee 3.0 support, improved stability",
-  "compatibleModels": ["DGX-1000"],
-  "minHwRevision": "1.0",
-  "dependsOn": {},
-  "incompatibleWith": {}
+  "deviceType":  "Network_controller_firmware",
+  "version":     "1.2.3",
+  "releaseType": "PROD"
 }
 ```
 
 | Field | Required | Description |
 |---|---|---|
-| `packageName` | Yes | Identifier for the software component |
-| `version` | Yes | Semantic version (e.g. `4.0.0`) |
-| `packageType` | Yes | One of the 6 supported types |
-| `fileName` | No | Defaults to `artifact.bin` |
-| `releaseNotes` | No | Human-readable changelog |
-| `compatibleModels` | No | e.g. `["DGX-1000"]`; empty = all models |
-| `minHwRevision` | No | e.g. `"1.0"` — devices below this are skipped |
-| `dependsOn` | No | `{"other-pkg": "2.0.0"}` |
-| `incompatibleWith` | No | `{"legacy-pkg": "1.0.0"}` |
+| `deviceType` | Yes | One of the 4 supported device types (see table above) |
+| `version` | Yes | Semantic version string (e.g. `1.2.3`) |
+| `releaseType` | Yes | `PROD` (all devices) or `BETA` (canary group only) |
+
+`packageName` and `fileName` are derived automatically from `deviceType` — you do not supply them.
 
 **Response `200`:**
 ```json
 {
-  "uploadUrl": "https://s3.amazonaws.com/...",
-  "s3Key": "application/controller-app/4.0.0/controller-app-4.0.0.tar.gz",
-  "expiresIn": 3600,
-  "packageName": "controller-app",
-  "version": "4.0.0",
-  "packageType": "CONTROLLER_APP",
-  "status": "PENDING",
-  "instructions": "PUT your binary to uploadUrl with Content-Type: application/octet-stream. The package will be registered automatically within seconds of upload."
+  "uploadUrl":   "https://digilux-ota-artifacts.s3.ap-south-1.amazonaws.com/...",
+  "s3Key":       "Network_controller_firmware/HomeAssistantUtility/1.2.3/HomeAssistantUtility-1.2.3.jar",
+  "expiresIn":   3600,
+  "packageName": "HomeAssistantUtility",
+  "version":     "1.2.3",
+  "deviceType":  "Network_controller_firmware",
+  "releaseType": "PROD",
+  "activated":   false,
+  "status":      "PENDING"
 }
 ```
 
 **Response `409`** — Version already exists and is ACTIVE:
 ```json
-{ "error": "Package controller-app@4.0.0 already exists and is ACTIVE. Use a new version number." }
+{ "error": "Package HomeAssistantUtility@1.2.3 already exists and is ACTIVE. Use a new version number." }
 ```
 
 **After receiving this response**, the integration must:
 
 1. `PUT <uploadUrl>` with the binary file and header `Content-Type: application/octet-stream`
-2. Poll `GET /api/v1/ota/packages?packageName=controller-app` until `status` changes from `PENDING` → `ACTIVE` (typically within 3–5 seconds)
+2. Poll `GET /api/v1/ota/packages?packageName=HomeAssistantUtility` until `status` changes from `PENDING` → `ACTIVE` (typically within 2–5 seconds)
+3. Call `PATCH /api/v1/ota/packages/HomeAssistantUtility/1.2.3/activate` with `{"activated": true}` to publish the package to users
 
 ---
 
-### 4.3 Check Available Updates for a Device
+### 4.3 Activate / Withdraw Package
+
+```
+PATCH /api/v1/ota/packages/{packageName}/{version}/activate
+```
+
+After a package reaches `status=ACTIVE` it is still hidden from end users until an admin explicitly publishes it. This two-step design lets you upload and validate a firmware binary before it becomes visible.
+
+**Path parameters:**
+
+| Parameter | Description |
+|---|---|
+| `packageName` | e.g. `HomeAssistantUtility` (returned by Get Upload URL) |
+| `version` | e.g. `1.2.3` |
+
+**Request body:**
+```json
+{ "activated": true }
+```
+
+Set `"activated": false` to withdraw a previously published package (removes it from user update checks without deleting the binary).
+
+**Prerequisite:** Package must have `status=ACTIVE` (set automatically by the artifact processor after upload).
+
+**Response `200`:**
+```json
+{
+  "packageName": "HomeAssistantUtility",
+  "version":     "1.2.3",
+  "activated":   true,
+  "activatedBy": "admin@example.com",
+  "activatedAt": 1785475706560
+}
+```
+
+**Validation errors:**
+
+| HTTP | Condition |
+|---|---|
+| `400` | Package is not yet `ACTIVE` (still `PENDING`) |
+| `403` | Non-admin token |
+| `404` | Package/version not found |
+
+---
+
+### 4.5 Check Available Updates for a Device
 
 ```
 GET /api/v1/controllers/{deviceId}/updates/available
@@ -264,7 +314,7 @@ GET /api/v1/controllers/{deviceId}/updates/available
   "availableUpdates": [
     {
       "packageName": "controller-app",
-      "packageType": "CONTROLLER_APP",
+      "deviceType": "Network_controller_firmware",
       "currentVersion": "3.0.0",
       "availableVersion": "4.0.0",
       "artifactSize": 2097810,
@@ -288,7 +338,7 @@ GET /api/v1/controllers/{deviceId}/updates/available
 
 ---
 
-### 4.4 Create Deployment
+### 4.5 Create Deployment
 
 ```
 POST /api/v1/ota/deployments
@@ -340,7 +390,7 @@ POST /api/v1/ota/deployments
 
 ---
 
-### 4.5 List Deployments
+### 4.6 List Deployments
 
 ```
 GET /api/v1/ota/deployments?limit=20
@@ -356,7 +406,7 @@ Returns jobs newest-first. `limit` max is 100.
       "jobId": "digilux-ota-controller-app-4-0-0-1785475706",
       "packageName": "controller-app",
       "version": "4.0.0",
-      "packageType": "CONTROLLER_APP",
+      "deviceType": "Network_controller_firmware",
       "targetType": "THING",
       "targetId": "edb39bba-baf1-4700-968c-a42228e53aa0",
       "rolloutStage": "CANARY",
@@ -372,7 +422,7 @@ Returns jobs newest-first. `limit` max is 100.
 
 ---
 
-### 4.6 Get Deployment Status
+### 4.7 Get Deployment Status
 
 ```
 GET /api/v1/ota/deployments/{jobId}
@@ -421,7 +471,7 @@ GET /api/v1/ota/deployments/{jobId}
 
 ---
 
-### 4.7 Abort Deployment
+### 4.8 Abort Deployment
 
 ```
 POST /api/v1/ota/deployments/{jobId}/abort
@@ -436,7 +486,7 @@ Cancels the IoT Job for any devices not yet in terminal state. Devices already i
 
 ---
 
-### 4.8 Check Available Updates (End User)
+### 4.9 Check Available Updates (End User)
 
 ```
 GET /api/v1/ota/device/available-updates
@@ -458,7 +508,7 @@ Returns all controller devices owned by the calling user and any available updat
       "availableUpdates": [
         {
           "packageName": "controller-app",
-          "packageType": "CONTROLLER_APP",
+          "deviceType": "Network_controller_firmware",
           "currentVersion": "3.0.0",
           "availableVersion": "4.0.0",
           "releaseNotes": "Zigbee 3.0 support",
@@ -472,11 +522,13 @@ Returns all controller devices owned by the calling user and any available updat
 }
 ```
 
-> `otaStatus: NOT_REGISTERED` — OTA agent has never started on this device. The device will not appear until it has connected at least once.
+> `otaStatus: NOT_REGISTERED` — OTA agent has never started on this device.
+
+> Only packages with `status=ACTIVE` **and** `activated=true` appear in user update checks. BETA packages only appear for devices in the `DGX-Canary` IoT Thing Group. The device will not appear until it has connected at least once.
 
 ---
 
-### 4.9 Give Update Consent (End User)
+### 4.10 Give Update Consent (End User)
 
 ```
 POST /api/v1/ota/my/updates/consent
@@ -523,7 +575,7 @@ Records user consent and triggers the OTA update. The device receives an IoT Job
 
 ---
 
-### 4.10 Get Update Status (End User)
+### 4.11 Get Update Status (End User)
 
 ```
 GET /api/v1/ota/my/updates/{jobId}/status
@@ -561,7 +613,7 @@ Returns the status of a user-initiated update. The `jobId` must belong to a cons
 
 ---
 
-### 4.11 Get Download Link — App-Mediated Update (End User)
+### 4.12 Get Download Link — App-Mediated Update (End User)
 
 ```
 POST /api/v1/ota/my/updates/download-link
@@ -593,7 +645,7 @@ An alternative to the consent flow. The Lambda returns a **CloudFront signed dow
   "packageName":   "controller-app",
   "version":       "4.0.0",
   "size":          12456789,
-  "packageType":   "deb",
+  "deviceType": "Network_controller_firmware",
   "expiresAt":     "2026-08-04T15:00:00Z",
   "mqttDelivered": true,
   "message":       "Download URL sent to device via MQTT. Device will begin download shortly."
@@ -1190,6 +1242,6 @@ Results are printed to stdout and saved to `infrastructure/e2e_test_results.txt`
 | `1.0` | 2026-07-31 | Digilux Engineering | Initial release — full OTA system: package upload, artifact processing, deployment lifecycle, device status handling, abort flow, audit logging, compatibility check, IoT integration |
 | `1.1` | 2026-07-31 | Digilux Engineering | Production hardening: SNS alert topic (`digilux-ota-alerts`), SQS DLQs for async Lambdas, 30-day log retention on all Lambda log groups, S3 lifecycle policy (non-current versions → STANDARD_IA @30d, deleted @90d), individual CloudWatch alarms for all 6 Lambdas + DLQ depth alarms, updated dashboard with DLQ widget; fixed e2e test T08 duplicate deployment API call bug |
 | `1.2` | 2026-07-31 | Digilux Engineering | Accuracy fixes: added `REJECTED` job status, corrected `NEEDS_RECOVERY` alert path (CloudWatch Logs Insights, not Lambda error alarm), added `instructions` field to upload-url response, documented semver version comparison logic and empty `compatibleModels` behaviour |
-| `1.3` | 2026-08-04 | Digilux Engineering | User-initiated OTA flow: Sections 4.8–4.10 (check updates, consent, status); updated auth section to cover user vs admin tokens; added Section 5.2 (user flow sequence); new DynamoDB table `digilux_ota_user_consents`; device ownership verification via `digilux_device_data`; rate limiting; consent audit trail |
+| `1.3` | 2026-08-04 | Digilux Engineering | User-initiated OTA flow: Sections 4.9–4.10 (check updates, consent, status); updated auth section to cover user vs admin tokens; added Section 5.2 (user flow sequence); new DynamoDB table `digilux_ota_user_consents`; device ownership verification via `digilux_device_data`; rate limiting; consent audit trail |
 | `1.5` | 2026-08-12 | Digilux Engineering | Consolidated `digilux_device_inventory` into `digilux_device_data`; CloudFront signed URLs for artifact delivery; tiered presign expiry (1hr–48hr by file size, `ota.config`); IoT Job timeout 24hr; `dynamodb:UpdateItem` added to user Lambda IAM role; user e2e test suite expanded to 53 tests (TU01–TU11) |
 | `1.4` | 2026-08-04 | Digilux Engineering | App-mediated download-link flow: Section 4.11 (`POST /api/v1/ota/my/updates/download-link`); Lambda returns pre-signed URL to Flutter app and simultaneously publishes download payload to device MQTT OTA topic; Section 5.3 (flow comparison table: consent vs download-link); new Lambda `digilux_ota_user_get_download_link`; IAM `iot:Publish` permission on `iot/device/*/ota` |

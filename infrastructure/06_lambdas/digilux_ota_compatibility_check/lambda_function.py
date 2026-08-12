@@ -101,7 +101,7 @@ def lambda_handler(event, context):
 
             available_updates.append({
                 "packageName": pkg_name,
-                "packageType": pkg["packageType"],
+                "deviceType": pkg.get("deviceType", ""),
                 "currentVersion": current_ver,
                 "availableVersion": latest_ver,
                 "artifactSize": pkg.get("artifactSize", 0),

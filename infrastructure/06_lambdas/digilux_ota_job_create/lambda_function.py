@@ -214,7 +214,7 @@ def lambda_handler(event, context):
             artifact_size = int(artifact_size)
 
         job_doc = {
-            "operation": pkg["packageType"],
+            "operation": pkg.get("deviceType", ""),
             "packageName": pkg_name,
             "version": version,
             "artifact": {
@@ -245,7 +245,7 @@ def lambda_handler(event, context):
             "jobId": job_id,
             "targets": iot_targets,
             "document": json.dumps(job_doc),
-            "description": f"{pkg['packageType']} update: {pkg_name} to {version}",
+            "description": f"{pkg.get('deviceType', '')} update: {pkg_name} to {version}",
             "jobExecutionsRolloutConfig": rollout_cfg,
             "abortConfig": ABORT_CONFIG,
             "timeoutConfig": {"inProgressTimeoutInMinutes": 60},
@@ -266,7 +266,7 @@ def lambda_handler(event, context):
             "iotJobArn": iot_resp["jobArn"],
             "packageName": pkg_name,
             "version": version,
-            "packageType": pkg["packageType"],
+            "deviceType": pkg.get("deviceType", ""),
             "targetType": target_type,
             "targetId": target_id,
             "rolloutStage": rollout_stage,
@@ -291,7 +291,7 @@ def lambda_handler(event, context):
                jobId=job_id, iotJobArn=iot_resp["jobArn"],
                targetType=target_type, targetId=target_id,
                rolloutStage=rollout_stage, artifactSize=artifact_size,
-               packageType=pkg["packageType"])
+               deviceType=pkg.get("deviceType", ""))
 
         log.info(json.dumps({
             "msg": "deployment_created",
@@ -359,7 +359,7 @@ def _list_jobs(event: dict) -> dict:
             "jobId":        i.get("jobId"),
             "packageName":  i.get("packageName"),
             "version":      i.get("version"),
-            "packageType":  i.get("packageType"),
+            "deviceType": i.get("deviceType"),
             "targetType":   i.get("targetType"),
             "targetId":     i.get("targetId"),
             "rolloutStage": i.get("rolloutStage"),

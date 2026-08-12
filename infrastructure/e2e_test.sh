@@ -88,17 +88,17 @@ code=$(http_code GET "/api/v1/ota/packages" "" "Bearer invalid.token.here")
 _section "T02 — INPUT VALIDATION: upload-url"
 # ─────────────────────────────────────────────────────────────────────────────
 
-code=$(http_code POST "/api/v1/ota/packages/upload-url" '{"version":"1.0.0","packageType":"CONTROLLER_APP"}')
-assert_code "$code" "400" "Missing packageName → 400"
+code=$(http_code POST "/api/v1/ota/packages/upload-url" '{"version":"1.0.0","releaseType":"PROD"}')
+assert_code "$code" "400" "Missing deviceType → 400"
 
-code=$(http_code POST "/api/v1/ota/packages/upload-url" '{"packageName":"test","packageType":"CONTROLLER_APP"}')
+code=$(http_code POST "/api/v1/ota/packages/upload-url" '{"deviceType":"Network_controller_firmware","releaseType":"PROD"}')
 assert_code "$code" "400" "Missing version → 400"
 
-code=$(http_code POST "/api/v1/ota/packages/upload-url" '{"packageName":"test","version":"1.0.0"}')
-assert_code "$code" "400" "Missing packageType → 400"
+code=$(http_code POST "/api/v1/ota/packages/upload-url" '{"deviceType":"Network_controller_firmware","version":"1.0.0"}')
+assert_code "$code" "400" "Missing releaseType → 400"
 
-code=$(http_code POST "/api/v1/ota/packages/upload-url" '{"packageName":"test","version":"1.0.0","packageType":"INVALID_TYPE"}')
-assert_code "$code" "400" "Invalid packageType → 400"
+code=$(http_code POST "/api/v1/ota/packages/upload-url" '{"deviceType":"INVALID_DEVICE","version":"1.0.0","releaseType":"PROD"}')
+assert_code "$code" "400" "Invalid deviceType → 400"
 
 # ─────────────────────────────────────────────────────────────────────────────
 _section "T03 — INPUT VALIDATION: deployments"
@@ -134,25 +134,27 @@ _section "T05 — PACKAGE UPLOAD FLOW"
 # Use a unique version to avoid collision
 TEST_VERSION="5.0.$(date +%s)-$RANDOM"
 UPLOAD_RESP=$(call POST "/api/v1/ota/packages/upload-url" \
-  "{\"packageName\":\"controller-app\",\"version\":\"${TEST_VERSION}\",\"packageType\":\"CONTROLLER_APP\",\"fileName\":\"test-artifact.tar.gz\",\"releaseNotes\":\"E2E test package\",\"compatibleModels\":[\"DGX-1000\"]}")
+  "{\"deviceType\":\"Network_controller_firmware\",\"version\":\"${TEST_VERSION}\",\"releaseType\":\"PROD\",\"releaseNotes\":\"E2E test package\"}")
 
 code=$(http_code POST "/api/v1/ota/packages/upload-url" \
-  "{\"packageName\":\"controller-app\",\"version\":\"${TEST_VERSION}\",\"packageType\":\"CONTROLLER_APP\",\"fileName\":\"test-artifact.tar.gz\"}")
+  "{\"deviceType\":\"Network_controller_firmware\",\"version\":\"${TEST_VERSION}\",\"releaseType\":\"PROD\"}")
 assert_code "$code" "200" "Upload URL request returns 200"
 
 assert_field "$UPLOAD_RESP" "status" "PENDING" "Package starts as PENDING"
 assert_has_field "$UPLOAD_RESP" "uploadUrl" "Response has uploadUrl"
 assert_has_field "$UPLOAD_RESP" "s3Key" "Response has s3Key"
 
+# Derive packageName from response (determined by deviceType map)
+TEST_PKG_NAME=$(echo "$UPLOAD_RESP" | python3 -c "import json,sys; print(json.load(sys.stdin).get('packageName',''))")
 UPLOAD_URL=$(echo "$UPLOAD_RESP" | python3 -c "import json,sys; print(json.load(sys.stdin).get('uploadUrl',''))")
 S3_KEY=$(echo "$UPLOAD_RESP" | python3 -c "import json,sys; print(json.load(sys.stdin).get('s3Key',''))")
-echo "  → s3Key: $S3_KEY"
+echo "  → packageName: $TEST_PKG_NAME  s3Key: $S3_KEY"
 
 # Upload a real gzip tarball
-echo "test content for OTA E2E validation $(date)" | gzip > /tmp/test_artifact.tar.gz
+echo "test content for OTA E2E validation $(date)" | gzip > /tmp/test_artifact.bin
 HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" -X PUT "$UPLOAD_URL" \
   -H "Content-Type: application/octet-stream" \
-  --data-binary @/tmp/test_artifact.tar.gz)
+  --data-binary @/tmp/test_artifact.bin)
 assert_code "$HTTP_CODE" "200" "Binary PUT to S3 pre-signed URL → 200"
 
 # Wait for artifact processor (S3 event → Lambda → ACTIVE)
@@ -161,7 +163,7 @@ for i in $(seq 1 15); do
   sleep 1
   STATUS=$(aws dynamodb get-item \
     --table-name digilux_ota_packages \
-    --key "{\"packageName\":{\"S\":\"controller-app\"},\"version\":{\"S\":\"${TEST_VERSION}\"}}" \
+    --key "{\"packageName\":{\"S\":\"${TEST_PKG_NAME}\"},\"version\":{\"S\":\"${TEST_VERSION}\"}}" \
     --region "$REGION" \
     --query 'Item.status.S' --output text 2>/dev/null)
   [ "$STATUS" = "ACTIVE" ] && break
@@ -173,11 +175,11 @@ done
 # Verify SHA256 and signature were written
 SHA256=$(aws dynamodb get-item \
   --table-name digilux_ota_packages \
-  --key "{\"packageName\":{\"S\":\"controller-app\"},\"version\":{\"S\":\"${TEST_VERSION}\"}}" \
+  --key "{\"packageName\":{\"S\":\"${TEST_PKG_NAME}\"},\"version\":{\"S\":\"${TEST_VERSION}\"}}" \
   --region "$REGION" --query 'Item.sha256.S' --output text 2>/dev/null)
 SIG=$(aws dynamodb get-item \
   --table-name digilux_ota_packages \
-  --key "{\"packageName\":{\"S\":\"controller-app\"},\"version\":{\"S\":\"${TEST_VERSION}\"}}" \
+  --key "{\"packageName\":{\"S\":\"${TEST_PKG_NAME}\"},\"version\":{\"S\":\"${TEST_VERSION}\"}}" \
   --region "$REGION" --query 'Item.signature.S' --output text 2>/dev/null)
 [ -n "$SHA256" ] && [ "$SHA256" != "None" ] \
   && _pass "SHA256 written by artifact_processor: ${SHA256:0:16}..." \
@@ -188,10 +190,11 @@ SIG=$(aws dynamodb get-item \
 
 # Duplicate upload of same ACTIVE version → 409
 code=$(http_code POST "/api/v1/ota/packages/upload-url" \
-  "{\"packageName\":\"controller-app\",\"version\":\"${TEST_VERSION}\",\"packageType\":\"CONTROLLER_APP\"}")
+  "{\"deviceType\":\"Network_controller_firmware\",\"version\":\"${TEST_VERSION}\",\"releaseType\":\"PROD\"}")
 assert_code "$code" "409" "Duplicate ACTIVE version upload → 409"
 
 echo "TEST_VERSION=$TEST_VERSION" > /tmp/ota_test_version.txt
+echo "TEST_PKG_NAME=$TEST_PKG_NAME" >> /tmp/ota_test_version.txt
 
 # ─────────────────────────────────────────────────────────────────────────────
 _section "T06 — LIST PACKAGES"
@@ -201,8 +204,8 @@ LIST=$(call GET "/api/v1/ota/packages")
 COUNT=$(echo "$LIST" | python3 -c "import json,sys; print(json.load(sys.stdin).get('count',0))")
 [ "$COUNT" -gt 0 ] && _pass "GET /packages returns $COUNT packages" || _fail "GET /packages returned 0 packages"
 
-LIST_FILTERED=$(call GET "/api/v1/ota/packages?packageName=controller-app")
-assert_has_field "$LIST_FILTERED" "packages" "Filter by packageName returns packages array"
+LIST_FILTERED=$(call GET "/api/v1/ota/packages?deviceType=Network_controller_firmware")
+assert_has_field "$LIST_FILTERED" "packages" "Filter by deviceType returns packages array"
 
 # ─────────────────────────────────────────────────────────────────────────────
 _section "T07 — COMPATIBILITY CHECK"
@@ -220,12 +223,13 @@ echo "  → Device installed controller-app: $CURR_VER"
 _section "T08 — DEPLOYMENT CREATION"
 # ─────────────────────────────────────────────────────────────────────────────
 
-TEST_VERSION=$(cat /tmp/ota_test_version.txt | cut -d= -f2)
+TEST_VERSION=$(grep TEST_VERSION /tmp/ota_test_version.txt | cut -d= -f2)
+TEST_PKG_NAME=$(grep TEST_PKG_NAME /tmp/ota_test_version.txt | cut -d= -f2)
 
 # Single call — capture body and HTTP status code together to avoid duplicate job creation
 DEPLOY_RESP=$(curl -s -w "\n%{http_code}" -X POST "${BASE}/api/v1/ota/deployments" \
   -H "Authorization: ${TOKEN}" -H "Content-Type: application/json" \
-  -d "{\"packageName\":\"controller-app\",\"version\":\"${TEST_VERSION}\",\"targetType\":\"THING\",\"targetId\":\"${DEVICE_ID}\",\"rolloutStage\":\"CANARY\"}")
+  -d "{\"packageName\":\"${TEST_PKG_NAME}\",\"version\":\"${TEST_VERSION}\",\"targetType\":\"THING\",\"targetId\":\"${DEVICE_ID}\",\"rolloutStage\":\"CANARY\"}")
 DEPLOY=$(echo "$DEPLOY_RESP" | head -1)
 DEPLOY_CODE=$(echo "$DEPLOY_RESP" | tail -1)
 
@@ -267,14 +271,15 @@ _section "T10 — DEVICE STATUS HANDLER (simulate SUCCEEDED)"
 # ─────────────────────────────────────────────────────────────────────────────
 
 JOB_ID=$(cat /tmp/ota_test_job_id.txt)
-TEST_VERSION=$(cat /tmp/ota_test_version.txt | cut -d= -f2)
+TEST_VERSION=$(grep TEST_VERSION /tmp/ota_test_version.txt | cut -d= -f2)
+TEST_PKG_NAME=$(grep TEST_PKG_NAME /tmp/ota_test_version.txt | cut -d= -f2)
 
 if [ "$JOB_ID" != "NOJOB" ]; then
   # Publish IN_PROGRESS then SUCCEEDED
-  printf '{"jobId":"%s","status":"IN_PROGRESS","progress":50,"packageName":"controller-app","version":"%s"}' \
-    "$JOB_ID" "$TEST_VERSION" > /tmp/mqtt_inprogress.json
-  printf '{"jobId":"%s","status":"SUCCEEDED","progress":100,"packageName":"controller-app","version":"%s","installedVersion":"%s"}' \
-    "$JOB_ID" "$TEST_VERSION" "$TEST_VERSION" > /tmp/mqtt_succeeded.json
+  printf '{"jobId":"%s","status":"IN_PROGRESS","progress":50,"packageName":"%s","version":"%s"}' \
+    "$JOB_ID" "$TEST_PKG_NAME" "$TEST_VERSION" > /tmp/mqtt_inprogress.json
+  printf '{"jobId":"%s","status":"SUCCEEDED","progress":100,"packageName":"%s","version":"%s","installedVersion":"%s"}' \
+    "$JOB_ID" "$TEST_PKG_NAME" "$TEST_VERSION" "$TEST_VERSION" > /tmp/mqtt_succeeded.json
 
   aws iot-data publish \
     --topic "iot/device/${DEVICE_ID}/ota/status" \
@@ -309,10 +314,10 @@ if [ "$JOB_ID" != "NOJOB" ]; then
     --key-condition-expression "deviceId = :d" \
     --expression-attribute-values "{\":d\":{\"S\":\"${DEVICE_ID}\"}}" \
     --region "$REGION" \
-    --query "Items[0].installedVersions.M.\"controller-app\".S" --output text 2>/dev/null)
+    --query "Items[0].installedVersions.M.\"${TEST_PKG_NAME}\".S" --output text 2>/dev/null)
   [ "$INV_VER" = "$TEST_VERSION" ] \
-    && _pass "Device data updated: controller-app=$INV_VER" \
-    || _fail "installedVersions not updated — got controller-app=$INV_VER, expected $TEST_VERSION"
+    && _pass "Device data updated: ${TEST_PKG_NAME}=$INV_VER" \
+    || _fail "installedVersions not updated — got ${TEST_PKG_NAME}=$INV_VER, expected $TEST_VERSION"
 
   # Verify pendingJobId cleared
   PENDING=$(aws dynamodb query \
@@ -471,8 +476,8 @@ done
 NOTIF_COUNT=$(aws s3api get-bucket-notification-configuration \
   --bucket digilux-ota-artifacts --region "$REGION" \
   --query 'length(LambdaFunctionConfigurations)' --output text 2>/dev/null)
-[ "$NOTIF_COUNT" = "6" ] && _pass "S3 bucket has 6 event notifications configured" \
-  || _warn "S3 bucket event notifications: expected 6, got $NOTIF_COUNT"
+[ "$NOTIF_COUNT" = "4" ] && _pass "S3 bucket has 4 event notifications configured" \
+  || _warn "S3 bucket event notifications: expected 4, got $NOTIF_COUNT"
 
 # Verify ECDSA signing key in Secrets Manager
 SECRET=$(aws secretsmanager describe-secret \

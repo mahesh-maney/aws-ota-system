@@ -31,8 +31,17 @@ class EventsStack(cdk.Stack):
         fn_arn = f"arn:aws:lambda:{region}:{account}:function:{prefix}_ota_artifact_processor"
         artifact_proc = lambda_.Function.from_function_arn(self, "ArtifactProc", fn_arn)
 
-        # S3 event: any new object triggers artifact_processor
-        bucket.add_event_notification(
-            s3.EventType.OBJECT_CREATED,
-            s3n.LambdaDestination(artifact_proc),
-        )
+        # S3 event: one notification per deviceType prefix → artifact_processor
+        # Prefixes match the DEVICE_TYPE_MAP keys in upload_url lambda.
+        device_type_prefixes = [
+            "Network_controller_firmware/",
+            "Network_controller_zigbee_firmware/",
+            "Network_controller_Z2M_Firmware/",
+            "Network_controller_Miscellaneous/",
+        ]
+        for i, pfx in enumerate(device_type_prefixes):
+            bucket.add_event_notification(
+                s3.EventType.OBJECT_CREATED,
+                s3n.LambdaDestination(artifact_proc),
+                s3.NotificationKeyFilter(prefix=pfx),
+            )
