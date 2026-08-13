@@ -33,7 +33,7 @@ Each upload is tied to a `deviceType` which determines the package name and file
 | `releaseType` | Visibility |
 |---|---|
 | `PROD` | All registered devices |
-| `BETA` | Devices in the `DGX-Canary` IoT Thing Group only |
+| `UAT` | Devices in the `DGX-Canary` IoT Thing Group only |
 
 ### Rollout Stages
 
@@ -51,7 +51,7 @@ Each upload is tied to a `deviceType` which determines the package name and file
 |--------|------|------|-------------|
 | **Admin** | | `admin` group token | |
 | GET | `/api/v1/ota/packages` | Admin | List packages (filter: `?deviceType=`, `?status=`) |
-| POST | `/api/v1/ota/packages/upload-url` | Admin | Get pre-signed S3 upload URL |
+| POST | `/api/v1/ota/packages/upload-artefact` | Admin | Get pre-signed S3 upload URL |
 | PATCH | `/api/v1/ota/packages/{packageName}/{version}/activate` | Admin | Publish or withdraw a package |
 | GET | `/api/v1/controllers/{deviceId}/updates/available` | Admin | Compatibility check for a device |
 | POST | `/api/v1/ota/deployments` | Admin | Create deployment (push update) |
@@ -71,7 +71,7 @@ Each upload is tied to a `deviceType` which determines the package name and file
 ```
 Admin (API)                  AWS Cloud                        Controller Device
     │                            │                                    │
-    │  POST /packages/upload-url │                                    │
+    │  POST /packages/upload-artefact │                                    │
     │──────────────────────────>│                                    │
     │  ← { uploadUrl, s3Key }   │                                    │
     │                            │                                    │
@@ -201,7 +201,7 @@ GET /api/v1/ota/packages
 ### 4.2 Get Upload URL
 
 ```
-POST /api/v1/ota/packages/upload-url
+POST /api/v1/ota/packages/upload-artefact
 ```
 
 **Request body:**
@@ -220,7 +220,7 @@ POST /api/v1/ota/packages/upload-url
 |---|---|---|
 | `deviceType` | Yes | One of the 4 supported device types (see table in Section 1) |
 | `version` | Yes | Semantic version string (e.g. `1.2.3`) |
-| `releaseType` | Yes | `PROD` (all devices) or `BETA` (canary group only) |
+| `releaseType` | Yes | `PROD` (all devices) or `UAT` (canary group only) |
 | `checksum` | No | SHA256 hex of the binary. If provided, the artifact processor verifies it on upload — mismatch marks the package `CORRUPTED` and deletes the file |
 | `releaseNotes` | No | Free-text description shown to users |
 
@@ -538,7 +538,7 @@ Returns all controller devices owned by the calling user and any available updat
 
 > `otaStatus: NOT_REGISTERED` — OTA agent has never started on this device.
 
-> Only packages with `status=ACTIVE` **and** `activated=true` appear in user update checks. BETA packages only appear for devices in the `DGX-Canary` IoT Thing Group. The device will not appear until it has connected at least once.
+> Only packages with `status=ACTIVE` **and** `activated=true` appear in user update checks. UAT packages only appear for devices in the `DGX-Canary` IoT Thing Group. The device will not appear until it has connected at least once.
 
 ---
 
@@ -705,7 +705,7 @@ An alternative to the consent flow. The Lambda returns a **CloudFront signed dow
 ### 5.1 Admin-initiated deployment
 
 ```
-1. POST /api/v1/ota/packages/upload-url        (admin token)
+1. POST /api/v1/ota/packages/upload-artefact        (admin token)
    → receive { uploadUrl, s3Key, status: "PENDING" }
 
 2. PUT <uploadUrl>  (binary, Content-Type: application/octet-stream)
@@ -942,7 +942,7 @@ The inventory is updated by:
 ## 8. Package Lifecycle
 
 ```
-POST /upload-url     S3 Upload         S3 Event → Lambda           Deploy
+POST /upload-artefact     S3 Upload         S3 Event → Lambda           Deploy
    PENDING    ──────────────>   PENDING   ──────────────>   ACTIVE   ──────>  In IoT Job
                                            (SHA256 + ECDSA
                                             computed & stored)
@@ -1145,12 +1145,12 @@ This resets the device to `controller-app@2.0.0` with no pending job — allowin
 #### TC-A02 Package Upload Flow
 | # | Action | Expected |
 |---|---|---|
-| 1 | `POST /packages/upload-url` with valid body | `200` with `uploadUrl`, `s3Key`, `status: PENDING` |
+| 1 | `POST /packages/upload-artefact` with valid body | `200` with `uploadUrl`, `s3Key`, `status: PENDING` |
 | 2 | `PUT <uploadUrl>` with binary (no auth header) | `200` from S3 |
 | 3 | Poll `GET /packages?packageName=<name>` for up to 15 s | `status` changes from `PENDING` → `ACTIVE` |
 | 4 | Re-upload same `packageName@version` | `409 — already ACTIVE` |
-| 5 | `POST /packages/upload-url` missing `packageName` | `400` |
-| 6 | `POST /packages/upload-url` with invalid `packageType` | `400` |
+| 5 | `POST /packages/upload-artefact` missing `packageName` | `400` |
+| 6 | `POST /packages/upload-artefact` with invalid `packageType` | `400` |
 
 #### TC-A03 Compatibility Check
 | # | Action | Expected |
@@ -1255,7 +1255,7 @@ Results are printed to stdout and saved to `infrastructure/e2e_test_results.txt`
 |---|---|---|---|
 | `1.0` | 2026-07-31 | Digilux Engineering | Initial release — full OTA system: package upload, artifact processing, deployment lifecycle, device status handling, abort flow, audit logging, compatibility check, IoT integration |
 | `1.1` | 2026-07-31 | Digilux Engineering | Production hardening: SNS alert topic (`digilux-ota-alerts`), SQS DLQs for async Lambdas, 30-day log retention on all Lambda log groups, S3 lifecycle policy (non-current versions → STANDARD_IA @30d, deleted @90d), individual CloudWatch alarms for all 6 Lambdas + DLQ depth alarms, updated dashboard with DLQ widget; fixed e2e test T08 duplicate deployment API call bug |
-| `1.2` | 2026-07-31 | Digilux Engineering | Accuracy fixes: added `REJECTED` job status, corrected `NEEDS_RECOVERY` alert path (CloudWatch Logs Insights, not Lambda error alarm), added `instructions` field to upload-url response, documented semver version comparison logic and empty `compatibleModels` behaviour |
+| `1.2` | 2026-07-31 | Digilux Engineering | Accuracy fixes: added `REJECTED` job status, corrected `NEEDS_RECOVERY` alert path (CloudWatch Logs Insights, not Lambda error alarm), added `instructions` field to upload-artefact response, documented semver version comparison logic and empty `compatibleModels` behaviour |
 | `1.3` | 2026-08-04 | Digilux Engineering | User-initiated OTA flow: Sections 4.9–4.10 (check updates, consent, status); updated auth section to cover user vs admin tokens; added Section 5.2 (user flow sequence); new DynamoDB table `digilux_ota_user_consents`; device ownership verification via `digilux_device_data`; rate limiting; consent audit trail |
 | `1.5` | 2026-08-12 | Digilux Engineering | Consolidated `digilux_device_inventory` into `digilux_device_data`; CloudFront signed URLs for artifact delivery; tiered presign expiry (1hr–48hr by file size, `ota.config`); IoT Job timeout 24hr; `dynamodb:UpdateItem` added to user Lambda IAM role; user e2e test suite expanded to 53 tests (TU01–TU11) |
 | `1.4` | 2026-08-04 | Digilux Engineering | App-mediated download-link flow: Section 4.11 (`POST /api/v1/ota/my/updates/download-link`); Lambda returns pre-signed URL to Flutter app and simultaneously publishes download payload to device MQTT OTA topic; Section 5.3 (flow comparison table: consent vs download-link); new Lambda `digilux_ota_user_get_download_link`; IAM `iot:Publish` permission on `iot/device/*/ota` |

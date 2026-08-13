@@ -68,7 +68,7 @@
       "key": "release_type",
       "value": "PROD",
       "type": "string",
-      "description": "PROD (all devices) or BETA (canary group only)"
+      "description": "PROD (all devices) or UAT (canary group only)"
     },
     {
       "key": "ota_admin_pool_client_id",
@@ -351,7 +351,7 @@
               }
             },
             "url": {
-              "raw": "{{base_url}}/api/v1/ota/packages/upload-url",
+              "raw": "{{base_url}}/api/v1/ota/packages/upload-artefact",
               "host": [
                 "{{base_url}}"
               ],
@@ -360,10 +360,10 @@
                 "v1",
                 "ota",
                 "packages",
-                "upload-url"
+                "upload-artefact"
               ]
             },
-            "description": "Request a pre-signed S3 upload URL for a new firmware package.\n\n**Required fields:**\n| Field | Description | Example |\n|-------|-------------|---------|\n| `deviceType` | One of the 4 supported device types | `Network_controller_firmware` |\n| `version` | Semantic version string | `1.2.3` |\n| `releaseType` | `PROD` (all devices) or `BETA` (canary group only) | `PROD` |\n\n**Supported `deviceType` values:**\n| deviceType | Derived filename |\n|---|---|\n| `Network_controller_firmware` | `HomeAssistantUtility-{version}.jar` |\n| `Network_controller_zigbee_firmware` | `ZigbeeFirmware-{version}.tar` |\n| `Network_controller_Z2M_Firmware` | `Z2MFirmware-{version}.bin` |\n| `Network_controller_Miscellaneous` | `NetControllerMisc-{version}.py` |\n\n**Response:** `uploadUrl` (PUT to this), `s3Key`, `packageName`, `status=PENDING`\n\n**Next step:** PUT the binary to `uploadUrl` \u2192 artifact_processor promotes to `ACTIVE` automatically."
+            "description": "Request a pre-signed S3 upload URL for a new firmware package.\n\n**Required fields:**\n| Field | Description | Example |\n|-------|-------------|---------|\n| `deviceType` | One of the 4 supported device types | `Network_controller_firmware` |\n| `version` | Semantic version string | `1.2.3` |\n| `releaseType` | `PROD` (all devices) or `UAT` (canary group only) | `PROD` |\n\n**Supported `deviceType` values:**\n| deviceType | Derived filename |\n|---|---|\n| `Network_controller_firmware` | `HomeAssistantUtility-{version}.jar` |\n| `Network_controller_zigbee_firmware` | `ZigbeeFirmware-{version}.tar` |\n| `Network_controller_Z2M_Firmware` | `Z2MFirmware-{version}.bin` |\n| `Network_controller_Miscellaneous` | `NetControllerMisc-{version}.py` |\n\n**Response:** `uploadUrl` (PUT to this), `s3Key`, `packageName`, `status=PENDING`\n\n**Next step:** PUT the binary to `uploadUrl` \u2192 artifact_processor promotes to `ACTIVE` automatically."
           },
           "response": [
             {
@@ -380,7 +380,7 @@
               "originalRequest": {
                 "method": "POST",
                 "url": {
-                  "raw": "{{base_url}}/api/v1/ota/packages/upload-url"
+                  "raw": "{{base_url}}/api/v1/ota/packages/upload-artefact"
                 }
               }
             },
@@ -398,7 +398,7 @@
               "originalRequest": {
                 "method": "POST",
                 "url": {
-                  "raw": "{{base_url}}/api/v1/ota/packages/upload-url"
+                  "raw": "{{base_url}}/api/v1/ota/packages/upload-artefact"
                 }
               }
             },
@@ -416,7 +416,7 @@
               "originalRequest": {
                 "method": "POST",
                 "url": {
-                  "raw": "{{base_url}}/api/v1/ota/packages/upload-url"
+                  "raw": "{{base_url}}/api/v1/ota/packages/upload-artefact"
                 }
               }
             },
@@ -434,7 +434,7 @@
               "originalRequest": {
                 "method": "POST",
                 "url": {
-                  "raw": "{{base_url}}/api/v1/ota/packages/upload-url"
+                  "raw": "{{base_url}}/api/v1/ota/packages/upload-artefact"
                 }
               }
             }
@@ -1124,7 +1124,7 @@
               }
             },
             "url": {
-              "raw": "{{base_url}}/api/v1/ota/packages/upload-url",
+              "raw": "{{base_url}}/api/v1/ota/packages/upload-artefact",
               "host": [
                 "{{base_url}}"
               ],
@@ -1133,10 +1133,10 @@
                 "v1",
                 "ota",
                 "packages",
-                "upload-url"
+                "upload-artefact"
               ]
             },
-            "description": "Request a pre-signed S3 upload URL for a new firmware package.\n\n**Required fields:**\n| Field | Description | Example |\n|-------|-------------|---------|\n| `deviceType` | One of the 4 supported device types | `Network_controller_firmware` |\n| `version` | Semantic version string | `1.2.3` |\n| `releaseType` | `PROD` (all devices) or `BETA` (canary group only) | `PROD` |\n\n**Supported `deviceType` values:**\n| deviceType | Derived filename |\n|---|---|\n| `Network_controller_firmware` | `HomeAssistantUtility-{version}.jar` |\n| `Network_controller_zigbee_firmware` | `ZigbeeFirmware-{version}.tar` |\n| `Network_controller_Z2M_Firmware` | `Z2MFirmware-{version}.bin` |\n| `Network_controller_Miscellaneous` | `NetControllerMisc-{version}.py` |\n\n**Response:** `uploadUrl` (PUT to this), `s3Key`, `packageName`, `status=PENDING`\n\n**Next step:** PUT the binary to `uploadUrl` \u2192 artifact_processor promotes to `ACTIVE` automatically."
+            "description": "Request a pre-signed S3 upload URL for a new firmware package.\n\n**Required fields:**\n| Field | Description | Example |\n|-------|-------------|---------|\n| `deviceType` | One of the 4 supported device types | `Network_controller_firmware` |\n| `version` | Semantic version string | `1.2.3` |\n| `releaseType` | `PROD` (all devices) or `UAT` (canary group only) | `PROD` |\n\n**Supported `deviceType` values:**\n| deviceType | Derived filename |\n|---|---|\n| `Network_controller_firmware` | `HomeAssistantUtility-{version}.jar` |\n| `Network_controller_zigbee_firmware` | `ZigbeeFirmware-{version}.tar` |\n| `Network_controller_Z2M_Firmware` | `Z2MFirmware-{version}.bin` |\n| `Network_controller_Miscellaneous` | `NetControllerMisc-{version}.py` |\n\n**Response:** `uploadUrl` (PUT to this), `s3Key`, `packageName`, `status=PENDING`\n\n**Next step:** PUT the binary to `uploadUrl` \u2192 artifact_processor promotes to `ACTIVE` automatically."
           },
           "response": []
         },

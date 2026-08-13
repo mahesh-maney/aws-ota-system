@@ -9,7 +9,7 @@ A package must be status=ACTIVE (i.e. binary uploaded and processed by
 artifact_processor) before it can be activated. activated=True makes the
 package visible to end users via GET /api/v1/ota/device/available-updates.
 
-BETA packages are only visible to devices in the canary IoT group.
+UAT packages are only visible to devices in the canary IoT group.
 PROD packages are visible to all devices.
 
 Request body:
@@ -22,7 +22,7 @@ Response:
   "packageName": "ZigbeeFirmware",
   "version":     "4.2.2",
   "activated":   true,
-  "releaseType": "BETA",
+  "releaseType": "UAT",
   "updatedBy":   "admin@example.com"
 }
 """

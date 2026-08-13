@@ -112,7 +112,7 @@ def _get_latest_available_version(package_name: str, include_beta: bool) -> dict
     Query packages for packageName where:
       - status = ACTIVE  (binary has been processed by artifact_processor)
       - activated = True (admin has explicitly published this version)
-      - releaseType = PROD always; also BETA if device is in the canary group
+      - releaseType = PROD always; also UAT if device is in the canary group
     Returns the highest semver version that matches, or None.
     """
     tbl = dynamo.Table(PACKAGES_TABLE)
@@ -184,7 +184,7 @@ def lambda_handler(event, context):
                 })
                 continue
 
-            # ── Determine if this device sees BETA packages ───────────────────
+            # ── Determine if this device sees UAT packages ───────────────────
             thing_name   = dev.get("thingName")
             include_beta = _is_beta_device(thing_name)
             log.info(json.dumps({

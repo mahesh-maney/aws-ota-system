@@ -5,7 +5,7 @@ Step 2 of the upload flow — triggered automatically by S3 on object creation.
 Security validations (in order):
   1. Upload token — reads x-amz-meta-upload-token from S3 object metadata,
      compares against uploadToken stored in DynamoDB. Mismatch = rogue upload.
-  2. Checksum     — if admin provided expectedChecksum at upload-url time,
+  2. Checksum     — if admin provided expectedChecksum at upload-artefact time,
      compares computed SHA256 against it. Mismatch = corrupted/tampered binary.
 
 On any validation failure:

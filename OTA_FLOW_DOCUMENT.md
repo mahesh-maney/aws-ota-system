@@ -38,7 +38,7 @@ An admin registers a new firmware or application package so it can be deployed t
 Admin                  API Gateway         upload_url Lambda    DynamoDB (packages)    S3
   │                        │                     │                     │                │
   │  POST /packages/       │                     │                     │                │
-  │  upload-url            │                     │                     │                │
+  │  upload-artefact            │                     │                     │                │
   │  {deviceType,          │                     │                     │                │
   │   version,             │                     │                     │                │
   │   releaseType,         │                     │                     │                │
@@ -88,7 +88,7 @@ Admin                  API Gateway         upload_url Lambda    DynamoDB (packag
 
 ### Step-by-step
 
-1. Admin calls `POST /api/v1/ota/packages/upload-url` with `deviceType`, `version`, `releaseType`, and optional `checksum`
+1. Admin calls `POST /api/v1/ota/packages/upload-artefact` with `deviceType`, `version`, `releaseType`, and optional `checksum`
 2. API Gateway validates the token against the **OTA admin Cognito pool** (`ap-south-1_jUErEu7CL`) — rejects unknown pool tokens with `401`
 3. `upload_url` Lambda checks `ota-admin` group membership — rejects with `403` if not an admin
 4. Lambda checks DynamoDB — rejects with `409` if version already exists and is `ACTIVE`

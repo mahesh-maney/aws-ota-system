@@ -87,19 +87,19 @@ code=$(http_code GET "/api/v1/ota/packages" "" "Bearer invalid.token.here")
   || _fail "Invalid token should be 401/403, got $code"
 
 # ─────────────────────────────────────────────────────────────────────────────
-_section "T02 — INPUT VALIDATION: upload-url"
+_section "T02 — INPUT VALIDATION: upload-artefact"
 # ─────────────────────────────────────────────────────────────────────────────
 
-code=$(http_code POST "/api/v1/ota/packages/upload-url" '{"version":"1.0.0","releaseType":"PROD"}')
+code=$(http_code POST "/api/v1/ota/packages/upload-artefact" '{"version":"1.0.0","releaseType":"PROD"}')
 assert_code "$code" "400" "Missing deviceType → 400"
 
-code=$(http_code POST "/api/v1/ota/packages/upload-url" '{"deviceType":"Network_controller_firmware","releaseType":"PROD"}')
+code=$(http_code POST "/api/v1/ota/packages/upload-artefact" '{"deviceType":"Network_controller_firmware","releaseType":"PROD"}')
 assert_code "$code" "400" "Missing version → 400"
 
-code=$(http_code POST "/api/v1/ota/packages/upload-url" '{"deviceType":"Network_controller_firmware","version":"1.0.0"}')
+code=$(http_code POST "/api/v1/ota/packages/upload-artefact" '{"deviceType":"Network_controller_firmware","version":"1.0.0"}')
 assert_code "$code" "400" "Missing releaseType → 400"
 
-code=$(http_code POST "/api/v1/ota/packages/upload-url" '{"deviceType":"INVALID_DEVICE","version":"1.0.0","releaseType":"PROD"}')
+code=$(http_code POST "/api/v1/ota/packages/upload-artefact" '{"deviceType":"INVALID_DEVICE","version":"1.0.0","releaseType":"PROD"}')
 assert_code "$code" "400" "Invalid deviceType → 400"
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -141,7 +141,7 @@ echo "test content for OTA E2E validation $(date)" | gzip > /tmp/test_artifact.b
 TEST_CHECKSUM=$(sha256sum /tmp/test_artifact.bin | awk '{print $1}')
 echo "  → test artifact SHA256: ${TEST_CHECKSUM:0:16}..."
 
-UPLOAD_RESP=$(call POST "/api/v1/ota/packages/upload-url" \
+UPLOAD_RESP=$(call POST "/api/v1/ota/packages/upload-artefact" \
   "{\"deviceType\":\"Network_controller_firmware\",\"version\":\"${TEST_VERSION}\",\"releaseType\":\"PROD\",\"checksum\":\"${TEST_CHECKSUM}\",\"releaseNotes\":\"E2E test package\"}")
 
 # Extract HTTP code from UPLOAD_RESP directly — do NOT make a second call
@@ -205,8 +205,8 @@ SIG=$(aws dynamodb get-item \
   || _fail "Signature missing after ACTIVE promotion"
 
 # Duplicate upload of same ACTIVE version → 409
-code=$(http_code POST "/api/v1/ota/packages/upload-url" \
-  "{\"deviceType\":\"Network_controller_firmware\",\"version\":\"${TEST_VERSION}\",\"releaseType\":\"PROD\"}")
+code=$(http_code POST "/api/v1/ota/packages/upload-artefact" \
+  "{\"deviceType\":\"Network_controller_firmware\",\"version\":\"${TEST_VERSION}\",\"releaseType\":\"PROD\",\"checksum\":\"${TEST_CHECKSUM}\"}")
 assert_code "$code" "409" "Duplicate ACTIVE version upload → 409"
 
 echo "TEST_VERSION=$TEST_VERSION" > /tmp/ota_test_version.txt

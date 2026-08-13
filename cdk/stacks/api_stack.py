@@ -15,7 +15,7 @@ class ApiStack(cdk.Stack):
 
     Admin endpoints (ota-admin group required):
       GET   /api/v1/ota/packages                                    List packages
-      POST  /api/v1/ota/packages/upload-url                         Get pre-signed S3 upload URL
+      POST  /api/v1/ota/packages/upload-artefact                    Get pre-signed S3 upload URL
       PATCH /api/v1/ota/packages/{packageName}/{version}/activate   Publish/withdraw package
       POST  /api/v1/ota/deployments                                 Create OTA job
       GET   /api/v1/ota/deployments                                 List jobs
@@ -108,7 +108,7 @@ class ApiStack(cdk.Stack):
         packages = ota.add_resource("packages")
         add_admin_method(packages, "GET", lambdas.upload_url)
 
-        upload_url = packages.add_resource("upload-url")
+        upload_url = packages.add_resource("upload-artefact")
         add_admin_method(upload_url, "POST", lambdas.upload_url)
 
         # PATCH /api/v1/ota/packages/{packageName}/{version}/activate

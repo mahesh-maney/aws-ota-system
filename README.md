@@ -37,7 +37,7 @@ Admin / Integration App
         ▼
   API Gateway
         │
-        ├── POST /packages/upload-url ──► digilux_ota_upload_url
+        ├── POST /packages/upload-artefact ──► digilux_ota_upload_url
         │                                        │ Pre-signed S3 URL
         │   PUT <uploadUrl> (binary) ────────────► S3: digilux-ota-artifacts
         │                                        │
@@ -124,7 +124,7 @@ TOKEN=$(aws cognito-idp initiate-auth \
 ```bash
 # Step 1 — get pre-signed URL
 RESP=$(curl -s -X POST \
-  "https://ds6nxf8ac5.execute-api.ap-south-1.amazonaws.com/smarthome/api/v1/ota/packages/upload-url" \
+  "https://ds6nxf8ac5.execute-api.ap-south-1.amazonaws.com/smarthome/api/v1/ota/packages/upload-artefact" \
   -H "Authorization: $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
@@ -270,7 +270,7 @@ List packages filtered by status or name.
 
 ---
 
-### POST /api/v1/ota/packages/upload-url
+### POST /api/v1/ota/packages/upload-artefact
 
 Request a pre-signed S3 URL to upload a new package artifact.
 

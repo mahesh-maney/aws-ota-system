@@ -229,7 +229,7 @@ After deploy, the API base URL is in `cdk/outputs-{env}.json` under `ApiUrl`.
 | Method | Path | Description |
 |--------|------|-------------|
 | `GET` | `/api/v1/ota/packages` | List all firmware packages |
-| `POST` | `/api/v1/ota/packages/upload-url` | Get pre-signed S3 upload URL |
+| `POST` | `/api/v1/ota/packages/upload-artefact` | Get pre-signed S3 upload URL |
 | `POST` | `/api/v1/ota/deployments` | Create an OTA job |
 | `GET` | `/api/v1/ota/deployments` | List all jobs |
 | `GET` | `/api/v1/ota/deployments/{jobId}` | Job status + per-device progress |

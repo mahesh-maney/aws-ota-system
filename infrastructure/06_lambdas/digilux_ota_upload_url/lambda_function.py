@@ -4,7 +4,7 @@ Step 1 of the upload flow. Admin calls this to get a pre-signed S3 PUT URL.
 After uploading the binary to that URL, registration happens automatically
 via artifact_processor.
 
-POST /api/v1/ota/packages/upload-url   — get upload URL
+POST /api/v1/ota/packages/upload-artefact   — get upload URL
 GET  /api/v1/ota/packages              — list packages
 Admin-only.
 
@@ -12,7 +12,7 @@ Request body (POST):
 {
   "deviceType":   "Network_controller_zigbee_firmware",   # required
   "version":      "4.2.2",                                # required
-  "releaseType":  "BETA" | "PROD",                        # required
+  "releaseType":  "UAT" | "PROD",                        # required
   "checksum":     "a1b2c3d4...",                          # optional SHA256 hex — verified on upload
   "releaseNotes": "Bug fixes"                             # optional
 }
@@ -70,7 +70,7 @@ DEVICE_TYPE_MAP = {
     },
 }
 
-VALID_RELEASE_TYPES = {"BETA", "PROD"}
+VALID_RELEASE_TYPES = {"UAT", "PROD"}
 
 dynamo = boto3.resource("dynamodb", region_name=REGION)
 s3     = boto3.client("s3",         region_name=REGION)

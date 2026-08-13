@@ -4,7 +4,7 @@
   ✓ Admin token accepted on GET /packages (HTTP 200)
   ✓ Invalid token rejected (HTTP 401)
 
-━━━ T02 — INPUT VALIDATION: upload-url ━━━
+━━━ T02 — INPUT VALIDATION: upload-artefact ━━━
   ✓ Missing packageName → 400 (HTTP 400)
   ✓ Missing version → 400 (HTTP 400)
   ✓ Missing packageType → 400 (HTTP 400)

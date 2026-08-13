@@ -123,9 +123,9 @@ PKGS_RES=$(get_or_create_resource "$OTA_RES" "packages")
 add_method "$PKGS_RES" "GET" "$UPLOAD_URL_ARN"
 add_cors   "$PKGS_RES"
 
-# ── /api/v1/ota/packages/upload-url — POST get pre-signed PUT URL ─────────────
-echo "==> /api/v1/ota/packages/upload-url"
-UPLOAD_RES=$(get_or_create_resource "$PKGS_RES" "upload-url")
+# ── /api/v1/ota/packages/upload-artefact — POST get pre-signed PUT URL ─────────────
+echo "==> /api/v1/ota/packages/upload-artefact"
+UPLOAD_RES=$(get_or_create_resource "$PKGS_RES" "upload-artefact")
 add_method "$UPLOAD_RES" "POST" "$UPLOAD_URL_ARN"
 add_cors   "$UPLOAD_RES"
 
@@ -175,7 +175,7 @@ echo "Base URL: $BASE_URL"
 echo ""
 echo "Endpoints:"
 echo "  GET  /api/v1/ota/packages                              List all packages"
-echo "  POST /api/v1/ota/packages/upload-url                   Get pre-signed upload URL"
+echo "  POST /api/v1/ota/packages/upload-artefact                   Get pre-signed upload URL"
 echo "  POST /api/v1/ota/deployments                           Create deployment"
 echo "  GET  /api/v1/ota/deployments                           List deployments"
 echo "  GET  /api/v1/ota/deployments/{jobId}                   Job status + progress"

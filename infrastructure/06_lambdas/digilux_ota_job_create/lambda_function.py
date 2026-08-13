@@ -11,7 +11,7 @@ Body:
   "version": "2.0.0",
   "targetType": "THING" | "THING_GROUP",
   "targetId": "deviceId-uuid"  |  "DGX-Canary",
-  "rolloutStage": "CANARY" | "BETA" | "PRODUCTION",
+  "rolloutStage": "CANARY" | "UAT" | "PRODUCTION",
   "rolloutConfig": {}           # optional overrides
 }
 """
@@ -65,7 +65,7 @@ ROLLOUT_CONFIGS = {
     "CANARY": {
         "maximumPerMinute": 2,
     },
-    "BETA": {
+    "UAT": {
         "maximumPerMinute": 5,
         "exponentialRate": {
             "baseRatePerMinute": 2,
