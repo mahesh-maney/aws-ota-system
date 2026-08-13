@@ -1,7 +1,7 @@
 {
   "info": {
-    "name": "Digilux OTA API v1.7",
-    "description": "REST API collection for the Digilux Over-The-Air (OTA) update system.\n\n**Base URL:** `https://iot.digilux.co.in/smarthome`\n\n---\n\n## Auth Tokens\n\n**Admin token** (for Packages, Deployments, Device folders):\n```\naws cognito-idp initiate-auth \\\n  --auth-flow USER_PASSWORD_AUTH \\\n  --client-id q7189jitfkk4ttesepkgls491 \\\n  --auth-parameters USERNAME=mahesh.maney@gmail.com,PASSWORD=Admin@1234 \\\n  --region ap-south-1 \\\n  --query 'AuthenticationResult.IdToken' \\\n  --output text\n```\nPaste into the `admin_token` collection variable.\n\n**User token** (for End User Updates folder):\n```\naws cognito-idp initiate-auth \\\n  --auth-flow USER_PASSWORD_AUTH \\\n  --client-id q7189jitfkk4ttesepkgls491 \\\n  --auth-parameters USERNAME=demotesthw5@yopmail.com,PASSWORD=DigiluxOTA@Test1 \\\n  --region ap-south-1 \\\n  --query 'AuthenticationResult.IdToken' \\\n  --output text\n```\nPaste into the `user_token` collection variable.\n\n---\n\n## Folder Structure\n\n| Folder | Auth | Description |\n|--------|------|-------------|\n| Packages | `admin_token` | Upload & manage firmware packages |\n| Device (Admin) | `admin_token` | Admin device update check |\n| Deployments | `admin_token` | Create & manage fleet deployments |\n| Full Deployment Flow | `admin_token` | End-to-end admin upload \u2192 deploy sequence |\n| End User Updates | `user_token` | User-initiated update flow (Flutter app) |\n\n---\n\n## Collection Variables\n\n| Variable | Description |\n|----------|-------------|\n| `base_url` | API base URL |\n| `admin_token` | Cognito ID token \u2014 admin group user |\n| `user_token` | Cognito ID token \u2014 regular user (owns test device) |\n| `device_id` | Test device UUID |\n| `job_id` | Auto-populated by Create Deployment / Give Consent |\n| `consent_id` | Auto-populated by Give Consent |\n| `upload_url` | Auto-populated by Get Upload URL |\n| `package_name` | Package name for requests |\n| `package_version` | Package version for requests |",
+    "name": "Digilux OTA API v1.8",
+    "description": "REST API collection for the Digilux Over-The-Air (OTA) update system.\n\n**Base URL:** `https://iot.digilux.co.in/smarthome`\n\n---\n\n## Auth Tokens\n\n**Admin token** (for Packages, Deployments, Device folders):\n```\naws cognito-idp initiate-auth \\\n  --auth-flow USER_PASSWORD_AUTH \\\n  --client-id q7189jitfkk4ttesepkgls491 \\\n  --auth-parameters USERNAME=mahesh.maney@gmail.com,PASSWORD=Admin@1234 \\\n  --region ap-south-1 \\\n  --query 'AuthenticationResult.IdToken' \\\n  --output text\n```\nPaste into the `admin_token` collection variable.\n\n**User token** (for End User Updates folder):\n```\naws cognito-idp initiate-auth \\\n  --auth-flow USER_PASSWORD_AUTH \\\n  --client-id q7189jitfkk4ttesepkgls491 \\\n  --auth-parameters USERNAME=demotesthw5@yopmail.com,PASSWORD=DigiluxOTA@Test1 \\\n  --region ap-south-1 \\\n  --query 'AuthenticationResult.IdToken' \\\n  --output text\n```\nPaste into the `user_token` collection variable.\n\n---\n\n## Folder Structure\n\n| Folder | Auth | Description |\n|--------|------|-------------|\n| Packages | `admin_token` | Upload & manage firmware packages |\n| Device (Admin) | `admin_token` | Admin device update check |\n| Deployments | `admin_token` | Create & manage fleet deployments |\n| Full Deployment Flow | `admin_token` | End-to-end admin upload \u2192 deploy sequence |\n| End User Updates | `user_token` | User-initiated update flow (Flutter app) |\n\n---\n\n## Collection Variables\n\n| Variable | Description |\n|----------|-------------|\n| `base_url` | API base URL |\n| `admin_token` | Cognito ID token \u2014 admin group user |\n| `user_token` | Cognito ID token \u2014 regular user (owns test device) |\n| `device_id` | Test device UUID |\n| `job_id` | Auto-populated by Create Deployment / Give Consent |\n| `consent_id` | Auto-populated by Give Consent |\n| `upload_url` | Auto-populated by Get Upload URL (SINGLE mode) |\n| `upload_id` | Auto-populated by Get Upload URL (MULTIPART mode) |\n| `upload_type` | `SINGLE` or `MULTIPART` \u2014 set by Get Upload URL |\n| `package_name` | Package name for requests |\n| `package_version` | Package version for requests |",
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json",
     "_postman_id": "digilux-ota-v1-4"
   },
@@ -90,6 +90,16 @@
     {
       "key": "checksum",
       "value": "",
+      "type": "string"
+    },
+    {
+      "key": "upload_id",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "upload_type",
+      "value": "SINGLE",
       "type": "string"
     }
   ],
@@ -318,12 +328,12 @@
               "script": {
                 "type": "text/javascript",
                 "exec": [
-                  "var res = pm.response.json();",
-                  "if (res.uploadUrl)    { pm.collectionVariables.set(\"upload_url\",    res.uploadUrl); }",
-                  "if (res.uploadToken)  { pm.collectionVariables.set(\"upload_token\",  res.uploadToken); }",
-                  "if (res.packageName)  { pm.collectionVariables.set(\"package_name\",  res.packageName); }",
-                  "if (res.s3Key)        { pm.collectionVariables.set(\"s3_key\",        res.s3Key); }",
-                  "pm.test(\"Status 200\", () => pm.response.to.have.status(200));"
+                  "const r = pm.response.json();",
+                  "if (r.uploadType) pm.collectionVariables.set('upload_type', r.uploadType);",
+                  "if (r.uploadUrl)  pm.collectionVariables.set('upload_url',  r.uploadUrl);",
+                  "if (r.uploadId)   pm.collectionVariables.set('upload_id',   r.uploadId);",
+                  "if (r.uploadToken) pm.collectionVariables.set('upload_token', r.uploadToken);",
+                  "if (r.packageName) pm.collectionVariables.set('package_name', r.packageName);"
                 ]
               }
             }
@@ -343,7 +353,7 @@
             ],
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"deviceType\": \"{{device_type}}\",\n  \"version\": \"{{package_version}}\",\n  \"releaseType\": \"{{release_type}}\",\n  \"checksum\": \"{{checksum}}\",\n  \"fileName\": \"\",\n  \"totalSize\": 0,\n  \"releaseNotes\": \"\"\n}",
+              "raw": "{\n  \"deviceType\": \"{{device_type}}\",\n  \"version\": \"{{package_version}}\",\n  \"releaseType\": \"{{release_type}}\",\n  \"checksum\": \"{{checksum}}\",\n  \"totalSize\": 0,\n  \"fileName\": \"\",\n  \"releaseNotes\": \"\"\n}",
               "options": {
                 "raw": {
                   "language": "json"
@@ -363,7 +373,7 @@
                 "upload-artefact"
               ]
             },
-            "description": "Request a pre-signed S3 upload URL for a new firmware package.\n\n**Required fields:**\n| Field | Description | Example |\n|-------|-------------|---------|\n| `deviceType` | One of the 4 supported device types | `Network_controller_firmware` |\n| `version` | Semantic version string | `1.2.3` |\n| `releaseType` | `PROD` (all devices) or `UAT` (canary group only) | `PROD` |\n\n**Supported `deviceType` values:**\n| deviceType | Derived filename |\n|---|---|\n| `Network_controller_firmware` | `HomeAssistantUtility-{version}.jar` |\n| `Network_controller_zigbee_firmware` | `ZigbeeFirmware-{version}.tar` |\n| `Network_controller_Z2M_Firmware` | `Z2MFirmware-{version}.bin` |\n| `Network_controller_Miscellaneous` | `NetControllerMisc-{version}.py` |\n\n**Response:** `uploadUrl` (PUT to this), `s3Key`, `packageName`, `status=PENDING`\n\n**Next step:** PUT the binary to `uploadUrl` \u2192 artifact_processor promotes to `ACTIVE` automatically."
+            "description": "Initiates a firmware upload. Returns either a single presigned S3 URL (SINGLE mode) or per-chunk presigned URLs (MULTIPART mode).\n\n**Upload mode is selected automatically based on `totalSize`:**\n- `totalSize` not provided or \u2264 10MB \u2192 **SINGLE**: use `uploadUrl` to PUT binary directly\n- `totalSize` > 10MB \u2192 **MULTIPART**: PUT each `chunkUrls[n].url` with its chunk, then call `POST /upload-artefact/complete`\n\n**Required fields:** `deviceType`, `version`, `releaseType`, `checksum`\n\n**Optional fields:** `totalSize` (bytes), `fileName`, `releaseNotes`\n\nAfter upload, poll `GET /packages/{{package_name}}/{{package_version}}` until `status=ACTIVE`."
           },
           "response": [
             {
@@ -492,6 +502,88 @@
                 }
               ],
               "body": "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<Error>\n  <Code>AccessDenied</Code>\n  <Message>Request has expired</Message>\n</Error>"
+            }
+          ]
+        },
+        {
+          "name": "Complete Multipart Upload",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "{{admin_token}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/ota/packages/upload-artefact/complete",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "ota",
+                "packages",
+                "upload-artefact",
+                "complete"
+              ]
+            },
+            "description": "**Step 2 of MULTIPART upload only.** Call after all chunks have been PUT to S3.\n\nCollect the `ETag` header from each chunk PUT response and include them here.\n\nOn success, S3 assembles the file and `artifact_processor` promotes it to `ACTIVE` within seconds. Poll `GET /packages/{{package_name}}/{{package_version}}` for status.\n\nNot needed for SINGLE uploads.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"packageName\": \"{{package_name}}\",\n  \"version\": \"{{package_version}}\",\n  \"parts\": [\n    {\n      \"partNumber\": 1,\n      \"etag\": \"\\\"<etag-from-part-1-put-response>\\\"\"\n    },\n    {\n      \"partNumber\": 2,\n      \"etag\": \"\\\"<etag-from-part-2-put-response>\\\"\"\n    }\n  ]\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Get Package Status",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "{{admin_token}}"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/ota/packages/{{package_name}}/{{package_version}}",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "ota",
+                "packages",
+                "{{package_name}}",
+                "{{package_version}}"
+              ]
+            },
+            "description": "Returns the current status of a specific package version.\n\n**Poll this after upload until `status` is `ACTIVE` or `CORRUPTED`.**\n\n| Status | Meaning |\n|--------|---------|\n| `PENDING` | Upload in progress or artifact_processor running |\n| `ACTIVE` | Upload complete, verified, ready for deployment |\n| `CORRUPTED` | Checksum mismatch or token validation failed \u2014 re-upload required |\n\nResponse includes `sha256`, `artifactSize` once ACTIVE."
+          },
+          "response": [],
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const r = pm.response.json();",
+                  "pm.test('Package status returned', () => pm.response.to.have.status(200));",
+                  "console.log('Package status:', r.status);"
+                ]
+              }
             }
           ]
         },
@@ -1176,7 +1268,7 @@
           "response": []
         },
         {
-          "name": "3. Poll Until Package is ACTIVE",
+          "name": "3. Poll Package Status Until ACTIVE",
           "event": [
             {
               "listen": "test",
@@ -1200,12 +1292,11 @@
             "header": [
               {
                 "key": "Authorization",
-                "value": "{{admin_token}}",
-                "type": "text"
+                "value": "{{admin_token}}"
               }
             ],
             "url": {
-              "raw": "{{base_url}}/api/v1/ota/packages?packageName={{package_name}}",
+              "raw": "{{base_url}}/api/v1/ota/packages/{{package_name}}/{{package_version}}",
               "host": [
                 "{{base_url}}"
               ],
@@ -1213,16 +1304,12 @@
                 "api",
                 "v1",
                 "ota",
-                "packages"
-              ],
-              "query": [
-                {
-                  "key": "packageName",
-                  "value": "{{package_name}}"
-                }
+                "packages",
+                "{{package_name}}",
+                "{{package_version}}"
               ]
             },
-            "description": "Poll every 2\u20133 seconds until the package status is ACTIVE (SHA-256 + signing complete)."
+            "description": "Poll this endpoint after the S3 upload until `status` becomes `ACTIVE` or `CORRUPTED`. Typically takes 1\u20135 seconds for artifact_processor to run."
           },
           "response": []
         },

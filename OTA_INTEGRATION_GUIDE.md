@@ -51,7 +51,9 @@ Each upload is tied to a `deviceType` which determines the package name and file
 |--------|------|------|-------------|
 | **Admin** | | `admin` group token | |
 | GET | `/api/v1/ota/packages` | Admin | List packages (filter: `?deviceType=`, `?status=`) |
-| POST | `/api/v1/ota/packages/upload-artefact` | Admin | Get pre-signed S3 upload URL |
+| POST | `/api/v1/ota/packages/upload-artefact` | Admin | Initiate upload — returns presigned URL (SINGLE) or chunk URLs (MULTIPART) |
+| POST | `/api/v1/ota/packages/upload-artefact/complete` | Admin | Complete a multipart upload after all chunks are PUT |
+| GET | `/api/v1/ota/packages/{packageName}/{version}` | Admin | Get upload/package status — poll after upload |
 | PATCH | `/api/v1/ota/packages/{packageName}/{version}/activate` | Admin | Publish or withdraw a package |
 | GET | `/api/v1/controllers/{deviceId}/updates/available` | Admin | Compatibility check for a device |
 | POST | `/api/v1/ota/deployments` | Admin | Create deployment (push update) |
@@ -198,11 +200,15 @@ GET /api/v1/ota/packages
 
 ---
 
-### 4.2 Get Upload URL
+### 4.2 Initiate Upload
 
 ```
 POST /api/v1/ota/packages/upload-artefact
 ```
+
+Upload mode is selected automatically based on `totalSize`:
+- **SINGLE** — `totalSize` not provided or ≤ 10 MB. Returns a single presigned S3 PUT URL.
+- **MULTIPART** — `totalSize` > 10 MB. Returns per-chunk presigned URLs. Chunks are PUT in parallel then completed via a second API call.
 
 **Request body:**
 
@@ -212,6 +218,8 @@ POST /api/v1/ota/packages/upload-artefact
   "version":      "1.2.3",
   "releaseType":  "PROD",
   "checksum":     "a1b2c3d4e5f6...",
+  "totalSize":    209715200,
+  "fileName":     "",
   "releaseNotes": "Bug fixes and performance improvements"
 }
 ```
@@ -221,43 +229,137 @@ POST /api/v1/ota/packages/upload-artefact
 | `deviceType` | Yes | One of the 4 supported device types (see table in Section 1) |
 | `version` | Yes | Semantic version string (e.g. `1.2.3`) |
 | `releaseType` | Yes | `PROD` (all devices) or `UAT` (canary group only) |
-| `checksum` | No | SHA256 hex of the binary. If provided, the artifact processor verifies it on upload — mismatch marks the package `CORRUPTED` and deletes the file |
+| `checksum` | Yes | SHA256 hex of the binary — verified by artifact_processor on upload |
+| `totalSize` | No | File size in bytes — triggers MULTIPART mode if > 10 MB |
+| `fileName` | No | Override the auto-derived filename |
 | `releaseNotes` | No | Free-text description shown to users |
 
-`packageName` and `fileName` are derived automatically from `deviceType` — you do not supply them.
-
-**Response `200`:**
+**Response `200` — SINGLE mode** (`totalSize` ≤ 10 MB or not provided):
 ```json
 {
+  "uploadType":   "SINGLE",
   "uploadUrl":    "https://digilux-ota-artifacts.s3.ap-south-1.amazonaws.com/...?X-Amz-Signature=...",
   "uploadToken":  "550e8400-e29b-41d4-a716-446655440000",
   "s3Key":        "Network_controller_firmware/HomeAssistantUtility/1.2.3/HomeAssistantUtility-1.2.3.jar",
-  "expiresIn":    300,
+  "fileName":     "HomeAssistantUtility-1.2.3.jar",
   "packageName":  "HomeAssistantUtility",
   "version":      "1.2.3",
-  "deviceType":   "Network_controller_firmware",
-  "releaseType":  "PROD",
+  "status":       "PENDING",
   "activated":    false,
-  "status":       "PENDING"
+  "expiresIn":    3600
 }
 ```
 
-> **`uploadToken`** is a UUID that must be sent as the `x-amz-meta-upload-token` header on the S3 PUT. S3 enforces this — any PUT without the exact token returns `403`. The artifact processor also re-verifies the token after upload as a second check against rogue uploads.
-
-> **`expiresIn: 300`** — the presigned URL expires in **5 minutes**. The binary must be uploaded within this window.
+**Response `200` — MULTIPART mode** (`totalSize` > 10 MB):
+```json
+{
+  "uploadType":  "MULTIPART",
+  "uploadId":    "VXBsb2FkIElEIGZvciA2aWWpbmcncyBteS...",
+  "packageName": "HomeAssistantUtility",
+  "version":     "1.2.3",
+  "status":      "PENDING",
+  "activated":   false,
+  "chunkSize":   10485760,
+  "totalChunks": 20,
+  "totalSize":   209715200,
+  "expiresIn":   3600,
+  "chunkUrls": [
+    { "partNumber": 1,  "url": "https://s3...?partNumber=1&uploadId=..." },
+    { "partNumber": 2,  "url": "https://s3...?partNumber=2&uploadId=..." },
+    { "partNumber": 20, "url": "https://s3...?partNumber=20&uploadId=..." }
+  ]
+}
+```
 
 **Response `409`** — Version already exists and is ACTIVE:
 ```json
 { "error": "Package HomeAssistantUtility@1.2.3 already exists and is ACTIVE. Use a new version number." }
 ```
 
-**After receiving this response**, the integration must:
+**After receiving this response:**
 
-1. `PUT <uploadUrl>` with two required headers:
+**SINGLE mode:**
+1. `PUT <uploadUrl>` with headers:
    - `Content-Type: application/octet-stream`
    - `x-amz-meta-upload-token: <uploadToken>` ← **required — S3 rejects the PUT without this**
-2. Poll `GET /api/v1/ota/packages?packageName=HomeAssistantUtility` until `status` changes from `PENDING` → `ACTIVE` (typically within 2–5 seconds). If checksum was provided and mismatches, status becomes `CORRUPTED` instead — do not proceed.
-3. Call `PATCH /api/v1/ota/packages/HomeAssistantUtility/1.2.3/activate` with `{"activated": true}` to publish the package to users
+2. Poll `GET /api/v1/ota/packages/{packageName}/{version}` until `status = ACTIVE` or `CORRUPTED`
+3. Call `PATCH .../activate` to publish
+
+**MULTIPART mode:**
+1. `PUT` each `chunkUrls[n].url` with its 10 MB chunk (parallel uploads recommended — no auth headers needed)
+2. Collect the `ETag` response header from each PUT
+3. Call `POST /api/v1/ota/packages/upload-artefact/complete` with all ETags
+4. Poll `GET /api/v1/ota/packages/{packageName}/{version}` until `status = ACTIVE` or `CORRUPTED`
+5. Call `PATCH .../activate` to publish
+
+---
+
+### 4.2a Complete Multipart Upload
+
+```
+POST /api/v1/ota/packages/upload-artefact/complete
+```
+
+**MULTIPART uploads only.** Call after all chunks have been PUT to S3.
+
+**Request body:**
+```json
+{
+  "packageName": "HomeAssistantUtility",
+  "version":     "1.2.3",
+  "parts": [
+    { "partNumber": 1,  "etag": "\"d8e8fca2dc0f896fd7cb4cb0031ba249\"" },
+    { "partNumber": 2,  "etag": "\"abc123def456...\"" }
+  ]
+}
+```
+
+**Response `200`:**
+```json
+{
+  "packageName": "HomeAssistantUtility",
+  "version":     "1.2.3",
+  "status":      "PENDING",
+  "message":     "Multipart upload complete. artifact_processor will verify and promote to ACTIVE within seconds."
+}
+```
+
+S3 assembles the complete object → `artifact_processor` fires via S3 event → verifies checksum → promotes to `ACTIVE`.
+
+---
+
+### 4.2b Get Package Status
+
+```
+GET /api/v1/ota/packages/{packageName}/{version}
+```
+
+Poll this after any upload (SINGLE or MULTIPART) until `status` resolves.
+
+**Response `200`:**
+```json
+{
+  "packageName":  "HomeAssistantUtility",
+  "version":      "1.2.3",
+  "status":       "ACTIVE",
+  "activated":    false,
+  "uploadType":   "MULTIPART",
+  "deviceType":   "Network_controller_firmware",
+  "releaseType":  "PROD",
+  "fileName":     "HomeAssistantUtility-1.2.3.jar",
+  "sha256":       "c320c4692e...",
+  "artifactSize": 209715200,
+  "releaseNotes": "Bug fixes",
+  "createdBy":    "admin@digilux.com",
+  "createdAt":    1723556789000
+}
+```
+
+| `status` | Meaning |
+|----------|---------|
+| `PENDING` | Upload in progress or artifact_processor still running |
+| `ACTIVE` | Verified, ready for deployment |
+| `CORRUPTED` | Checksum mismatch or token validation failed — re-upload required |
 
 ---
 
@@ -1258,4 +1360,5 @@ Results are printed to stdout and saved to `infrastructure/e2e_test_results.txt`
 | `1.2` | 2026-07-31 | Digilux Engineering | Accuracy fixes: added `REJECTED` job status, corrected `NEEDS_RECOVERY` alert path (CloudWatch Logs Insights, not Lambda error alarm), added `instructions` field to upload-artefact response, documented semver version comparison logic and empty `compatibleModels` behaviour |
 | `1.3` | 2026-08-04 | Digilux Engineering | User-initiated OTA flow: Sections 4.9–4.10 (check updates, consent, status); updated auth section to cover user vs admin tokens; added Section 5.2 (user flow sequence); new DynamoDB table `digilux_ota_user_consents`; device ownership verification via `digilux_device_data`; rate limiting; consent audit trail |
 | `1.5` | 2026-08-12 | Digilux Engineering | Consolidated `digilux_device_inventory` into `digilux_device_data`; CloudFront signed URLs for artifact delivery; tiered presign expiry (1hr–48hr by file size, `ota.config`); IoT Job timeout 24hr; `dynamodb:UpdateItem` added to user Lambda IAM role; user e2e test suite expanded to 53 tests (TU01–TU11) |
+| `1.7` | 2026-08-13 | Digilux Engineering | Multipart upload support: `POST /upload-artefact` now auto-selects SINGLE vs MULTIPART based on `totalSize`; new `POST /upload-artefact/complete` endpoint; new `GET /packages/{packageName}/{version}` status polling API; `checksum` made mandatory; `releaseType` BETA renamed to UAT; endpoint renamed from `upload-url` to `upload-artefact` |
 | `1.4` | 2026-08-04 | Digilux Engineering | App-mediated download-link flow: Section 4.11 (`POST /api/v1/ota/my/updates/download-link`); Lambda returns pre-signed URL to Flutter app and simultaneously publishes download payload to device MQTT OTA topic; Section 5.3 (flow comparison table: consent vs download-link); new Lambda `digilux_ota_user_get_download_link`; IAM `iot:Publish` permission on `iot/device/*/ota` |

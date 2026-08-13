@@ -1,11 +1,10 @@
 """
 digilux_ota_upload_url
-Step 1 of the upload flow. Admin calls this to get a pre-signed S3 PUT URL.
-After uploading the binary to that URL, registration happens automatically
-via artifact_processor.
+Step 1 of the upload flow. Returns either a single presigned PUT URL (small files)
+or a multipart upload session with per-chunk presigned URLs (large files).
 
-POST /api/v1/ota/packages/upload-artefact   — get upload URL
-GET  /api/v1/ota/packages              — list packages
+POST /api/v1/ota/packages/upload-artefact   — initiate upload
+GET  /api/v1/ota/packages                   — list packages
 Admin-only.
 
 Request body (POST):
@@ -13,27 +12,30 @@ Request body (POST):
   "deviceType":   "Network_controller_zigbee_firmware",   # required
   "version":      "4.2.2",                                # required
   "releaseType":  "UAT" | "PROD",                        # required
-  "checksum":     "a1b2c3d4...",                          # optional SHA256 hex — verified on upload
+  "checksum":     "a1b2c3d4...",                          # required SHA256 hex — verified on upload
+  "totalSize":    10485760,                               # optional bytes — triggers multipart if > 10MB
+  "fileName":     "custom-name.tar",                      # optional override
   "releaseNotes": "Bug fixes"                             # optional
 }
 
-packageName and fileName are derived automatically:
-  packageName = baseName from DEVICE_TYPE_MAP  (e.g. ZigbeeFirmware)
-  fileName    = {baseName}-{version}{ext}       (e.g. ZigbeeFirmware-4.2.2.tar)
+Upload modes:
+  SINGLE    — totalSize not provided or <= 10MB
+              Response includes uploadUrl (PUT directly to S3)
+  MULTIPART — totalSize > 10MB
+              Response includes uploadId + chunkUrls (one per 10MB chunk)
+              Call POST /upload-artefact/complete after all chunks are PUT
 
 Security:
-  - uploadToken (UUID) is generated and baked into the presigned URL as a required
-    signed metadata header (x-amz-meta-upload-token). Any PUT without the exact token
-    is rejected by S3 with 403.
-  - artifact_processor verifies the token and optionally the checksum before promoting.
+  - uploadToken (UUID) stored in S3 object metadata (x-amz-meta-upload-token).
+  - artifact_processor verifies token + checksum before promoting to ACTIVE.
 
-Packages are created with activated=False. An admin must explicitly call
-PATCH /api/v1/ota/packages/{packageName}/{version}/activate to make them
-visible to end users.
+Packages start as PENDING. Poll GET /packages/{packageName}/{version} for status.
+After ACTIVE, call PATCH /packages/{packageName}/{version}/activate to publish.
 """
 import datetime
 import json
 import logging
+import math
 import os
 import time
 import uuid
@@ -46,7 +48,10 @@ log.setLevel(logging.INFO)
 REGION          = os.environ["REGION"]
 PACKAGES_TABLE  = os.environ.get("PACKAGES_TABLE",  "digilux_ota_packages")
 ARTIFACT_BUCKET = os.environ.get("ARTIFACT_BUCKET", "digilux-ota-artifacts")
-UPLOAD_EXPIRY   = int(os.environ.get("UPLOAD_EXPIRY_SEC", "300"))  # 5 min — short window
+UPLOAD_EXPIRY   = int(os.environ.get("UPLOAD_EXPIRY_SEC", "3600"))  # 1 hour for large uploads
+
+CHUNK_SIZE           = 10 * 1024 * 1024   # 10 MB per chunk
+MULTIPART_THRESHOLD  = 10 * 1024 * 1024   # use multipart when totalSize > 10 MB
 
 # Maps deviceType → packageName (baseName) and file extension.
 # fileName is derived as: {baseName}-{version}{ext}
@@ -160,79 +165,161 @@ def lambda_handler(event, context):
                 "error": f"{package_name} v{version} already exists and is ACTIVE. Use a new version number."
             })
 
-        # ── Generate upload token — baked into presigned URL as signed header ─
-        # artifact_processor verifies this token from S3 object metadata.
-        # Any PUT request missing or forging this header is rejected by S3 (403).
+        # ── Generate upload token — stored in S3 metadata, verified by artifact_processor ─
         upload_token = str(uuid.uuid4())
-
-        upload_url = s3.generate_presigned_url(
-            "put_object",
-            Params={
-                "Bucket":      ARTIFACT_BUCKET,
-                "Key":         s3_key,
-                "ContentType": "application/octet-stream",
-                "Metadata":    {"upload-token": upload_token},
-            },
-            ExpiresIn=UPLOAD_EXPIRY,
-            HttpMethod="PUT",
-        )
+        use_multipart = total_size is not None and int(total_size) > MULTIPART_THRESHOLD
 
         # ── Write PENDING record ──────────────────────────────────────────────
         now_ms = int(time.time() * 1000)
         item = {
-            "packageName":   package_name,
-            "version":       version,
-            "deviceType":    device_type,
-            "releaseType":   release_type,
-            "fileName":      file_name,
-            "s3Key":         s3_key,
-            "s3Bucket":      ARTIFACT_BUCKET,
-            "status":        "PENDING",
-            "activated":     False,
-            "uploadToken":   upload_token,
-            "releaseNotes":  body.get("releaseNotes", ""),
-            "createdAt":     now_ms,
-            "createdBy":     caller,
+            "packageName":      package_name,
+            "version":          version,
+            "deviceType":       device_type,
+            "releaseType":      release_type,
+            "fileName":         file_name,
+            "s3Key":            s3_key,
+            "s3Bucket":         ARTIFACT_BUCKET,
+            "status":           "PENDING",
+            "activated":        False,
+            "uploadToken":      upload_token,
+            "uploadType":       "MULTIPART" if use_multipart else "SINGLE",
+            "expectedChecksum": checksum,
+            "releaseNotes":     body.get("releaseNotes", ""),
+            "createdAt":        now_ms,
+            "createdBy":        caller,
         }
-        item["expectedChecksum"] = checksum
         if total_size is not None:
             item["totalSize"] = int(total_size)
 
-        table.put_item(Item=item)
-
-        _audit("PACKAGE_UPLOAD_URL_REQUESTED", caller,
-               {"packageName": package_name, "version": version},
-               "SUCCESS",
-               deviceType=device_type, releaseType=release_type,
-               s3Key=s3_key, checksum=checksum[:16] + "...")
-
-        resp = {
-            "uploadUrl":    upload_url,
-            "s3Key":        s3_key,
-            "fileName":     file_name,
-            "expiresIn":    UPLOAD_EXPIRY,
-            "packageName":  package_name,
-            "version":      version,
-            "deviceType":   device_type,
-            "releaseType":  release_type,
-            "activated":    False,
-            "status":       "PENDING",
-            "uploadToken":  upload_token,
-            "instructions": (
-                "PUT your binary to uploadUrl with headers: "
-                "Content-Type: application/octet-stream AND "
-                "x-amz-meta-upload-token: <uploadToken>. "
-                "Status becomes ACTIVE automatically within seconds. "
-                "Then call PATCH /packages/{packageName}/{version}/activate to publish."
-            ),
-        }
-        if total_size is not None:
-            resp["totalSize"] = int(total_size)
-        return _response(200, resp)
+        if use_multipart:
+            return _handle_multipart(
+                item, table, caller, package_name, version,
+                device_type, release_type, s3_key, file_name,
+                upload_token, int(total_size), checksum,
+            )
+        else:
+            return _handle_single(
+                item, table, caller, package_name, version,
+                device_type, release_type, s3_key, file_name,
+                upload_token, total_size, checksum,
+            )
 
     except Exception as e:
         log.exception(f"Unhandled error: {e}")
         return _response(500, {"error": "Internal server error"})
+
+
+def _handle_single(item, table, caller, package_name, version,
+                   device_type, release_type, s3_key, file_name,
+                   upload_token, total_size, checksum):
+    """Single presigned PUT URL — for files <= 10 MB or when totalSize is not provided."""
+    upload_url = s3.generate_presigned_url(
+        "put_object",
+        Params={
+            "Bucket":      ARTIFACT_BUCKET,
+            "Key":         s3_key,
+            "ContentType": "application/octet-stream",
+            "Metadata":    {"upload-token": upload_token},
+        },
+        ExpiresIn=UPLOAD_EXPIRY,
+        HttpMethod="PUT",
+    )
+
+    table.put_item(Item=item)
+
+    _audit("PACKAGE_UPLOAD_URL_REQUESTED", caller,
+           {"packageName": package_name, "version": version},
+           "SUCCESS", uploadType="SINGLE",
+           deviceType=device_type, releaseType=release_type,
+           s3Key=s3_key, checksum=checksum[:16] + "...")
+
+    resp = {
+        "uploadType":   "SINGLE",
+        "uploadUrl":    upload_url,
+        "uploadToken":  upload_token,
+        "s3Key":        s3_key,
+        "fileName":     file_name,
+        "expiresIn":    UPLOAD_EXPIRY,
+        "packageName":  package_name,
+        "version":      version,
+        "deviceType":   device_type,
+        "releaseType":  release_type,
+        "status":       "PENDING",
+        "activated":    False,
+        "instructions": (
+            "PUT binary to uploadUrl with headers: "
+            "Content-Type: application/octet-stream AND "
+            "x-amz-meta-upload-token: <uploadToken>. "
+            "Then poll GET /packages/{packageName}/{version} until status=ACTIVE."
+        ),
+    }
+    if total_size is not None:
+        resp["totalSize"] = int(total_size)
+    return _response(200, resp)
+
+
+def _handle_multipart(item, table, caller, package_name, version,
+                      device_type, release_type, s3_key, file_name,
+                      upload_token, total_size, checksum):
+    """S3 multipart upload — for files > 10 MB. Returns per-chunk presigned URLs."""
+    # Initiate multipart upload — token stored in S3 metadata, verified by artifact_processor
+    mp = s3.create_multipart_upload(
+        Bucket=ARTIFACT_BUCKET,
+        Key=s3_key,
+        ContentType="application/octet-stream",
+        Metadata={"upload-token": upload_token},
+    )
+    upload_id   = mp["UploadId"]
+    num_parts   = math.ceil(total_size / CHUNK_SIZE)
+
+    # Generate a presigned URL for each part
+    chunk_urls = []
+    for part_number in range(1, num_parts + 1):
+        url = s3.generate_presigned_url(
+            "upload_part",
+            Params={
+                "Bucket":     ARTIFACT_BUCKET,
+                "Key":        s3_key,
+                "UploadId":   upload_id,
+                "PartNumber": part_number,
+            },
+            ExpiresIn=UPLOAD_EXPIRY,
+        )
+        chunk_urls.append({"partNumber": part_number, "url": url})
+
+    # Persist uploadId so complete endpoint can finish the upload
+    item["uploadId"] = upload_id
+    table.put_item(Item=item)
+
+    _audit("PACKAGE_UPLOAD_URL_REQUESTED", caller,
+           {"packageName": package_name, "version": version},
+           "SUCCESS", uploadType="MULTIPART",
+           deviceType=device_type, releaseType=release_type,
+           s3Key=s3_key, parts=num_parts, checksum=checksum[:16] + "...")
+
+    return _response(200, {
+        "uploadType":  "MULTIPART",
+        "uploadId":    upload_id,
+        "packageName": package_name,
+        "version":     version,
+        "deviceType":  device_type,
+        "releaseType": release_type,
+        "fileName":    file_name,
+        "s3Key":       s3_key,
+        "status":      "PENDING",
+        "activated":   False,
+        "chunkSize":   CHUNK_SIZE,
+        "totalChunks": num_parts,
+        "totalSize":   total_size,
+        "expiresIn":   UPLOAD_EXPIRY,
+        "chunkUrls":   chunk_urls,
+        "instructions": (
+            f"PUT each chunk to its chunkUrl (no auth headers needed). "
+            f"Collect the ETag from each response. "
+            f"Then POST /packages/upload-artefact/complete with uploadId + parts array. "
+            f"Poll GET /packages/{package_name}/{version} until status=ACTIVE."
+        ),
+    })
 
 
 def _list_packages(event: dict, caller: str) -> dict:
