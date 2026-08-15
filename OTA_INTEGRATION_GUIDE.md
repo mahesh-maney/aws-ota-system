@@ -583,7 +583,7 @@ GET /api/v1/ota/deployments/{jobId}
 | `SUCCEEDED` | Update installed and health check passed |
 | `FAILED` | Update failed; see `deviceStatuses[id].statusDetail` |
 | `CANCELLED` | Aborted by admin |
-| `REJECTED` | Device rejected the job (e.g. precondition not met on device side) |
+| `REJECTED` | Device rejected the job; see `deviceStatuses[id].errorCode` and `errorReason` (e.g. signature verification failed) |
 
 ---
 
@@ -773,21 +773,30 @@ An alternative to the consent flow. The Lambda returns a **CloudFront signed dow
 **MQTT payload published to `iot/device/{deviceId}/ota`:**
 ```json
 {
-  "operation":   "DOWNLOAD_AND_INSTALL",
-  "packageName": "controller-app",
-  "version":     "4.0.0",
-  "packageType": "deb",
-  "downloadUrl": "<presigned-url>",
-  "sha256":      "<hex>",
-  "signature":   "<base64>",
-  "size":        12456789,
-  "expiresAt":   "2026-08-04T15:00:00Z",
-  "initiatedBy": "USER_APP",
-  "userId":      "<sub>",
-  "mandatory":   false,
-  "rollback":    true
+  "operationType": 1,
+  "packageName":   "controller-app",
+  "version":       "4.0.0",
+  "packageType":   "deb",
+  "downloadUrl":   "<presigned-url>",
+  "sha256":        "<hex>",
+  "signature":     "<base64>",
+  "size":          12456789,
+  "expiresAt":     "2026-08-04T15:00:00Z",
+  "initiatedBy":   "USER_APP",
+  "userId":        "<sub>",
+  "rollback":      true
 }
 ```
+
+**`operationType` integer mapping** (backend-maintained; controller uses integer to identify the update category):
+
+| Integer | Device type |
+|---|---|
+| `1` | `Network_controller_firmware` |
+| `2` | `Network_controller_zigbee_firmware` |
+| `3` | `Network_controller_Z2M_Firmware` |
+| `4` | `Network_controller_Miscellaneous` |
+| `0` | Unknown / unmapped |
 
 **Security checks** (identical to `/consent` except no rate-limit check and no IoT Job created):
 1. Valid Cognito JWT with `sub` claim
@@ -1021,6 +1030,55 @@ If the device installed successfully but lost connection before reporting back:
 
 ---
 
+### 6.9 Device Rejects the Update (REJECTED + Error Code)
+
+The controller publishes `REJECTED` when it detects a problem **before** installation — e.g. signature mismatch, corrupted package, or an already-installed version.
+
+**Status message the controller must publish to `iot/device/{deviceId}/ota/status`:**
+```json
+{
+  "jobId":      "digilux-ota-controller-app-4-0-0-...",
+  "deviceId":   "edb39bba-baf1-4700-968c-a42228e53aa0",
+  "thingName":  "digilux-94ba062a250c",
+  "status":     "REJECTED",
+  "statusDetails": {
+    "errorCode": 10003
+  },
+  "packageName": "controller-app",
+  "version":     "4.0.0"
+}
+```
+
+**Error code table** (maintained on the backend — the cloud resolves the integer to a human-readable reason):
+
+| Code | Reason | Security alert? |
+|---|---|---|
+| `10001` | `SIGNATURE_MISSING` | No |
+| `10002` | `SIGNATURE_INVALID_FORMAT` | Yes |
+| `10003` | `SIGNATURE_VERIFICATION_FAILED` | Yes |
+| `10004` | `CHECKSUM_MISMATCH` | Yes |
+| `10005` | `CERTIFICATE_EXPIRED` | Yes |
+| `10006` | `CERTIFICATE_UNTRUSTED` | Yes |
+| `10101` | `PACKAGE_VERSION_ALREADY_INSTALLED` | No |
+| `10102` | `PACKAGE_INCOMPATIBLE_DEVICE_TYPE` | No |
+| `10103` | `INSUFFICIENT_STORAGE` | No |
+| `10104` | `DOWNLOAD_FAILED` | No |
+| `10105` | `PACKAGE_CORRUPT` | No |
+| `10201` | `JOB_ALREADY_IN_PROGRESS` | No |
+| `10202` | `JOB_NOT_FOUND` | No |
+| `10203` | `INVALID_JOB_DOCUMENT` | No |
+
+**Backend behaviour on `REJECTED`:**
+1. Stores `errorCode` and `errorReason` in `deviceStatuses[thingName]` inside `digilux_ota_jobs`
+2. Clears `pendingJobId` on the device record — device is available for a new deployment
+3. Emits `DEVICE_UPDATE_REJECTED` audit event
+4. For security error codes (`10002–10006`): additionally emits a `SECURITY_ALERT` audit event at `ERROR` log level — pick up with a CloudWatch Logs metric filter on `"SECURITY_ALERT"`
+5. Job-level status is set to `FAILED` (terminal)
+
+> **Note:** The controller should **not** roll back installed versions on `REJECTED` — no installation was attempted, so the device remains on its current version.
+
+---
+
 ## 7. Device Inventory & Status
 
 OTA fields (`installedVersions`, `pendingJobId`, `thingName`) are stored as attributes on the `digilux_device_data` table — the same table used for device ownership. This eliminates a separate inventory table and reduces DynamoDB reads.
@@ -1083,8 +1141,8 @@ See **Section 12** for S3 bucket security settings and artifact lifecycle policy
 | **Artifact integrity** | SHA256 hash verified on device before install |
 | **Artifact authenticity** | ECDSA P-256 signature verified on device using public key stored at `/etc/digilux/ota-agent.pub` |
 | **Transport** | Pre-signed S3 URLs (HTTPS only), expire in 1 hour |
-| **Mandatory updates** | Device cannot decline — `"mandatory": true` in job document |
 | **Signing key** | Private key stored in AWS Secrets Manager (`digilux-ota-signing-key`), never on device |
+| **Tamper detection** | If MITM attack replaces the download URL or binary, the controller's ECDSA signature check will fail; the controller reports `REJECTED` with `errorCode: 10003` (`SIGNATURE_VERIFICATION_FAILED`); the backend emits a `SECURITY_ALERT` audit event visible in CloudWatch Logs |
 
 ---
 
@@ -1362,3 +1420,4 @@ Results are printed to stdout and saved to `infrastructure/e2e_test_results.txt`
 | `1.5` | 2026-08-12 | Digilux Engineering | Consolidated `digilux_device_inventory` into `digilux_device_data`; CloudFront signed URLs for artifact delivery; tiered presign expiry (1hr–48hr by file size, `ota.config`); IoT Job timeout 24hr; `dynamodb:UpdateItem` added to user Lambda IAM role; user e2e test suite expanded to 53 tests (TU01–TU11) |
 | `1.7` | 2026-08-13 | Digilux Engineering | Multipart upload support: `POST /upload-artefact` now auto-selects SINGLE vs MULTIPART based on `totalSize`; new `POST /upload-artefact/complete` endpoint; new `GET /packages/{packageName}/{version}` status polling API; `checksum` made mandatory; `releaseType` BETA renamed to UAT; endpoint renamed from `upload-url` to `upload-artefact` |
 | `1.4` | 2026-08-04 | Digilux Engineering | App-mediated download-link flow: Section 4.11 (`POST /api/v1/ota/my/updates/download-link`); Lambda returns pre-signed URL to Flutter app and simultaneously publishes download payload to device MQTT OTA topic; Section 5.3 (flow comparison table: consent vs download-link); new Lambda `digilux_ota_user_get_download_link`; IAM `iot:Publish` permission on `iot/device/*/ota` |
+| `1.8` | 2026-08-16 | Digilux Engineering | REJECTED status with error codes: `digilux_ota_status_handler` now parses `statusDetails.errorCode` from controller, resolves reason from `ERROR_CODE_MAP`, stores `errorCode`+`errorReason` in job device statuses, clears `pendingJobId` on rejection, emits `DEVICE_UPDATE_REJECTED` audit event; security codes (`10002–10006`) also emit `SECURITY_ALERT`; job-level status mapped to `FAILED` on REJECTED; admin job document renamed `operation` → `operationType` (integer) and removed `mandatory` field; user-initiated MQTT payload aligned: same `operationType` integer, removed `mandatory`; new Section 6.9 (REJECTED error code table); security section updated (removed mandatory, added tamper-detection row) |

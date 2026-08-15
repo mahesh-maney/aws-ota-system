@@ -9,6 +9,7 @@ Message: {
   "status": "IN_PROGRESS" | "SUCCEEDED" | "FAILED" | "REJECTED",
   "progress": 0-100,
   "statusDetail": "...",
+  "statusDetails": { "errorCode": <int> },   # on REJECTED
   "packageName": "...",
   "version": "...",
   "error": "..."    # optional, on FAILED
@@ -32,6 +33,31 @@ OTA_JOBS_TABLE    = os.environ.get("OTA_JOBS_TABLE",    "digilux_ota_jobs")
 
 dynamo = boto3.resource("dynamodb", region_name=REGION)
 iot    = boto3.client("iot", region_name=REGION)
+
+# ── Error code → reason mapping (maintained on backend) ─────────────────────
+# Controller sends: { "status": "REJECTED", "statusDetails": { "errorCode": N } }
+ERROR_CODE_MAP = {
+    # Security errors (10000–10099)
+    10001: "SIGNATURE_MISSING",
+    10002: "SIGNATURE_INVALID_FORMAT",
+    10003: "SIGNATURE_VERIFICATION_FAILED",
+    10004: "CHECKSUM_MISMATCH",
+    10005: "CERTIFICATE_EXPIRED",
+    10006: "CERTIFICATE_UNTRUSTED",
+    # Package / compatibility errors (10100–10199)
+    10101: "PACKAGE_VERSION_ALREADY_INSTALLED",
+    10102: "PACKAGE_INCOMPATIBLE_DEVICE_TYPE",
+    10103: "INSUFFICIENT_STORAGE",
+    10104: "DOWNLOAD_FAILED",
+    10105: "PACKAGE_CORRUPT",
+    # Job / protocol errors (10200–10299)
+    10201: "JOB_ALREADY_IN_PROGRESS",
+    10202: "JOB_NOT_FOUND",
+    10203: "INVALID_JOB_DOCUMENT",
+}
+
+# Codes that trigger an immediate SECURITY_ALERT audit event
+SECURITY_ERROR_CODES = {10002, 10003, 10004, 10005, 10006}
 
 
 def _audit(event: str, actor: str, resource: dict, result: str, **extra) -> None:
@@ -57,18 +83,22 @@ def lambda_handler(event, context):
         job_id     = event.get("jobId")
         device_id  = event.get("deviceId")
         thing_name = event.get("thingName")
-        status     = event.get("status", "").upper()
-        progress   = int(event.get("progress", 0))
+        status        = event.get("status", "").upper()
+        progress      = int(event.get("progress", 0))
         status_detail = event.get("statusDetail", "")
-        pkg_name   = event.get("packageName", "")
-        version    = event.get("version", "")
-        error_msg  = event.get("error", "")
+        status_details = event.get("statusDetails", {}) or {}
+        error_code    = status_details.get("errorCode")
+        error_reason  = ERROR_CODE_MAP.get(error_code, "UNKNOWN_ERROR") if error_code is not None else None
+        pkg_name      = event.get("packageName", "")
+        version       = event.get("version", "")
+        error_msg     = event.get("error", "")
 
         log.info(json.dumps({
             "msg": "device_status_received",
             "deviceId": device_id, "thingName": thing_name,
             "jobId": job_id, "status": status,
             "progress": progress, "packageName": pkg_name, "version": version,
+            **({"errorCode": error_code, "errorReason": error_reason} if error_code is not None else {}),
         }))
 
         if not all([job_id, device_id, status]):
@@ -102,6 +132,8 @@ def lambda_handler(event, context):
                     "statusDetail": status_detail,
                     "error": error_msg,
                     "updatedAt": now_ms,
+                    **({"errorCode": error_code, "errorReason": error_reason}
+                       if error_code is not None else {}),
                 },
                 ":js": aggregate,
                 ":ts": now_ms,
@@ -109,7 +141,7 @@ def lambda_handler(event, context):
         )
         log.info(f"Job {job_id} aggregate status → {aggregate} (device {device_key} reported {status})")
 
-        if status in ("SUCCEEDED", "FAILED"):
+        if status in ("SUCCEEDED", "FAILED", "REJECTED"):
             # Look up macAddress for the composite key update
             data_table = dynamo.Table(DEVICE_DATA_TABLE)
             dev_items  = data_table.query(
@@ -147,7 +179,7 @@ def lambda_handler(event, context):
                            "SUCCESS",
                            packageName=pkg_name, version=version, thingName=thing_name)
 
-                else:
+                elif status == "FAILED":
                     log.warning(json.dumps({
                         "msg": "device_update_failed",
                         "deviceId": device_id, "jobId": job_id,
@@ -170,13 +202,52 @@ def lambda_handler(event, context):
                            statusDetail=status_detail,
                            needsRecovery="NEEDS_RECOVERY" in (status_detail or ""))
 
+                else:  # REJECTED
+                    log.warning(json.dumps({
+                        "msg": "device_update_rejected",
+                        "deviceId": device_id, "jobId": job_id,
+                        "packageName": pkg_name, "version": version,
+                        "errorCode": error_code, "errorReason": error_reason,
+                    }))
+                    data_table.update_item(
+                        Key={"deviceId": device_id, "macAddress": mac_address},
+                        UpdateExpression="SET pendingJobId = :null, lastUpdatedAt = :ts",
+                        ExpressionAttributeValues={":null": None, ":ts": now_ms},
+                    )
+                    log.info(f"device_data pendingJobId cleared for device={device_id} after REJECTED")
+
+                    _audit("DEVICE_UPDATE_REJECTED",
+                           f"device:{device_id}",
+                           {"deviceId": device_id, "jobId": job_id},
+                           "FAILURE",
+                           packageName=pkg_name, version=version,
+                           thingName=thing_name,
+                           errorCode=error_code, errorReason=error_reason)
+
+                    if error_code in SECURITY_ERROR_CODES:
+                        log.error(json.dumps({
+                            "msg": "SECURITY_ALERT",
+                            "deviceId": device_id, "jobId": job_id,
+                            "errorCode": error_code, "errorReason": error_reason,
+                            "thingName": thing_name,
+                        }))
+                        _audit("SECURITY_ALERT",
+                               f"device:{device_id}",
+                               {"deviceId": device_id, "jobId": job_id},
+                               "ALERT",
+                               packageName=pkg_name, version=version,
+                               thingName=thing_name,
+                               errorCode=error_code, errorReason=error_reason)
+
+            # Map REJECTED → FAILED at the job level so the UI shows a clear terminal state
+            job_terminal_status = "FAILED" if status == "REJECTED" else status
             jobs_table.update_item(
                 Key={"jobId": job_id},
                 UpdateExpression="SET #s = :s, completedAt = :ts",
                 ExpressionAttributeNames={"#s": "status"},
-                ExpressionAttributeValues={":s": status, ":ts": now_ms},
+                ExpressionAttributeValues={":s": job_terminal_status, ":ts": now_ms},
             )
-            log.info(f"Job {job_id} marked {status} in {OTA_JOBS_TABLE}")
+            log.info(f"Job {job_id} marked {job_terminal_status} (device reported {status}) in {OTA_JOBS_TABLE}")
 
         elif status == "IN_PROGRESS":
             log.debug(f"Device {device_id} in-progress at {progress}% for job {job_id}")
@@ -198,7 +269,7 @@ def _aggregate_status(job_id: str, reporting_thing: str, new_status: str) -> str
         statuses[reporting_thing] = new_status
 
         all_vals = set(statuses.values())
-        if "FAILED" in all_vals:
+        if "FAILED" in all_vals or "REJECTED" in all_vals:
             return "FAILED"
         if "IN_PROGRESS" in all_vals:
             return "IN_PROGRESS"
