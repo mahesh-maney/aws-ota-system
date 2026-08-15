@@ -75,13 +75,13 @@ def lambda_handler(event, context):
             return _resp(400, {"error": "Missing path parameters: packageName and version required"})
 
         # ── Body ──────────────────────────────────────────────────────────────
-        body = json.loads(event.get("body") or "{}")
-        if "activated" not in body:
-            return _resp(400, {"error": "Missing required field: activated (true or false)"})
+        body     = json.loads(event.get("body") or "{}")
+        recalled = bool(body.get("recalled", False))
 
-        activated = bool(body["activated"])
+        if not recalled and "activated" not in body:
+            return _resp(400, {"error": "Missing required field: 'activated' (true/false) or 'recalled' (true)"})
 
-        # ── Verify package exists and is ACTIVE (binary processed) ────────────
+        # ── Verify package exists ─────────────────────────────────────────────
         table = dynamo.Table(PACKAGES_TABLE)
         item  = table.get_item(
             Key={"packageName": package_name, "version": version}
@@ -90,14 +90,64 @@ def lambda_handler(event, context):
         if not item:
             return _resp(404, {"error": f"Package {package_name} v{version} not found"})
 
-        if item.get("status") != "ACTIVE":
+        now_ms = int(__import__("time").time() * 1000)
+
+        # ── RECALL ────────────────────────────────────────────────────────────
+        if recalled:
+            if item.get("status") not in ("ACTIVE",):
+                return _resp(409, {
+                    "error": f"Package {package_name} v{version} cannot be recalled "
+                             f"(current status={item.get('status')}). Only ACTIVE packages can be recalled."
+                })
+
+            recall_reason = str(body.get("recallReason", "")).strip()
+
+            table.update_item(
+                Key={"packageName": package_name, "version": version},
+                UpdateExpression=(
+                    "SET #s = :s, activated = :a, "
+                    "recalledBy = :by, recalledAt = :ts, recallReason = :reason"
+                ),
+                ExpressionAttributeNames={"#s": "status"},
+                ExpressionAttributeValues={
+                    ":s":      "RECALLED",
+                    ":a":      False,
+                    ":by":     caller,
+                    ":ts":     now_ms,
+                    ":reason": recall_reason,
+                },
+            )
+
+            log.info(json.dumps({
+                "msg": "package_recalled",
+                "packageName": package_name, "version": version,
+                "actor": caller, "recallReason": recall_reason,
+            }))
+            _audit("PACKAGE_RECALLED", caller,
+                   {"packageName": package_name, "version": version},
+                   "SUCCESS", recallReason=recall_reason, releaseType=item.get("releaseType"))
+
+            return _resp(200, {
+                "packageName":  package_name,
+                "version":      version,
+                "status":       "RECALLED",
+                "activated":    False,
+                "recalledBy":   caller,
+                "recallReason": recall_reason,
+                "updatedBy":    caller,
+                "message":      f"Package {package_name} v{version} recalled. "
+                                "No longer visible to end users and flagged in audit logs.",
+            })
+
+        # ── ACTIVATE / DEACTIVATE ─────────────────────────────────────────────
+        if item.get("status") not in ("ACTIVE",):
             return _resp(409, {
                 "error": f"Package {package_name} v{version} is not yet ACTIVE (status={item.get('status')}). "
                          "Upload the binary first."
             })
 
-        # ── Toggle activated flag ─────────────────────────────────────────────
-        now_ms = int(__import__("time").time() * 1000)
+        activated = bool(body["activated"])
+
         table.update_item(
             Key={"packageName": package_name, "version": version},
             UpdateExpression="SET activated = :a, activatedBy = :by, activatedAt = :ts",
@@ -114,7 +164,6 @@ def lambda_handler(event, context):
             "packageName": package_name, "version": version,
             "activated": activated, "actor": caller,
         }))
-
         _audit(f"PACKAGE_{action}", caller,
                {"packageName": package_name, "version": version},
                "SUCCESS", releaseType=item.get("releaseType"))

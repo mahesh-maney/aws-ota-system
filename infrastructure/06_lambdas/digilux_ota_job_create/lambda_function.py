@@ -56,6 +56,15 @@ OTA_JOBS_TABLE = os.environ.get("OTA_JOBS_TABLE", "digilux_ota_jobs")
 ARTIFACT_BUCKET = os.environ.get("ARTIFACT_BUCKET", "digilux-ota-artifacts")
 PRESIGN_EXPIRY_SEC = int(os.environ.get("PRESIGN_EXPIRY_SEC", "3600"))
 
+# Mapping: deviceType string → integer operation-type code sent to controller.
+# Controller firmware maintains the reverse mapping on its end.
+OPERATION_TYPE_MAP = {
+    "Network_controller_firmware":          1,
+    "Network_controller_zigbee_firmware":   2,
+    "Network_controller_Z2M_Firmware":      3,
+    "Network_controller_Miscellaneous":     4,
+}
+
 dynamo = boto3.resource("dynamodb", region_name=REGION)
 iot = boto3.client("iot", region_name=REGION)
 s3 = boto3.client("s3", region_name=REGION)
@@ -213,8 +222,11 @@ def lambda_handler(event, context):
         if isinstance(artifact_size, Decimal):
             artifact_size = int(artifact_size)
 
+        device_type    = pkg.get("deviceType", "")
+        operation_type = OPERATION_TYPE_MAP.get(device_type, 0)
+
         job_doc = {
-            "operation": pkg.get("deviceType", ""),
+            "operationType": operation_type,
             "packageName": pkg_name,
             "version": version,
             "artifact": {
@@ -223,7 +235,6 @@ def lambda_handler(event, context):
                 "signature": pkg["signature"],
                 "size": artifact_size,
             },
-            "mandatory": True,
             "rollback": True,
         }
         if body.get("parameters"):

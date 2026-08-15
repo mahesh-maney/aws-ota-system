@@ -97,6 +97,15 @@ OTA_MQTT_TOPIC_TEMPLATE = os.environ.get(
     "iot/device/{deviceId}/ota",
 )
 
+# Mapping: deviceType string → integer operationType code sent to controller.
+# Must stay in sync with digilux_ota_job_create.OPERATION_TYPE_MAP.
+OPERATION_TYPE_MAP = {
+    "Network_controller_firmware":          1,
+    "Network_controller_zigbee_firmware":   2,
+    "Network_controller_Z2M_Firmware":      3,
+    "Network_controller_Miscellaneous":     4,
+}
+
 _MAX_BODY_BYTES = 2048
 _UUID_RE = re.compile(
     r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
@@ -350,8 +359,10 @@ def lambda_handler(event, context):
         )
 
         # ── 11. Build MQTT payload ────────────────────────────────────────────
+        operation_type = OPERATION_TYPE_MAP.get(pkg.get("deviceType", ""), 0)
+
         mqtt_payload = {
-            "operation":    "DOWNLOAD_AND_INSTALL",
+            "operationType": operation_type,
             "packageName":  package_name,
             "version":      version,
             "packageType":  pkg.get("packageType", ""),
@@ -362,7 +373,6 @@ def lambda_handler(event, context):
             "expiresAt":    expires_at,
             "initiatedBy":  "USER_APP",
             "userId":       user_id,
-            "mandatory":    False,  # user-requested; device can defer if mid-task
             "rollback":     True,
         }
 
