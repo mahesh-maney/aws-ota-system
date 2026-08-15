@@ -431,6 +431,6 @@ def _abort_job(job_id: str, claims: dict) -> dict:
 def _response(status: int, body: dict) -> dict:
     return {
         "statusCode": status,
-        "headers": {"Content-Type": "application/json"},
+        "headers": {"Content-Type": "application/json", "Access-Control-Allow-Origin": "*"},
         "body": json.dumps(body, cls=_DecimalEncoder),
     }

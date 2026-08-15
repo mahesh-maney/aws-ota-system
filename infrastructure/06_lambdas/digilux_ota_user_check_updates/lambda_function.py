@@ -29,9 +29,11 @@ DEVICE_DATA_TABLE      = os.environ.get("DEVICE_DATA_TABLE",      "digilux_devic
 PACKAGES_TABLE         = os.environ.get("PACKAGES_TABLE",         "digilux_ota_packages")
 DEVICE_DATA_USER_INDEX = os.environ.get("DEVICE_DATA_USER_INDEX", "userId-index")
 CANARY_GROUP           = os.environ.get("CANARY_GROUP",           "DGX-Canary")
+ENTITLEMENT_FUNCTION   = os.environ.get("ENTITLEMENT_FUNCTION",   "digilux_entitlement_check")
 
-dynamo = boto3.resource("dynamodb", region_name=REGION)
-iot    = boto3.client("iot",        region_name=REGION)
+dynamo         = boto3.resource("dynamodb", region_name=REGION)
+iot            = boto3.client("iot",        region_name=REGION)
+lambda_client  = boto3.client("lambda",     region_name=REGION)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -66,6 +68,52 @@ def _version_tuple(v: str):
 
 def _is_newer(candidate: str, installed: str) -> bool:
     return _version_tuple(candidate) > _version_tuple(installed)
+
+
+def _invoke_entitlement_check(controller_id: str, firmware_category: str,
+                               tier_override: str | None) -> dict:
+    """
+    Invoke digilux_entitlement_check (internal Lambda-to-Lambda).
+    Returns the entitlement response dict.
+    Fails open on any error — existing OTA behaviour is never blocked by
+    an entitlement service outage.
+    """
+    if not controller_id or not firmware_category:
+        # Nothing to check — permissive default
+        return {"eligible": True, "reason": "missing_input"}
+
+    payload = json.dumps({
+        "controllerId":     controller_id,
+        "firmwareCategory": firmware_category,
+        "tierOverride":     tier_override,
+    }).encode()
+
+    try:
+        resp = lambda_client.invoke(
+            FunctionName   = ENTITLEMENT_FUNCTION,
+            InvocationType = "RequestResponse",
+            Payload        = payload,
+        )
+        result = json.loads(resp["Payload"].read())
+        # Lambda invocation errors surface as FunctionError key
+        if resp.get("FunctionError"):
+            log.warning(json.dumps({
+                "msg":              "entitlement_function_error",
+                "controllerId":     controller_id,
+                "firmwareCategory": firmware_category,
+                "functionError":    resp["FunctionError"],
+            }))
+            return {"eligible": True, "reason": "entitlement_function_error"}
+        return result
+    except Exception as exc:
+        log.warning(json.dumps({
+            "msg":              "entitlement_invoke_failed",
+            "controllerId":     controller_id,
+            "firmwareCategory": firmware_category,
+            "error":            str(exc),
+        }))
+        # Fail open — never block legitimate OTA delivery
+        return {"eligible": True, "reason": "entitlement_invoke_failed"}
 
 
 def _audit(event: str, actor: str, resource: dict, result: str, **extra) -> None:
@@ -206,7 +254,26 @@ def lambda_handler(event, context):
                     log.debug(f"{pkg_name}: installed={installed_ver}, latest={latest_ver} — up to date")
                     continue
 
-                # Newer version available
+                # ── Entitlement check — gate on subscription tier ─────────────
+                firmware_category = latest_pkg.get("firmwareCategory") or None
+                tier_override     = latest_pkg.get("tierOverride")     or None
+                entitlement       = _invoke_entitlement_check(thing_name, firmware_category, tier_override)
+
+                if not entitlement.get("eligible", True):
+                    log.info(json.dumps({
+                        "msg":              "update_blocked_by_entitlement",
+                        "userId":           user_id,
+                        "deviceId":         device_id,
+                        "packageName":      pkg_name,
+                        "availableVersion": latest_ver,
+                        "firmwareCategory": firmware_category,
+                        "reason":           entitlement.get("reason"),
+                        "subscriptionTier": entitlement.get("subscriptionTier"),
+                        "minimumTier":      entitlement.get("minimumTier"),
+                    }))
+                    continue
+
+                # Newer version available and entitled
                 artifact_size = latest_pkg.get("artifactSize", 0)
                 if isinstance(artifact_size, Decimal):
                     artifact_size = int(artifact_size)
@@ -214,6 +281,7 @@ def lambda_handler(event, context):
                 available_updates.append({
                     "packageName":      pkg_name,
                     "deviceType":       latest_pkg.get("deviceType", ""),
+                    "firmwareCategory": firmware_category,
                     "releaseType":      latest_pkg.get("releaseType", "PROD"),
                     "currentVersion":   installed_ver,
                     "availableVersion": latest_ver,
@@ -225,6 +293,8 @@ def lambda_handler(event, context):
                     "userId": user_id, "deviceId": device_id,
                     "packageName": pkg_name,
                     "currentVersion": installed_ver, "availableVersion": latest_ver,
+                    "firmwareCategory": firmware_category,
+                    "entitlementReason": entitlement.get("reason"),
                 }))
 
             total_updates += len(available_updates)
