@@ -97,7 +97,7 @@ add_cors() {
     --http-method OPTIONS --status-code 200 \
     --response-parameters '{
       "method.response.header.Access-Control-Allow-Headers": "'"'"'Content-Type,Authorization'"'"'",
-      "method.response.header.Access-Control-Allow-Methods": "'"'"'GET,POST,OPTIONS'"'"'",
+      "method.response.header.Access-Control-Allow-Methods": "'"'"'GET,POST,PATCH,OPTIONS'"'"'",
       "method.response.header.Access-Control-Allow-Origin": "'"'"'*'"'"'"
     }' --region "$REGION" 2>/dev/null || true
 }
@@ -148,6 +148,15 @@ ABORT_RES=$(get_or_create_resource "$DEPLOY_JOB_RES" "abort")
 add_method "$ABORT_RES" "POST" "$JOB_ARN"
 add_cors   "$ABORT_RES"
 
+# ── /api/v1/ota/packages/{packageName}/{version}/activate — PATCH ────────────
+echo "==> /api/v1/ota/packages/{packageName}/{version}/activate"
+ACTIVATE_ARN="arn:aws:lambda:${REGION}:${ACCOUNT_ID}:function:digilux_ota_package_activate"
+PKG_NAME_RES=$(get_or_create_resource "$PKGS_RES"    "{packageName}")
+PKG_VER_RES=$(get_or_create_resource  "$PKG_NAME_RES" "{version}")
+PKG_ACT_RES=$(get_or_create_resource  "$PKG_VER_RES"  "activate")
+add_method "$PKG_ACT_RES" "PATCH" "$ACTIVATE_ARN"
+add_cors   "$PKG_ACT_RES"
+
 # ── /api/v1/controllers/{deviceId}/updates/available — GET ───────────────────
 echo "==> /api/v1/controllers/{deviceId}/updates/available"
 CTRL_RES=$(aws apigateway get-resources \
@@ -159,6 +168,24 @@ UPDATES_RES=$(get_or_create_resource "$CTRL_ID_RES" "updates")
 AVAIL_RES=$(get_or_create_resource   "$UPDATES_RES" "available")
 add_method "$AVAIL_RES" "GET" "$COMPAT_CHECK_ARN"
 add_cors   "$AVAIL_RES"
+
+# ── Gateway Responses — ensure CORS headers on auth errors (401/403/5xx) ─────
+# Without this, when API Gateway's Cognito authorizer rejects a request, the
+# 401/403 response has no Access-Control-Allow-Origin header and the browser
+# reports it as a CORS error instead of an auth error.
+echo ""
+echo "==> Configuring Gateway Responses (CORS on error responses)"
+for RESP_TYPE in DEFAULT_4XX DEFAULT_5XX UNAUTHORIZED ACCESS_DENIED EXPIRED_TOKEN; do
+  aws apigateway put-gateway-response \
+    --rest-api-id "$API_ID" \
+    --response-type "$RESP_TYPE" \
+    --response-parameters '{
+      "gatewayresponse.header.Access-Control-Allow-Origin":  "'"'"'*'"'"'",
+      "gatewayresponse.header.Access-Control-Allow-Headers": "'"'"'Content-Type,Authorization'"'"'"
+    }' \
+    --region "$REGION" > /dev/null
+  echo "    $RESP_TYPE configured"
+done
 
 # ── Deploy to stage ───────────────────────────────────────────────────────────
 echo ""
@@ -174,10 +201,11 @@ echo "API Gateway deployed."
 echo "Base URL: $BASE_URL"
 echo ""
 echo "Endpoints:"
-echo "  GET  /api/v1/ota/packages                              List all packages"
-echo "  POST /api/v1/ota/packages/upload-artefact                   Get pre-signed upload URL"
-echo "  POST /api/v1/ota/deployments                           Create deployment"
-echo "  GET  /api/v1/ota/deployments                           List deployments"
-echo "  GET  /api/v1/ota/deployments/{jobId}                   Job status + progress"
-echo "  POST /api/v1/ota/deployments/{jobId}/abort             Abort deployment"
-echo "  GET  /api/v1/controllers/{deviceId}/updates/available  Check device updates"
+echo "  GET   /api/v1/ota/packages                                     List all packages"
+echo "  POST  /api/v1/ota/packages/upload-artefact                    Get pre-signed upload URL"
+echo "  PATCH /api/v1/ota/packages/{packageName}/{version}/activate   Publish / withdraw / recall"
+echo "  POST  /api/v1/ota/deployments                                 Create deployment"
+echo "  GET   /api/v1/ota/deployments                                 List deployments"
+echo "  GET   /api/v1/ota/deployments/{jobId}                         Job status + progress"
+echo "  POST  /api/v1/ota/deployments/{jobId}/abort                   Abort deployment"
+echo "  GET   /api/v1/controllers/{deviceId}/updates/available        Check device updates"
