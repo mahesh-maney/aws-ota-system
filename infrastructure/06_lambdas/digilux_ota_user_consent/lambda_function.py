@@ -76,6 +76,16 @@ _cf_private_key_cache = None
 
 CONSENTS_USER_INDEX = os.environ.get("CONSENTS_USER_INDEX", "userId-deviceId-index")
 
+# deviceType string → integer operationType sent in the IoT Job document.
+# Controller firmware maintains the reverse mapping on its end.
+# Must stay in sync with digilux_ota_job_create.OPERATION_TYPE_MAP.
+OPERATION_TYPE_MAP = {
+    "Network_controller_firmware":        1,
+    "Network_controller_zigbee_firmware": 2,
+    "Network_controller_Z2M_Firmware":    3,
+    "Network_controller_Miscellaneous":   4,
+}
+
 # Body size guard
 _MAX_BODY_BYTES = 2048
 # Loose UUID format check (36-char hex with dashes)
@@ -278,9 +288,12 @@ def _create_iot_job(pkg: dict, package_name: str, version: str,
     if isinstance(artifact_size, Decimal):
         artifact_size = int(artifact_size)
 
+    device_type    = pkg.get("deviceType", "")
+    operation_type = OPERATION_TYPE_MAP.get(device_type, 0)
+
     job_doc = {
-        "operation":    pkg["packageType"],
-        "packageName":  package_name,
+        "operationType": operation_type,
+        "packageName":   package_name,
         "version":      version,
         "artifact": {
             "presignedUrl": presigned_url,
