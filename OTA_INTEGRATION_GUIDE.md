@@ -602,6 +602,94 @@ Cancels the IoT Job for any devices not yet in terminal state. Devices already i
 
 ---
 
+### 4.8a Beta Users Management (Admin)
+
+Beta users are enrolled devices that receive BETA rollout-stage deployments before the general fleet.
+The backend auto-resolves **email → Cognito userId → deviceId** so admins only need to supply an email address.
+
+#### List Beta Users
+
+```
+GET /api/v1/ota/beta-users
+```
+
+**Response `200`:**
+```json
+{
+  "users": [
+    {
+      "email":     "user@example.com",
+      "userId":    "a1b2c3d4-...",
+      "deviceId":  "edb39bba-baf1-4700-968c-a42228e53aa0",
+      "thingName": "DGX-edb39bba",
+      "addedAt":   1787000000000,
+      "addedBy":   "admin@digilux.co.in"
+    }
+  ],
+  "count": 1
+}
+```
+
+#### Add Beta User
+
+```
+POST /api/v1/ota/beta-users
+```
+
+```json
+{ "email": "user@example.com" }
+```
+
+The Lambda performs the full resolution chain:
+1. `Cognito AdminGetUser` by email → `userId`
+2. `digilux_device_data` query on `userId-index` GSI → `deviceId` + `thingName`
+3. Writes record to `digilux_ota_beta_users` table
+
+**Response `201`:**
+```json
+{
+  "email":     "user@example.com",
+  "userId":    "a1b2c3d4-...",
+  "deviceId":  "edb39bba-baf1-4700-968c-a42228e53aa0",
+  "thingName": "DGX-edb39bba",
+  "addedAt":   1787000000000,
+  "addedBy":   "admin@digilux.co.in"
+}
+```
+
+| HTTP | Condition |
+|---|---|
+| `400` | `email` missing or malformed |
+| `404` | Email not found in Cognito user pool |
+| `404` | No device registered for that user |
+| `409` | User already enrolled as beta user |
+
+#### Remove Beta User
+
+```
+DELETE /api/v1/ota/beta-users/{email}
+```
+
+URL-encode the `@` symbol (e.g. `user%40example.com`).
+
+**Response `200`:**
+```json
+{ "message": "Beta user user@example.com removed" }
+```
+
+#### DynamoDB Table: `digilux_ota_beta_users`
+
+| Attribute | Type | Description |
+|---|---|---|
+| `email` | String (PK) | User email — primary lookup key |
+| `userId` | String | Cognito sub / userId |
+| `deviceId` | String | Device UUID |
+| `thingName` | String | AWS IoT Thing name |
+| `addedAt` | Number | Unix timestamp (ms) |
+| `addedBy` | String | Admin email who enrolled this user |
+
+---
+
 ### 4.9 Check Available Updates (End User)
 
 ```
@@ -1403,7 +1491,7 @@ echo "https://iot.digilux.co.in/smarthome" > /tmp/ota_base_url.txt
 bash infrastructure/e2e_test.sh
 ```
 
-Results are printed to stdout and saved to `infrastructure/e2e_test_results.txt`. Last verified: **69/69 PASS** (2026-08-04).
+Results are printed to stdout and saved to `infrastructure/e2e_test_results.txt`. Last verified: **70/70 PASS** (2026-08-19).
 
 > The E2E suite covers the admin flow (T01–T16). User-flow endpoint tests (consent, download-link) are covered by the Postman collection.
 
@@ -1421,3 +1509,4 @@ Results are printed to stdout and saved to `infrastructure/e2e_test_results.txt`
 | `1.7` | 2026-08-13 | Digilux Engineering | Multipart upload support: `POST /upload-artefact` now auto-selects SINGLE vs MULTIPART based on `totalSize`; new `POST /upload-artefact/complete` endpoint; new `GET /packages/{packageName}/{version}` status polling API; `checksum` made mandatory; `releaseType` BETA renamed to UAT; endpoint renamed from `upload-url` to `upload-artefact` |
 | `1.4` | 2026-08-04 | Digilux Engineering | App-mediated download-link flow: Section 4.11 (`POST /api/v1/ota/my/updates/download-link`); Lambda returns pre-signed URL to Flutter app and simultaneously publishes download payload to device MQTT OTA topic; Section 5.3 (flow comparison table: consent vs download-link); new Lambda `digilux_ota_user_get_download_link`; IAM `iot:Publish` permission on `iot/device/*/ota` |
 | `1.8` | 2026-08-16 | Digilux Engineering | REJECTED status with error codes: `digilux_ota_status_handler` now parses `statusDetails.errorCode` from controller, resolves reason from `ERROR_CODE_MAP`, stores `errorCode`+`errorReason` in job device statuses, clears `pendingJobId` on rejection, emits `DEVICE_UPDATE_REJECTED` audit event; security codes (`10002–10006`) also emit `SECURITY_ALERT`; job-level status mapped to `FAILED` on REJECTED; admin job document renamed `operation` → `operationType` (integer) and removed `mandatory` field; user-initiated MQTT payload aligned: same `operationType` integer, removed `mandatory`; new Section 6.9 (REJECTED error code table); security section updated (removed mandatory, added tamper-detection row) |
+| `1.9` | 2026-08-19 | Digilux Engineering | Beta users management: new Lambda `digilux_ota_beta_users` with `GET`/`POST`/`DELETE /ota/beta-users`; auto-resolves email → Cognito userId → deviceId via `userId-index` GSI on `digilux_device_data`; new DynamoDB table `digilux_ota_beta_users`; new Section 4.8a; `digilux_ota_user_consent` aligned to use integer `operationType` (via `OPERATION_TYPE_MAP`) in IoT Job document — consistent with admin-side `job_create`; e2e suite at 70/70 PASS |

@@ -1,14 +1,14 @@
 
 ━━━ T01 — AUTHENTICATION ━━━
-  ✓ Non-admin token rejected on GET /packages (HTTP 403)
+  ✓ Non-admin token rejected on GET /packages (HTTP 401)
   ✓ Admin token accepted on GET /packages (HTTP 200)
   ✓ Invalid token rejected (HTTP 401)
 
 ━━━ T02 — INPUT VALIDATION: upload-artefact ━━━
-  ✓ Missing packageName → 400 (HTTP 400)
+  ✓ Missing deviceType → 400 (HTTP 400)
   ✓ Missing version → 400 (HTTP 400)
-  ✓ Missing packageType → 400 (HTTP 400)
-  ✓ Invalid packageType → 400 (HTTP 400)
+  ✓ Missing releaseType → 400 (HTTP 400)
+  ✓ Invalid deviceType → 400 (HTTP 400)
 
 ━━━ T03 — INPUT VALIDATION: deployments ━━━
   ✓ Missing packageName → 400 (HTTP 400)
@@ -21,21 +21,23 @@
   ✓ Known deviceId → 200 (HTTP 200)
 
 ━━━ T05 — PACKAGE UPLOAD FLOW ━━━
+  → test artifact SHA256: 43f5f00f2878e91b...
   ✓ Upload URL request returns 200 (HTTP 200)
   ✓ Package starts as PENDING (status=PENDING)
   ✓ Response has uploadUrl (has field: uploadUrl)
   ✓ Response has s3Key (has field: s3Key)
-  → s3Key: application/controller-app/5.0.1785490579-10803/test-artifact.tar.gz
+  ✓ Response has uploadToken (has field: uploadToken)
+  → packageName: HomeAssistantUtility  s3Key: Network_controller_firmware/HomeAssistantUtility/5.0.1787125342-9474/HomeAssistantUtility-5.0.1787125342-9474.jar
   ✓ Binary PUT to S3 pre-signed URL → 200 (HTTP 200)
   → Waiting for artifact_processor (up to 15s)...
   ✓ Package auto-promoted to ACTIVE in 2s (S3 event → artifact_processor)
-  ✓ SHA256 written by artifact_processor: 987422c078753d10...
+  ✓ SHA256 written by artifact_processor: 43f5f00f2878e91b...
   ✓ ECDSA signature written by artifact_processor
   ✓ Duplicate ACTIVE version upload → 409 (HTTP 409)
 
 ━━━ T06 — LIST PACKAGES ━━━
-  ✓ GET /packages returns 10 packages
-  ✓ Filter by packageName returns packages array (has field: packages)
+  ✓ GET /packages returns 30 packages
+  ✓ Filter by deviceType returns packages array (has field: packages)
 
 ━━━ T07 — COMPATIBILITY CHECK ━━━
   ✓ Compatibility response has availableUpdates (has field: availableUpdates)
@@ -44,7 +46,7 @@
   → Device installed controller-app: 2.0.0
 
 ━━━ T08 — DEPLOYMENT CREATION ━━━
-  ✓ Deployment created: digilux-ota-controller-app-5-0-1785490579-10803-1785490588
+  ✓ Deployment created: digilux-ota-HomeAssistantUtility-5-0-1787125342-9474-1787125351
   ✓ New deployment starts as QUEUED (status=QUEUED)
   ✓ Rollout stage preserved (rolloutStage=CANARY)
   ✓ Response has iotJobArn (has field: iotJobArn)
@@ -60,12 +62,12 @@
   ✓ IN_PROGRESS published to IoT MQTT topic
   ✓ SUCCEEDED published to IoT MQTT topic
   ✓ Job status updated to SUCCEEDED in DynamoDB
-  ✓ Device inventory updated: controller-app=5.0.1785490579-10803
+  ✓ Device data updated: HomeAssistantUtility=5.0.1787125342-9474
   ✓ pendingJobId cleared after SUCCEEDED
 
 ━━━ T11 — SIMULATE FAILED UPDATE (with rollback detail) ━━━
   → Reset device to controller-app@3.0.0 for failure test
-  ✓ Created failure-test job: digilux-ota-controller-app-4-0-0-1785490600
+  ✓ Created failure-test job: digilux-ota-controller-app-4-0-0-1787125365
   ✓ FAILED status recorded in DynamoDB (device rolled back)
   ✓ pendingJobId cleared after FAILED (device can accept next job)
 
@@ -82,10 +84,10 @@
   ✓ DEVICE_UPDATE_FAILED audit — audit event found in /aws/lambda/digilux_ota_status_handler
 
 ━━━ T14 — DYNAMODB CONSISTENCY ━━━
-  ✓ Table digilux_ota_packages has 14 records
-  ✓ Table digilux_device_inventory has 1 records
-  ✓ Table digilux_ota_jobs has 33 records
-  ✓ Table digilux_ota_compatibility has 14 records
+  ✓ Table digilux_ota_packages has 49 records
+  ✓ Table digilux_device_data has 56 records
+  ✓ Table digilux_ota_jobs has 90 records
+  ✓ Table digilux_ota_compatibility has 18 records
 
 ━━━ T15 — IOT INFRASTRUCTURE ━━━
   ✓ IoT Rule digilux_ota_status_ingest is active
@@ -94,7 +96,7 @@
   ✓ Thing Group DGX-Beta exists
   ✓ Thing Group DGX-Production exists
   ✓ Thing Group DGX-Controllers exists
-  ✓ S3 bucket has 6 event notifications configured
+  ✓ S3 bucket has 4 event notifications configured
   ✓ ECDSA signing key present in Secrets Manager
 
 ━━━ T16 — LAMBDA HEALTH ━━━
@@ -107,7 +109,6 @@
 
 ━━━ RESULTS ━━━
 
-  Total: 69   ✓ Passed: 69   ✗ Failed: 0   ⚠ Warnings: 0
+  Total: 70   ✓ Passed: 70   ✗ Failed: 0   ⚠ Warnings: 0
 
   OVERALL: PASS
-Run date: Fri Jul 31 15:07:11 IST 2026
