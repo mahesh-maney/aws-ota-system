@@ -17,8 +17,13 @@ On success: computes SHA256, signs with ECDSA, promotes PENDING → ACTIVE.
 
 Triggered by: S3 Event Notification (s3:ObjectCreated:Put)
               on bucket: digilux-ota-artifacts
-              prefixes: Network_controller_firmware/, Network_controller_zigbee_firmware/,
+              prefixes: Network_controller_firmware/ (covers ALL new uploads — new key structure)
+                        Legacy prefixes: Network_controller_zigbee_firmware/,
                         Network_controller_Z2M_Firmware/, Network_controller_Miscellaneous/
+
+S3 key structures:
+  New (2026-08-24+): Network_controller_firmware/{deviceType}/{version}/{fileName}
+  Old (legacy):      {deviceType}/{packageName}/{version}/{fileName}
 """
 import base64
 import datetime
@@ -44,6 +49,16 @@ s3     = boto3.client("s3", region_name=REGION)
 sm     = boto3.client("secretsmanager", region_name=REGION)
 
 SKIP_KEYS = {".keep"}
+
+# Used by the new S3 key structure to map deviceType → packageName
+# New structure: Network_controller_firmware/{deviceType}/{version}/{fileName}
+DEVICE_TYPE_TO_PACKAGE = {
+    "Network_controller_firmware":              "HomeAssistantUtility",
+    "Network_controller_zigbee_firmware":       "ZigbeeFirmware",
+    "Network_controller_Z2M_Firmware":          "Z2MFirmware",
+    "Network_controller_Miscellaneous":         "NetControllerMisc",
+    "Network_controller_zigbee_stack_firmware": "ZigbeeStackFirmware",
+}
 
 
 def _audit(event: str, actor: str, resource: dict, result: str, **extra) -> None:
@@ -114,15 +129,32 @@ def _quarantine(bucket: str, s3_key: str, pkg_name: str, version: str,
 
 
 def _process_artifact(bucket: str, s3_key: str, obj_size: int) -> None:
-    # Parse packageName and version from S3 key:
-    # {deviceType}/{packageName}/{version}/{filename}
+    # Parse packageName and version from S3 key.
+    #
+    # New structure (from 2026-08-24 onwards):
+    #   Network_controller_firmware/{deviceType}/{version}/{fileName}
+    #   parts[0]="Network_controller_firmware", parts[1]=deviceType, parts[2]=version
+    #
+    # Old structure (pre-2026-08-24):
+    #   {deviceType}/{packageName}/{version}/{fileName}
+    #   parts[0]=deviceType, parts[1]=packageName, parts[2]=version
     parts = s3_key.split("/")
     if len(parts) < 4:
         log.error(f"Unexpected S3 key structure: {s3_key}")
         return
 
-    pkg_name = parts[1]
-    version  = parts[2]
+    if parts[0] == "Network_controller_firmware" and parts[1] in DEVICE_TYPE_TO_PACKAGE:
+        # New key structure
+        device_type = parts[1]
+        version     = parts[2]
+        pkg_name    = DEVICE_TYPE_TO_PACKAGE[device_type]
+        log.info(f"New key structure — deviceType={device_type}, packageName={pkg_name}, version={version}")
+    else:
+        # Old key structure: {deviceType}/{packageName}/{version}/{fileName}
+        pkg_name = parts[1]
+        version  = parts[2]
+        log.info(f"Old key structure — packageName={pkg_name}, version={version}")
+
     log.info(f"Parsed from S3 key — packageName={pkg_name}, version={version}")
 
     table = dynamo.Table(PACKAGES_TABLE)

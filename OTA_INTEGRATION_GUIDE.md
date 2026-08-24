@@ -1,7 +1,7 @@
 # Digilux OTA (Over-The-Air) Update System — Integration Guide
 
-**Version:** 1.7
-**Date:** 2026-08-24
+**Version:** 2.1
+**Date:** 2026-08-24 (updated 2026-08-24)
 **Audience:** Integration / QA Team
 **Base URL:** `https://iot.digilux.co.in/smarthome` (custom domain)
 **Alternate URL:** `https://ds6nxf8ac5.execute-api.ap-south-1.amazonaws.com/smarthome`
@@ -21,12 +21,13 @@ The Digilux OTA system supports two update modes:
 
 Each upload is tied to a `deviceType` which determines the package name and file extension automatically:
 
-| `deviceType` | Derived `packageName` | File extension |
-|---|---|---|
-| `Network_controller_firmware` | `HomeAssistantUtility` | `.jar` |
-| `Network_controller_zigbee_firmware` | `ZigbeeFirmware` | `.tar` |
-| `Network_controller_Z2M_Firmware` | `Z2MFirmware` | `.bin` |
-| `Network_controller_Miscellaneous` | `NetControllerMisc` | `.py` |
+| `deviceType` | Derived `packageName` | File extension | `operationType` |
+|---|---|---|---|
+| `Network_controller_firmware` | `HomeAssistantUtility` | `.jar` | `1` |
+| `Network_controller_zigbee_firmware` | `ZigbeeFirmware` | `.tar` | `2` |
+| `Network_controller_Z2M_Firmware` | `Z2MFirmware` | `.bin` | `3` |
+| `Network_controller_Miscellaneous` | `NetControllerMisc` | `.py` | `4` |
+| `Network_controller_zigbee_stack_firmware` | `ZigbeeStackFirmware` | `.bin` | `5` |
 
 ### Release Types
 
@@ -1289,20 +1290,30 @@ A package in `PENDING` state **cannot be deployed** — the API returns `400`. A
 
 ## 9. S3 Key Structure
 
-Artifacts are stored at:
+All new artifacts (from 2026-08-24 onwards) are stored under a unified firmware prefix:
 
 ```
-s3://digilux-ota-artifacts/{prefix}/{packageName}/{version}/{fileName}
+s3://digilux-ota-artifacts/Network_controller_firmware/{deviceType}/{version}/{fileName}
 ```
 
-| Package Type | Prefix |
-|---|---|
-| `CONTROLLER_FIRMWARE` | `firmware/` |
-| `CONTROLLER_APP` | `application/` |
-| `DRIVER` | `drivers/` |
-| `ZIGBEE_DEVICE` | `zigbee-devices/` |
-| `CONFIG` | `config/` |
-| `RULES` | `rules/` |
+**Example:**
+```
+digilux-ota-artifacts/
+  Network_controller_firmware/
+    Network_controller_zigbee_firmware/
+      4.6.1/
+        ZigbeeFirmware-4.6.1.tar
+    Network_controller_firmware/
+      5.0.1/
+        HomeAssistantUtility-5.0.1.jar
+    Network_controller_zigbee_stack_firmware/
+      1.0.0/
+        ZigbeeStackFirmware-1.0.0.bin
+```
+
+The `{fileName}` is auto-derived as `{packageName}-{version}{ext}` unless overridden with `fileName` in the upload request.
+
+> **Legacy keys** (pre-2026-08-24) used the old structure `{deviceType}/{packageName}/{version}/{fileName}` and are left in place — `artifact_processor` handles both formats transparently.
 
 See **Section 12** for S3 bucket security settings and artifact lifecycle policy.
 
@@ -1598,3 +1609,4 @@ Results are printed to stdout and saved to `infrastructure/e2e_test_results.txt`
 | `1.8` | 2026-08-16 | Digilux Engineering | REJECTED status with error codes: `digilux_ota_status_handler` now parses `statusDetails.errorCode` from controller, resolves reason from `ERROR_CODE_MAP`, stores `errorCode`+`errorReason` in job device statuses, clears `pendingJobId` on rejection, emits `DEVICE_UPDATE_REJECTED` audit event; security codes (`10002–10006`) also emit `SECURITY_ALERT`; job-level status mapped to `FAILED` on REJECTED; admin job document renamed `operation` → `operationType` (integer) and removed `mandatory` field; user-initiated MQTT payload aligned: same `operationType` integer, removed `mandatory`; new Section 6.9 (REJECTED error code table); security section updated (removed mandatory, added tamper-detection row) |
 | `1.9` | 2026-08-19 | Digilux Engineering | Beta users management: new Lambda `digilux_ota_beta_users` with `GET`/`POST`/`DELETE /ota/beta-users`; auto-resolves email → Cognito userId → deviceId via `userId-index` GSI on `digilux_device_data`; new DynamoDB table `digilux_ota_beta_users`; new Section 4.8a; `digilux_ota_user_consent` aligned to use integer `operationType` (via `OPERATION_TYPE_MAP`) in IoT Job document — consistent with admin-side `job_create`; e2e suite at 70/70 PASS |
 | `2.0` | 2026-08-24 | Digilux Engineering | Release type lifecycle: added `BETA` (Beta/UAT) and `CUSTOM` release types; removed `UAT`; BETA→PROD promotion (`{"promote":true}` on activate endpoint) — permanent, PROD is terminal; SUPERSEDED→ACTIVE rollback (`{"restore":true}`) for buggy-version recovery; semver-aware auto-supersede in `artifact_processor` — new upload only supersedes lower-version ACTIVE entries, not higher ones; BETA multi-target deployment (`rolloutStage=BETA`, `targetIds` from beta-users list); CUSTOM deployment (`rolloutStage=CUSTOM`, explicit `targetIds`, CUSTOM-tagged artefacts only); S3 HTTPS-only bucket policy (DenyNonHTTPS on `digilux-ota-artifacts`); `thingName` convention changed from `digilux-{mac}` to `deviceId` for new device registrations; admin UI: Beta(UAT) display labels, multi-select beta user checkboxes, CUSTOM tag-input, Promote/Restore buttons, SUPERSEDED status filter |
+| `2.1` | 2026-08-24 | Digilux Engineering | New S3 key structure `Network_controller_firmware/{deviceType}/{version}/{fileName}` — unified firmware prefix for all device types; `artifact_processor` backward-compatible (detects old vs new key format automatically); new device type `Network_controller_zigbee_stack_firmware` (`packageName=ZigbeeStackFirmware`, `.bin`, `operationType=5`); `job_create` Lambda fixed to read device inventory from `digilux_device_data` (was erroneously reading from retired `digilux_device_inventory`) — fixes "already installed" guard and `pendingJobId` tracking; device type table updated with `operationType` integers; e2e test suite fixed (T03/T11/T12 were using stale `controller-app` package name); 70/70 PASS |

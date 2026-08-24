@@ -115,9 +115,8 @@ assert_code "$code" "400" "Invalid targetType → 400"
 code=$(http_code POST "/api/v1/ota/deployments" '{"packageName":"nonexistent-pkg","version":"9.9.9","targetType":"THING","targetId":"x"}')
 assert_code "$code" "404" "Non-existent package → 404"
 
-code=$(http_code POST "/api/v1/ota/deployments" \
-  "{\"packageName\":\"controller-app\",\"version\":\"2.0.0\",\"targetType\":\"THING\",\"targetId\":\"${DEVICE_ID}\"}")
-assert_code "$code" "400" "Re-deploy already-installed version → 400"
+# Note: Re-deploy of already-installed version is tested after T10 where the
+# package name and installed version are both known (see end of T10 section).
 
 # ─────────────────────────────────────────────────────────────────────────────
 _section "T04 — INPUT VALIDATION: compatibility check"
@@ -345,6 +344,11 @@ if [ "$JOB_ID" != "NOJOB" ]; then
   [ "$PENDING" = "None" ] || [ -z "$PENDING" ] || [ "$PENDING" = "True" ] \
     && _pass "pendingJobId cleared after SUCCEEDED" \
     || _warn "pendingJobId not cleared: $PENDING"
+
+  # Re-deploy already-installed version → 400
+  code=$(http_code POST "/api/v1/ota/deployments" \
+    "{\"packageName\":\"${TEST_PKG_NAME}\",\"version\":\"${TEST_VERSION}\",\"targetType\":\"THING\",\"targetId\":\"${DEVICE_ID}\"}")
+  assert_code "$code" "400" "Re-deploy already-installed version → 400"
 else
   _warn "Skipping status handler tests — no job ID"
 fi
@@ -353,27 +357,29 @@ fi
 _section "T11 — SIMULATE FAILED UPDATE (with rollback detail)"
 # ─────────────────────────────────────────────────────────────────────────────
 
-# Create a second deployment of an earlier version
-# First reset the device data version so we can create a new job
+# Create a second deployment using the same (now-installed) package
+# Reset installed version to something lower so job_create allows the deploy
+TEST_VERSION=$(grep TEST_VERSION /tmp/ota_test_version.txt | cut -d= -f2)
+TEST_PKG_NAME=$(grep TEST_PKG_NAME /tmp/ota_test_version.txt | cut -d= -f2)
 aws dynamodb update-item \
   --table-name digilux_device_data \
   --key "{\"deviceId\":{\"S\":\"${DEVICE_ID}\"},\"macAddress\":{\"S\":\"${DEVICE_MAC}\"}}" \
-  --update-expression "SET installedVersions.#pkg = :v" \
-  --expression-attribute-names '{"#pkg":"controller-app"}' \
-  --expression-attribute-values "{\":v\":{\"S\":\"3.0.0\"}}" \
+  --update-expression "SET installedVersions.#pkg = :v, pendingJobId = :null" \
+  --expression-attribute-names "{\"#pkg\":\"${TEST_PKG_NAME}\"}" \
+  --expression-attribute-values "{\":v\":{\"S\":\"1.0.0\"},\":null\":{\"NULL\":true}}" \
   --region "$REGION" > /dev/null 2>&1
-echo "  → Reset device to controller-app@3.0.0 for failure test"
+echo "  → Reset device to ${TEST_PKG_NAME}@1.0.0 for failure test"
 
 FAIL_DEPLOY=$(call POST "/api/v1/ota/deployments" \
-  "{\"packageName\":\"controller-app\",\"version\":\"4.0.0\",\"targetType\":\"THING\",\"targetId\":\"${DEVICE_ID}\",\"rolloutStage\":\"CANARY\"}")
+  "{\"packageName\":\"${TEST_PKG_NAME}\",\"version\":\"${TEST_VERSION}\",\"targetType\":\"THING\",\"targetId\":\"${DEVICE_ID}\",\"rolloutStage\":\"CANARY\"}")
 FAIL_JOB_ID=$(echo "$FAIL_DEPLOY" | python3 -c "import json,sys; print(json.load(sys.stdin).get('jobId',''))" 2>/dev/null)
 
 if [ -n "$FAIL_JOB_ID" ] && [ "$FAIL_JOB_ID" != "None" ]; then
   _pass "Created failure-test job: $FAIL_JOB_ID"
 
   # Simulate FAILED with rollback detail
-  printf '{"jobId":"%s","status":"FAILED","progress":0,"packageName":"controller-app","version":"4.0.0","error":"tarball extraction failed: disk full","statusDetail":"Install failed — previous version restored"}' \
-    "$FAIL_JOB_ID" > /tmp/mqtt_failed.json
+  printf '{"jobId":"%s","status":"FAILED","progress":0,"packageName":"%s","version":"%s","error":"tarball extraction failed: disk full","statusDetail":"Install failed — previous version restored"}' \
+    "$FAIL_JOB_ID" "$TEST_PKG_NAME" "$TEST_VERSION" > /tmp/mqtt_failed.json
 
   aws iot-data publish \
     --topic "iot/device/${DEVICE_ID}/ota/status" \
@@ -408,16 +414,18 @@ _section "T12 — ABORT FLOW"
 # ─────────────────────────────────────────────────────────────────────────────
 
 # Reset device version and create a new job to abort
+TEST_VERSION=$(grep TEST_VERSION /tmp/ota_test_version.txt | cut -d= -f2)
+TEST_PKG_NAME=$(grep TEST_PKG_NAME /tmp/ota_test_version.txt | cut -d= -f2)
 aws dynamodb update-item \
   --table-name digilux_device_data \
   --key "{\"deviceId\":{\"S\":\"${DEVICE_ID}\"},\"macAddress\":{\"S\":\"${DEVICE_MAC}\"}}" \
-  --update-expression "SET installedVersions.#pkg = :v" \
-  --expression-attribute-names '{"#pkg":"controller-app"}' \
-  --expression-attribute-values "{\":v\":{\"S\":\"2.0.0\"}}" \
+  --update-expression "SET installedVersions.#pkg = :v, pendingJobId = :null" \
+  --expression-attribute-names "{\"#pkg\":\"${TEST_PKG_NAME}\"}" \
+  --expression-attribute-values "{\":v\":{\"S\":\"1.0.0\"},\":null\":{\"NULL\":true}}" \
   --region "$REGION" > /dev/null 2>&1
 
 ABORT_DEPLOY=$(call POST "/api/v1/ota/deployments" \
-  "{\"packageName\":\"controller-app\",\"version\":\"4.0.0\",\"targetType\":\"THING\",\"targetId\":\"${DEVICE_ID}\",\"rolloutStage\":\"CANARY\"}")
+  "{\"packageName\":\"${TEST_PKG_NAME}\",\"version\":\"${TEST_VERSION}\",\"targetType\":\"THING\",\"targetId\":\"${DEVICE_ID}\",\"rolloutStage\":\"CANARY\"}")
 ABORT_JOB_ID=$(echo "$ABORT_DEPLOY" | python3 -c "import json,sys; print(json.load(sys.stdin).get('jobId',''))" 2>/dev/null)
 
 if [ -n "$ABORT_JOB_ID" ] && [ "$ABORT_JOB_ID" != "None" ]; then

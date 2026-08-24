@@ -51,7 +51,7 @@ class _DecimalEncoder(json.JSONEncoder):
 REGION = os.environ["REGION"]
 ACCOUNT_ID = os.environ["ACCOUNT_ID"]
 PACKAGES_TABLE = os.environ.get("PACKAGES_TABLE", "digilux_ota_packages")
-INVENTORY_TABLE = os.environ.get("INVENTORY_TABLE", "digilux_device_inventory")
+DEVICE_DATA_TABLE = os.environ.get("DEVICE_DATA_TABLE", "digilux_device_data")
 OTA_JOBS_TABLE = os.environ.get("OTA_JOBS_TABLE", "digilux_ota_jobs")
 ARTIFACT_BUCKET = os.environ.get("ARTIFACT_BUCKET", "digilux-ota-artifacts")
 PRESIGN_EXPIRY_SEC = int(os.environ.get("PRESIGN_EXPIRY_SEC", "3600"))
@@ -60,10 +60,11 @@ BETA_USERS_TABLE = os.environ.get("BETA_USERS_TABLE", "digilux_ota_beta_users")
 # Mapping: deviceType string → integer operation-type code sent to controller.
 # Controller firmware maintains the reverse mapping on its end.
 OPERATION_TYPE_MAP = {
-    "Network_controller_firmware":          1,
-    "Network_controller_zigbee_firmware":   2,
-    "Network_controller_Z2M_Firmware":      3,
-    "Network_controller_Miscellaneous":     4,
+    "Network_controller_firmware":              1,
+    "Network_controller_zigbee_firmware":       2,
+    "Network_controller_Z2M_Firmware":          3,
+    "Network_controller_Miscellaneous":         4,
+    "Network_controller_zigbee_stack_firmware": 5,
 }
 
 dynamo = boto3.resource("dynamodb", region_name=REGION)
@@ -251,14 +252,18 @@ def lambda_handler(event, context):
         # Resolve IoT targets for non-BETA stages
         if rollout_stage != "BETA":
             if target_type == "THING":
-                log.debug(f"Looking up device inventory for deviceId={target_id}")
-                inv = dynamo.Table(INVENTORY_TABLE).get_item(Key={"deviceId": target_id}).get("Item", {})
-                if not inv:
-                    log.warning(f"Device not found in inventory: {target_id}")
+                log.debug(f"Looking up device data for deviceId={target_id}")
+                # digilux_device_data has composite key (deviceId + macAddress) — use query
+                dev_items = dynamo.Table(DEVICE_DATA_TABLE).query(
+                    KeyConditionExpression=boto3.dynamodb.conditions.Key("deviceId").eq(target_id)
+                ).get("Items", [])
+                if not dev_items:
+                    log.warning(f"Device not found in device_data: {target_id}")
                     return _response(404, {
                         "error": f"Device {target_id} not found in OTA inventory. "
                                  "Ensure the OTA agent is running on the device."
                     })
+                inv = dev_items[0]
                 current_version = inv.get("installedVersions", {}).get(pkg_name)
                 log.debug(f"Device {target_id} current {pkg_name} version: {current_version}")
                 if current_version == version:
@@ -272,9 +277,9 @@ def lambda_handler(event, context):
                     })
                 thing_name = inv.get("thingName")
                 if not thing_name:
-                    log.error(f"Device {target_id} has no thingName in inventory")
+                    log.error(f"Device {target_id} has no thingName in device_data")
                     return _response(404, {
-                        "error": f"Device {target_id} has no thingName in inventory. "
+                        "error": f"Device {target_id} has no thingName registered. "
                                  "Ensure the OTA agent is running on the device."
                     })
                 log.info(f"Device resolved: deviceId={target_id} → thingName={thing_name}")
@@ -363,8 +368,9 @@ def lambda_handler(event, context):
         log.info(f"Job record written to {OTA_JOBS_TABLE}")
 
         if target_type == "THING":
-            dynamo.Table(INVENTORY_TABLE).update_item(
-                Key={"deviceId": target_id},
+            mac_address = inv.get("macAddress", "")
+            dynamo.Table(DEVICE_DATA_TABLE).update_item(
+                Key={"deviceId": target_id, "macAddress": mac_address},
                 UpdateExpression="SET pendingJobId = :jid, lastUpdatedAt = :ts",
                 ExpressionAttributeValues={":jid": job_id, ":ts": now_ms},
             )
@@ -489,15 +495,20 @@ def _abort_job(job_id: str, claims: dict) -> dict:
         )
         log.debug(f"Job {job_id} status set to CANCELLED in {OTA_JOBS_TABLE}")
 
-        # Clear pendingJobId from device inventory if this was a THING-targeted deployment
+        # Clear pendingJobId from device_data if this was a THING-targeted deployment
         if target_type == "THING" and target_id:
             log.info(f"Clearing pendingJobId for device {target_id} after abort")
-            dynamo.Table(INVENTORY_TABLE).update_item(
-                Key={"deviceId": target_id},
-                UpdateExpression="SET pendingJobId = :null, lastUpdatedAt = :ts",
-                ExpressionAttributeValues={":null": None, ":ts": now_ms},
-            )
-            log.info(f"Device {target_id} pendingJobId cleared after job abort")
+            dev_items = dynamo.Table(DEVICE_DATA_TABLE).query(
+                KeyConditionExpression=boto3.dynamodb.conditions.Key("deviceId").eq(target_id)
+            ).get("Items", [])
+            if dev_items:
+                mac_address = dev_items[0].get("macAddress", "")
+                dynamo.Table(DEVICE_DATA_TABLE).update_item(
+                    Key={"deviceId": target_id, "macAddress": mac_address},
+                    UpdateExpression="SET pendingJobId = :null, lastUpdatedAt = :ts",
+                    ExpressionAttributeValues={":null": None, ":ts": now_ms},
+                )
+                log.info(f"Device {target_id} pendingJobId cleared after job abort")
 
         _audit("DEPLOYMENT_ABORTED", actor,
                {"jobId": job_id}, "SUCCESS",

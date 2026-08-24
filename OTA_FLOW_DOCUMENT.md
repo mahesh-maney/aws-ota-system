@@ -1,6 +1,6 @@
 # Digilux OTA System — Flow Document
 
-**Version:** 1.3
+**Version:** 1.4
 **Date:** 2026-08-24
 **Audience:** Engineering, Integration, QA Teams
 
@@ -20,7 +20,7 @@ This document describes all key flows in the Digilux OTA update system — from 
 | `digilux_ota_compatibility_check` | Lambda | Returns available updates for a specific device |
 | `digilux_ota_status_handler` | Lambda | Receives device status via IoT Rule; updates DynamoDB |
 | `digilux_ota_device_register` | Lambda | Receives device registration on agent startup; upserts OTA fields (`thingName`, `installedVersions`, `pendingJobId`) on `digilux_device_data` |
-| **S3** (`digilux-ota-artifacts`) | Storage | Stores Network_controller_firmware/app binaries |
+| **S3** (`digilux-ota-artifacts`) | Storage | Stores firmware/app binaries. Key structure: `Network_controller_firmware/{deviceType}/{version}/{fileName}` |
 | **DynamoDB** | Storage | `digilux_ota_packages`, `digilux_ota_jobs`, `digilux_ota_compatibility`, `digilux_device_data` (OTA fields: `installedVersions`, `pendingJobId`, `thingName`) |
 | **AWS IoT Core** | Messaging | Delivers jobs to devices over MQTT (port 8883, mTLS) |
 | **IoT Rule** `digilux_ota_status_ingest` | Rule | Topic `iot/device/+/ota/status` → `status_handler` Lambda |
@@ -1016,3 +1016,4 @@ Key: `packageName` (hash) + `version` (range)
 | `1.1` | 2026-08-12 | Consolidated `digilux_device_inventory` into `digilux_device_data` (OTA fields as attributes); CloudFront signed URLs replace S3 presigned URLs for artifact delivery; tiered presign expiry based on artifact size (1hr–48hr); IoT Job in-progress timeout raised from 60min to 24hr (`IOT_JOB_TIMEOUT_MINUTES=1440`) |
 | `1.2` | 2026-08-19 | Beta users flow: `device_register` now sets `thingName = deviceId`; `digilux_ota_beta_users` Lambda resolves email → deviceId via Cognito + `digilux_device_data`; BETA multi-target deployment creates one IoT Job for all registered beta users |
 | `1.3` | 2026-08-24 | Package lifecycle management: new Flow 2b (Promote / Restore); `artifact_processor` semver-aware auto-supersede on ACTIVE promotion; `package_activate` extended with `promote` (BETA→PROD, terminal) and `restore` (SUPERSEDED→ACTIVE rollback) actions; new release types `BETA` and `CUSTOM`; CUSTOM rollout stage for targeted per-device deployments |
+| `1.4` | 2026-08-24 | S3 key structure change: artifacts now stored under `Network_controller_firmware/{deviceType}/{version}/{fileName}`; `artifact_processor` detects old vs new key format transparently; `job_create` device lookup migrated from retired `digilux_device_inventory` to `digilux_device_data` (composite key query by `deviceId`); `operationType` integers documented (1–5); new device type `Network_controller_zigbee_stack_firmware` = `operationType 5` |

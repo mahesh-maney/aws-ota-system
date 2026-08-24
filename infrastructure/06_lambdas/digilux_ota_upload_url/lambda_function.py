@@ -73,6 +73,10 @@ DEVICE_TYPE_MAP = {
         "baseName": "NetControllerMisc",
         "ext":      ".py",
     },
+    "Network_controller_zigbee_stack_firmware": {
+        "baseName": "ZigbeeStackFirmware",
+        "ext":      ".bin",
+    },
 }
 
 VALID_RELEASE_TYPES = {"UAT", "PROD", "BETA", "CUSTOM"}
@@ -138,7 +142,7 @@ def lambda_handler(event, context):
         package_name = type_cfg["baseName"]
         # fileName: use caller-provided name if given, otherwise auto-derive
         file_name    = file_name_override or f"{package_name}-{version}{type_cfg['ext']}"
-        s3_key       = f"{device_type}/{package_name}/{version}/{file_name}"
+        s3_key       = f"Network_controller_firmware/{device_type}/{version}/{file_name}"
 
         log.info(json.dumps({
             "msg":             "upload_url_request",
