@@ -62,7 +62,7 @@
       "key": "device_type",
       "value": "Network_controller_firmware",
       "type": "string",
-      "description": "One of: Network_controller_firmware | Network_controller_zigbee_firmware | Network_controller_Z2M_Firmware | Network_controller_Miscellaneous"
+      "description": "One of: Network_controller_firmware | Network_controller_zigbee_firmware | Network_controller_Z2M_Firmware | Network_controller_Miscellaneous | Network_controller_zigbee_stack_firmware"
     },
     {
       "key": "release_type",
@@ -386,7 +386,7 @@
                   "value": "application/json"
                 }
               ],
-              "body": "{\n  \"uploadUrl\": \"https://digilux-ota-artifacts.s3.amazonaws.com/application/controller-app/4.0.0/controller-app-4.0.0.tar.gz?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=...\",\n  \"s3Key\": \"application/controller-app/4.0.0/controller-app-4.0.0.tar.gz\",\n  \"expiresIn\": 3600,\n  \"packageName\": \"controller-app\",\n  \"version\": \"4.0.0\",\n  \"packageType\": \"CONTROLLER_APP\",\n  \"status\": \"PENDING\",\n  \"instructions\": \"PUT your binary to uploadUrl with Content-Type: application/octet-stream. The package will be registered automatically within seconds of upload.\"\n}",
+              "body": "{\n  \"uploadUrl\": \"https://digilux-ota-artifacts.s3.amazonaws.com/Network_controller_firmware/Network_controller_firmware/4.0.0/HomeAssistantUtility-4.0.0.jar?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=...\",\n  \"s3Key\": \"Network_controller_firmware/Network_controller_firmware/4.0.0/HomeAssistantUtility-4.0.0.jar\",\n  \"expiresIn\": 3600,\n  \"packageName\": \"HomeAssistantUtility\",\n  \"version\": \"4.0.0\",\n  \"deviceType\": \"Network_controller_firmware\",\n  \"releaseType\": \"PROD\",\n  \"status\": \"PENDING\",\n  \"instructions\": \"PUT binary to uploadUrl with headers: Content-Type: application/octet-stream AND x-amz-meta-upload-token: <uploadToken>. Then poll GET /packages/{packageName}/{version} until status=ACTIVE.\"\n}",
               "originalRequest": {
                 "method": "POST",
                 "url": {
@@ -1228,7 +1228,7 @@
                 "upload-artefact"
               ]
             },
-            "description": "Request a pre-signed S3 upload URL for a new firmware package.\n\n**Required fields:**\n| Field | Description | Example |\n|-------|-------------|---------|\n| `deviceType` | One of the 4 supported device types | `Network_controller_firmware` |\n| `version` | Semantic version string | `1.2.3` |\n| `releaseType` | `PROD` (all devices) or `UAT` (canary group only) | `PROD` |\n\n**Supported `deviceType` values:**\n| deviceType | Derived filename |\n|---|---|\n| `Network_controller_firmware` | `HomeAssistantUtility-{version}.jar` |\n| `Network_controller_zigbee_firmware` | `ZigbeeFirmware-{version}.tar` |\n| `Network_controller_Z2M_Firmware` | `Z2MFirmware-{version}.bin` |\n| `Network_controller_Miscellaneous` | `NetControllerMisc-{version}.py` |\n\n**Response:** `uploadUrl` (PUT to this), `s3Key`, `packageName`, `status=PENDING`\n\n**Next step:** PUT the binary to `uploadUrl` \u2192 artifact_processor promotes to `ACTIVE` automatically."
+            "description": "Request a pre-signed S3 upload URL for a new firmware package.\n\n**Required fields:**\n| Field | Description | Example |\n|-------|-------------|---------|\n| `deviceType` | One of the 4 supported device types | `Network_controller_firmware` |\n| `version` | Semantic version string | `1.2.3` |\n| `releaseType` | `PROD` (all devices) or `UAT` (canary group only) | `PROD` |\n\n**Supported `deviceType` values:**\n| deviceType | Derived filename | operationType |\n|---|---|---|\n| `Network_controller_firmware` | `HomeAssistantUtility-{version}.jar` | 1 |\n| `Network_controller_zigbee_firmware` | `ZigbeeFirmware-{version}.tar` | 2 |\n| `Network_controller_Z2M_Firmware` | `Z2MFirmware-{version}.bin` | 3 |\n| `Network_controller_Miscellaneous` | `NetControllerMisc-{version}.py` | 4 |\n| `Network_controller_zigbee_stack_firmware` | `ZigbeeStackFirmware-{version}.bin` | 5 |\n\n**S3 key format:** `Network_controller_firmware/{deviceType}/{version}/{fileName}`\n\n**Response:** `uploadUrl` (PUT to this), `s3Key`, `packageName`, `status=PENDING`\n\n**Next step:** PUT the binary to `uploadUrl` \u2192 artifact_processor promotes to `ACTIVE` automatically."
           },
           "response": []
         },
