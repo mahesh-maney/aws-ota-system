@@ -264,7 +264,7 @@
                 }
               ]
             },
-            "description": "Returns all OTA packages. Filter by `status` (ACTIVE or PENDING) or `packageName` to list all versions of a specific package.\n\nPoll this endpoint after uploading a package until `status` changes from `PENDING` \u2192 `ACTIVE` (usually under 5 seconds)."
+            "description": "Returns all OTA packages.\n\n**Query params:**\n- `status` — filter by status (`ACTIVE`, `SUPERSEDED`, `RECALLED`, `PENDING`, `CORRUPTED`, `DELETED`). Omit or leave empty to return **all statuses**.\n- `deviceType` — filter by device type (returns all versions of that package name).\n\nPoll this endpoint after uploading a package until `status` changes from `PENDING` → `ACTIVE` (usually under 5 seconds)."
           },
           "response": [
             {
@@ -628,6 +628,51 @@
               }
             },
             "description": "Publish (or withdraw) a firmware package so it is visible to end-user devices.\n\n`activated: true`  \u2192 package appears in user update checks (must be `status=ACTIVE` first)\n`activated: false` \u2192 withdraw / pull back the package\n\n**Path params:**\n- `packageName` \u2014 e.g. `HomeAssistantUtility`\n- `version`     \u2014 e.g. `1.2.3`\n\nThe package must be `status=ACTIVE` (set automatically by the artifact_processor Lambda after upload).\n"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Status 200\", () => pm.response.to.have.status(200));"
+                ]
+              }
+            }
+          ],
+          "response": []
+        },
+        {
+          "name": "Delete Package",
+          "request": {
+            "method": "DELETE",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "{{admin_token}}",
+                "type": "text"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/ota/packages/{{package_name}}/{{package_version}}",
+              "host": ["{{base_url}}"],
+              "path": ["api", "v1", "ota", "packages", "{{package_name}}", "{{package_version}}"]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"reason\": \"Cleanup after failed test upload\",\n  \"force\": false\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "description": "Permanently deletes a package and its S3 artifact.\n\n**Validations (in order):**\n1. Package must NOT be `ACTIVE` → `409`\n2. `reason` is required → `400`\n3. No active deployments (QUEUED / IN_PROGRESS) → `409`\n4. SUPERSEDED < 7 days → `409` with `coolingOff: true` (set `force: true` to override)\n5. S3 artifact deleted\n6. `RECALLED` → soft delete (record stays, `status=DELETED`); others → hard delete\n\n**Body:**\n- `reason` (required) — audit log entry\n- `force` (optional, default `false`) — override 7-day cooling-off for SUPERSEDED packages\n\n**Cooling-off 409 response:**\n```json\n{\n  \"coolingOff\": true,\n  \"supersededDaysAgo\": 2.3,\n  \"coolingOffDays\": 7,\n  \"error\": \"...was superseded 2.3 day(s) ago...\"\n}\n```"
           },
           "event": [
             {

@@ -330,7 +330,7 @@ def _list_packages(event: dict, caller: str) -> dict:
     """GET /api/v1/ota/packages — list packages, optionally filtered."""
     from boto3.dynamodb.conditions import Attr
     params        = event.get("queryStringParameters") or {}
-    status_f      = params.get("status", "ACTIVE").upper()
+    status_f      = (params.get("status") or "").strip().upper() or None
     device_type_f = params.get("deviceType")
     release_f     = (params.get("releaseType") or "").upper() or None
 
@@ -343,10 +343,15 @@ def _list_packages(event: dict, caller: str) -> dict:
         pkg_name = DEVICE_TYPE_MAP[device_type_f]["baseName"]
         result = table.query(KeyConditionExpression=DKey("packageName").eq(pkg_name))
     else:
-        filter_expr = Attr("status").eq(status_f)
+        filter_expr = None
+        if status_f:
+            filter_expr = Attr("status").eq(status_f)
         if release_f:
-            filter_expr = filter_expr & Attr("releaseType").eq(release_f)
-        result = table.scan(FilterExpression=filter_expr)
+            filter_expr = filter_expr & Attr("releaseType").eq(release_f) if filter_expr else Attr("releaseType").eq(release_f)
+        if filter_expr is not None:
+            result = table.scan(FilterExpression=filter_expr)
+        else:
+            result = table.scan()
 
     items = result.get("Items", [])
     packages = [

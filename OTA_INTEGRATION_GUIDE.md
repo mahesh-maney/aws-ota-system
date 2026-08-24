@@ -1,6 +1,6 @@
 # Digilux OTA (Over-The-Air) Update System — Integration Guide
 
-**Version:** 2.1
+**Version:** 2.2
 **Date:** 2026-08-24 (updated 2026-08-24)
 **Audience:** Integration / QA Team
 **Base URL:** `https://iot.digilux.co.in/smarthome` (custom domain)
@@ -60,11 +60,12 @@ Each upload is tied to a `deviceType` which determines the package name and file
 | Method | Path | Auth | Description |
 |--------|------|------|-------------|
 | **Admin** | | `admin` group token | |
-| GET | `/api/v1/ota/packages` | Admin | List packages (filter: `?deviceType=`, `?status=`) |
+| GET | `/api/v1/ota/packages` | Admin | List packages (filter: `?status=` — omit or leave empty for all; `?deviceType=`) |
 | POST | `/api/v1/ota/packages/upload-artefact` | Admin | Initiate upload — returns presigned URL (SINGLE) or chunk URLs (MULTIPART) |
 | POST | `/api/v1/ota/packages/upload-artefact/complete` | Admin | Complete a multipart upload after all chunks are PUT |
 | GET | `/api/v1/ota/packages/{packageName}/{version}` | Admin | Get upload/package status — poll after upload |
 | PATCH | `/api/v1/ota/packages/{packageName}/{version}/activate` | Admin | Publish/withdraw, recall, promote BETA→PROD, or restore SUPERSEDED→ACTIVE |
+| DELETE | `/api/v1/ota/packages/{packageName}/{version}` | Admin | Delete a package (hard delete; soft delete for RECALLED; blocked if ACTIVE or has active deployments) |
 | GET | `/api/v1/ota/beta-users` | Admin | List registered beta users |
 | POST | `/api/v1/ota/beta-users` | Admin | Add a beta user by email |
 | DELETE | `/api/v1/ota/beta-users/{email}` | Admin | Remove a beta user |
@@ -471,6 +472,73 @@ Restores a previously superseded version back to ACTIVE. Use when the current li
 | `403` | Non-admin token |
 | `404` | Package/version not found |
 | `409` | State pre-condition not met (e.g. promote on non-BETA, restore on non-SUPERSEDED) |
+
+---
+
+### 4.4 Delete Package
+
+```
+DELETE /api/v1/ota/packages/{packageName}/{version}
+```
+
+Permanently removes a package from the OTA catalog and deletes its S3 artifact. RECALLED packages are soft-deleted (DynamoDB record retained for forensics; only the S3 artifact is removed).
+
+**Request body:**
+```json
+{
+  "reason": "Cleanup after failed test upload",
+  "force":  false
+}
+```
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `reason` | Yes | Human-readable deletion reason — stored in audit log |
+| `force` | No | `true` to override the 7-day cooling-off period for recently SUPERSEDED packages (default `false`) |
+
+**Validations (in order):**
+
+| # | Rule | HTTP |
+|---|------|------|
+| 1 | Package must not be `ACTIVE` | `409` |
+| 2 | `reason` is required | `400` |
+| 3 | No `QUEUED` or `IN_PROGRESS` deployments for this package version | `409` |
+| 4 | SUPERSEDED packages < 7 days old require `"force": true` | `409` with `coolingOff: true` |
+| 5 | S3 artifact is deleted | — |
+| 6 | RECALLED → soft delete (DynamoDB record stays, `status` set to `DELETED`); all others → hard delete (record removed) | — |
+
+**Response `200`:**
+```json
+{
+  "message": "HomeAssistantUtility v4.5.0 has been permanently deleted.",
+  "packageName": "HomeAssistantUtility",
+  "version": "4.5.0",
+  "deletedBy": "admin@example.com"
+}
+```
+
+**Cooling-off `409`** — returned for recently SUPERSEDED packages when `force` is not set:
+```json
+{
+  "error": "HomeAssistantUtility v4.5.0 was superseded 2.3 day(s) ago. Offline devices may still need this version. Set force=true to override.",
+  "coolingOff": true,
+  "supersededDaysAgo": 2.3,
+  "coolingOffDays": 7
+}
+```
+
+**Error responses:**
+
+| HTTP | Condition |
+|---|---|
+| `400` | `reason` not provided |
+| `403` | Non-admin token |
+| `404` | Package/version not found |
+| `409` | Package is ACTIVE |
+| `409` | Active deployments (QUEUED or IN_PROGRESS) exist for this version |
+| `409` | Cooling-off period — `coolingOff: true` in body |
+
+> **Admin UI:** The Delete button (`🗑 Delete`) appears on all non-ACTIVE packages. Clicking it opens a modal requiring: a deletion reason, typing the version string to confirm, and (if in cooling-off) checking a force override checkbox.
 
 ---
 
@@ -1609,4 +1677,5 @@ Results are printed to stdout and saved to `infrastructure/e2e_test_results.txt`
 | `1.8` | 2026-08-16 | Digilux Engineering | REJECTED status with error codes: `digilux_ota_status_handler` now parses `statusDetails.errorCode` from controller, resolves reason from `ERROR_CODE_MAP`, stores `errorCode`+`errorReason` in job device statuses, clears `pendingJobId` on rejection, emits `DEVICE_UPDATE_REJECTED` audit event; security codes (`10002–10006`) also emit `SECURITY_ALERT`; job-level status mapped to `FAILED` on REJECTED; admin job document renamed `operation` → `operationType` (integer) and removed `mandatory` field; user-initiated MQTT payload aligned: same `operationType` integer, removed `mandatory`; new Section 6.9 (REJECTED error code table); security section updated (removed mandatory, added tamper-detection row) |
 | `1.9` | 2026-08-19 | Digilux Engineering | Beta users management: new Lambda `digilux_ota_beta_users` with `GET`/`POST`/`DELETE /ota/beta-users`; auto-resolves email → Cognito userId → deviceId via `userId-index` GSI on `digilux_device_data`; new DynamoDB table `digilux_ota_beta_users`; new Section 4.8a; `digilux_ota_user_consent` aligned to use integer `operationType` (via `OPERATION_TYPE_MAP`) in IoT Job document — consistent with admin-side `job_create`; e2e suite at 70/70 PASS |
 | `2.0` | 2026-08-24 | Digilux Engineering | Release type lifecycle: added `BETA` (Beta/UAT) and `CUSTOM` release types; removed `UAT`; BETA→PROD promotion (`{"promote":true}` on activate endpoint) — permanent, PROD is terminal; SUPERSEDED→ACTIVE rollback (`{"restore":true}`) for buggy-version recovery; semver-aware auto-supersede in `artifact_processor` — new upload only supersedes lower-version ACTIVE entries, not higher ones; BETA multi-target deployment (`rolloutStage=BETA`, `targetIds` from beta-users list); CUSTOM deployment (`rolloutStage=CUSTOM`, explicit `targetIds`, CUSTOM-tagged artefacts only); S3 HTTPS-only bucket policy (DenyNonHTTPS on `digilux-ota-artifacts`); `thingName` convention changed from `digilux-{mac}` to `deviceId` for new device registrations; admin UI: Beta(UAT) display labels, multi-select beta user checkboxes, CUSTOM tag-input, Promote/Restore buttons, SUPERSEDED status filter |
+| `2.2` | 2026-08-24 | Digilux Engineering | Package delete endpoint: `DELETE /api/v1/ota/packages/{packageName}/{version}` with 6 validations (block ACTIVE, require reason, check active deployments, 7-day cooling-off for SUPERSEDED with force override, S3 artifact deletion, soft delete for RECALLED); role-based admin UI: non-admin users restricted to upload-only (no Packages/Deployments nav, no admin routes); admin detected from `cognito:groups` JWT claim; Delete modal on PackagesPage with reason input, version type-to-confirm, cooling-off force checkbox; `GET /ota/packages` status filter fixed — omitting or sending empty `status=` now returns all statuses (was incorrectly defaulting to ACTIVE) |
 | `2.1` | 2026-08-24 | Digilux Engineering | New S3 key structure `Network_controller_firmware/{deviceType}/{version}/{fileName}` — unified firmware prefix for all device types; `artifact_processor` backward-compatible (detects old vs new key format automatically); new device type `Network_controller_zigbee_stack_firmware` (`packageName=ZigbeeStackFirmware`, `.bin`, `operationType=5`); `job_create` Lambda fixed to read device inventory from `digilux_device_data` (was erroneously reading from retired `digilux_device_inventory`) — fixes "already installed" guard and `pendingJobId` tracking; device type table updated with `operationType` integers; e2e test suite fixed (T03/T11/T12 were using stale `controller-app` package name); 70/70 PASS |

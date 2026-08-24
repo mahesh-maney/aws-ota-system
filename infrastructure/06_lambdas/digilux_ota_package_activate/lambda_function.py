@@ -27,6 +27,11 @@ Request body variants:
    Package must be status=SUPERSEDED and releaseType PROD or BETA.
    Promotes it back to ACTIVE. Any currently ACTIVE version of same
    package+releaseType is superseded (explicit admin override — semver not checked).
+
+DELETE /api/v1/ota/packages/{packageName}/{version}
+Admin-only.
+Permanently deletes the package record from DynamoDB and the artifact from S3.
+ACTIVE packages cannot be deleted — recall or supersede first.
 """
 import datetime
 import json
@@ -39,10 +44,14 @@ from botocore.exceptions import ClientError
 log = logging.getLogger()
 log.setLevel(logging.INFO)
 
-REGION         = os.environ["REGION"]
-PACKAGES_TABLE = os.environ.get("PACKAGES_TABLE", "digilux_ota_packages")
+REGION          = os.environ["REGION"]
+PACKAGES_TABLE  = os.environ.get("PACKAGES_TABLE",  "digilux_ota_packages")
+ARTIFACT_BUCKET = os.environ.get("ARTIFACT_BUCKET", "digilux-ota-artifacts")
+OTA_JOBS_TABLE  = os.environ.get("OTA_JOBS_TABLE",  "digilux_ota_jobs")
+COOLING_OFF_DAYS = int(os.environ.get("COOLING_OFF_DAYS", "7"))
 
 dynamo = boto3.resource("dynamodb", region_name=REGION)
+s3     = boto3.client("s3", region_name=REGION)
 
 
 def _audit(event: str, actor: str, resource: dict, result: str, **extra) -> None:
@@ -58,7 +67,8 @@ def _audit(event: str, actor: str, resource: dict, result: str, **extra) -> None
 
 
 def lambda_handler(event, context):
-    log.info(json.dumps({"msg": "request_received", "path": event.get("path")}))
+    log.info(json.dumps({"msg": "request_received", "path": event.get("path"),
+                         "method": event.get("httpMethod")}))
 
     try:
         # ── Auth: admin only ──────────────────────────────────────────────────
@@ -75,6 +85,11 @@ def lambda_handler(event, context):
 
         if not package_name or not version:
             return _resp(400, {"error": "Missing path parameters: packageName and version required"})
+
+        # ── DELETE ────────────────────────────────────────────────────────────
+        if event.get("httpMethod") == "DELETE":
+            delete_body = json.loads(event.get("body") or "{}")
+            return _delete_package(package_name, version, caller, delete_body)
 
         # ── Body ──────────────────────────────────────────────────────────────
         body     = json.loads(event.get("body") or "{}")
@@ -292,6 +307,158 @@ def lambda_handler(event, context):
     except Exception as e:
         log.exception(f"Unhandled error: {e}")
         return _resp(500, {"error": "Internal server error"})
+
+
+def _delete_package(package_name: str, version: str, caller: str, body: dict) -> dict:
+    """
+    DELETE /api/v1/ota/packages/{packageName}/{version}
+
+    Validations (in order):
+    1. Package must exist
+    2. ACTIVE packages blocked — recall or supersede first
+    3. Require non-empty deletion reason
+    4. Block if any QUEUED/IN_PROGRESS jobs reference this package version
+    5. Cooling-off: SUPERSEDED packages < COOLING_OFF_DAYS old require force=true
+    6. RECALLED → soft delete (delete S3 artifact, mark DynamoDB record DELETED for forensics)
+       All others  → hard delete (delete S3 + DynamoDB record)
+    """
+    import time as _time
+    from boto3.dynamodb.conditions import Attr
+
+    table = dynamo.Table(PACKAGES_TABLE)
+    item  = table.get_item(Key={"packageName": package_name, "version": version}).get("Item")
+
+    if not item:
+        return _resp(404, {"error": f"Package {package_name} v{version} not found"})
+
+    status = item.get("status", "")
+
+    # ── 1. Block ACTIVE ───────────────────────────────────────────────────────
+    if status == "ACTIVE":
+        return _resp(409, {
+            "error": (
+                f"Package {package_name} v{version} is ACTIVE and cannot be deleted. "
+                "Recall or supersede it first."
+            )
+        })
+
+    # ── 2. Require deletion reason ────────────────────────────────────────────
+    reason = str(body.get("reason", "")).strip()
+    if not reason:
+        return _resp(400, {"error": "A deletion reason is required."})
+
+    # ── 3. Block if active deployments reference this version ─────────────────
+    jobs_table = dynamo.Table(OTA_JOBS_TABLE)
+    active_jobs = jobs_table.scan(
+        FilterExpression=(
+            Attr("packageName").eq(package_name) &
+            Attr("version").eq(version) &
+            Attr("status").is_in(["QUEUED", "IN_PROGRESS"])
+        )
+    ).get("Items", [])
+    if active_jobs:
+        job_ids = [j.get("jobId") for j in active_jobs]
+        return _resp(409, {
+            "error": (
+                f"Cannot delete: {len(active_jobs)} active deployment(s) are currently "
+                "using this package version. Cancel them first."
+            ),
+            "activeJobs": job_ids,
+        })
+
+    # ── 4. Cooling-off for recently SUPERSEDED packages ───────────────────────
+    force = bool(body.get("force", False))
+    if status == "SUPERSEDED" and not force:
+        superseded_at_ms = item.get("supersededAt")
+        if superseded_at_ms:
+            age_days = (_time.time() * 1000 - int(superseded_at_ms)) / (1000 * 86400)
+            if age_days < COOLING_OFF_DAYS:
+                return _resp(409, {
+                    "error": (
+                        f"Package was superseded {age_days:.1f} day(s) ago. "
+                        f"Cooling-off period is {COOLING_OFF_DAYS} days — offline devices may "
+                        "still need this version to download. Set force=true to override."
+                    ),
+                    "coolingOff":        True,
+                    "supersededDaysAgo": round(age_days, 1),
+                    "coolingOffDays":    COOLING_OFF_DAYS,
+                })
+
+    # ── 5. Delete S3 artifact ─────────────────────────────────────────────────
+    s3_key    = item.get("s3Key")
+    s3_bucket = item.get("s3Bucket", ARTIFACT_BUCKET)
+    s3_deleted = False
+    if s3_key:
+        try:
+            s3.delete_object(Bucket=s3_bucket, Key=s3_key)
+            s3_deleted = True
+            log.info(f"Deleted S3 artifact: s3://{s3_bucket}/{s3_key}")
+        except ClientError as e:
+            log.warning(f"Could not delete S3 artifact s3://{s3_bucket}/{s3_key}: {e}")
+
+    now_ms = int(_time.time() * 1000)
+
+    # ── 6. RECALLED → soft delete; everything else → hard delete ─────────────
+    if status == "RECALLED":
+        # Retain the DynamoDB record for forensics — only remove the S3 artifact
+        table.update_item(
+            Key={"packageName": package_name, "version": version},
+            UpdateExpression=(
+                "SET #s = :s, deletedBy = :by, deletedAt = :ts, "
+                "deleteReason = :r, s3Deleted = :s3d"
+            ),
+            ExpressionAttributeNames={"#s": "status"},
+            ExpressionAttributeValues={
+                ":s":   "DELETED",
+                ":by":  caller,
+                ":ts":  now_ms,
+                ":r":   reason,
+                ":s3d": s3_deleted,
+            },
+        )
+        log.info(json.dumps({
+            "msg": "package_soft_deleted", "packageName": package_name,
+            "version": version, "actor": caller, "s3Deleted": s3_deleted,
+        }))
+        _audit("PACKAGE_DELETED", caller,
+               {"packageName": package_name, "version": version},
+               "SUCCESS",
+               deleteType="SOFT", previousStatus=status,
+               releaseType=item.get("releaseType"),
+               reason=reason, s3Deleted=s3_deleted)
+        return _resp(200, {
+            "packageName":    package_name,
+            "version":        version,
+            "deletedBy":      caller,
+            "s3Deleted":      s3_deleted,
+            "recordRetained": True,
+            "message": (
+                f"Package {package_name} v{version} artifact deleted. "
+                "The audit record has been retained for forensic purposes."
+            ),
+        })
+
+    # Hard delete — PENDING, CORRUPTED, SUPERSEDED
+    table.delete_item(Key={"packageName": package_name, "version": version})
+    log.info(json.dumps({
+        "msg": "package_hard_deleted", "packageName": package_name,
+        "version": version, "actor": caller, "s3Deleted": s3_deleted,
+        "previousStatus": status,
+    }))
+    _audit("PACKAGE_DELETED", caller,
+           {"packageName": package_name, "version": version},
+           "SUCCESS",
+           deleteType="HARD", previousStatus=status,
+           releaseType=item.get("releaseType"),
+           reason=reason, s3Deleted=s3_deleted)
+    return _resp(200, {
+        "packageName":    package_name,
+        "version":        version,
+        "deletedBy":      caller,
+        "s3Deleted":      s3_deleted,
+        "recordRetained": False,
+        "message":        f"Package {package_name} v{version} permanently deleted.",
+    })
 
 
 def _semver_tuple(version: str) -> tuple:
