@@ -51,10 +51,17 @@ def lambda_handler(event, context):
     log.debug(json.dumps({"msg": "register_event_raw", "payload": event}))
     try:
         device_id  = event.get("deviceId")
-        thing_name = event.get("thingName")
         model      = event.get("model", "unknown")
         hw_rev     = event.get("hwRevision", "unknown")
         installed  = event.get("installedVersions", {})
+
+        if not device_id:
+            log.warning(f"Register event missing deviceId — skipping. event={event}")
+            return
+
+        # thingName == deviceId directly — no separate property needed.
+        # Device-sent thingName is ignored to enforce consistency across all devices.
+        thing_name = device_id
 
         log.info(json.dumps({
             "msg": "device_register_received",
@@ -62,10 +69,6 @@ def lambda_handler(event, context):
             "model": model, "hwRevision": hw_rev,
             "installedVersions": installed,
         }))
-
-        if not device_id or not thing_name:
-            log.warning(f"Register event missing deviceId or thingName — skipping. event={event}")
-            return
 
         now_ms     = int(time.time() * 1000)
         data_table = dynamo.Table(DEVICE_DATA_TABLE)

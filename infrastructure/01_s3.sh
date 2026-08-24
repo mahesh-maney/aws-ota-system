@@ -37,6 +37,26 @@ aws s3api put-bucket-encryption \
     }]
   }'
 
+echo "==> Enforcing HTTPS-only access (deny HTTP)"
+aws s3api put-bucket-policy \
+  --bucket "$BUCKET" \
+  --policy '{
+    "Version": "2012-10-17",
+    "Statement": [{
+      "Sid": "DenyNonHTTPS",
+      "Effect": "Deny",
+      "Principal": "*",
+      "Action": "s3:*",
+      "Resource": [
+        "arn:aws:s3:::digilux-ota-artifacts",
+        "arn:aws:s3:::digilux-ota-artifacts/*"
+      ],
+      "Condition": {
+        "Bool": { "aws:SecureTransport": "false" }
+      }
+    }]
+  }'
+
 echo "==> Adding lifecycle rule (abort incomplete multipart uploads after 7 days)"
 aws s3api put-bucket-lifecycle-configuration \
   --bucket "$BUCKET" \

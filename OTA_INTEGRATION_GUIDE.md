@@ -1,7 +1,7 @@
 # Digilux OTA (Over-The-Air) Update System — Integration Guide
 
-**Version:** 1.6
-**Date:** 2026-08-12
+**Version:** 1.7
+**Date:** 2026-08-24
 **Audience:** Integration / QA Team
 **Base URL:** `https://iot.digilux.co.in/smarthome` (custom domain)
 **Alternate URL:** `https://ds6nxf8ac5.execute-api.ap-south-1.amazonaws.com/smarthome`
@@ -30,18 +30,27 @@ Each upload is tied to a `deviceType` which determines the package name and file
 
 ### Release Types
 
-| `releaseType` | Visibility |
-|---|---|
-| `PROD` | All registered devices |
-| `UAT` | Devices in the `DGX-Canary` IoT Thing Group only |
+| `releaseType` | Display Label | Description |
+|---|---|---|
+| `PROD` | PROD | Production — all registered devices |
+| `BETA` | Beta (UAT) | Beta / UAT — targeted at registered beta users only; can be promoted to PROD |
+| `CUSTOM` | CUSTOM | One-off custom build; isolated — cannot be promoted and only deployable via CUSTOM rollout stage |
+
+**Lifecycle rules:**
+- `BETA` → `PROD` promotion is allowed (one-way, irreversible).
+- `PROD` is terminal — it cannot be downgraded to BETA or CUSTOM.
+- `CUSTOM` is isolated — it never supersedes nor is superseded by PROD or BETA versions.
+- When a new version goes ACTIVE, any previous version of the **same packageName + releaseType** with a **lower semver** is automatically set to `SUPERSEDED`.
+- An admin can **restore** a `SUPERSEDED` PROD or BETA version to `ACTIVE` (rollback), which supersedes the currently active version.
 
 ### Rollout Stages
 
 | Stage | Rate | Use Case |
 |---|---|---|
 | `CANARY` | Max 2 devices/min | First 5 devices — smoke test |
-| `BETA` | Exponential from 2/min | ~10% of fleet |
 | `PRODUCTION` | Exponential from 5/min | Full fleet |
+| `BETA` | Max 2 devices/min | All registered beta users (multi-target IoT Job) |
+| `CUSTOM` | Max 2 devices/min | Specific device IDs — only usable with CUSTOM-tagged artefacts |
 
 ---
 
@@ -54,7 +63,10 @@ Each upload is tied to a `deviceType` which determines the package name and file
 | POST | `/api/v1/ota/packages/upload-artefact` | Admin | Initiate upload — returns presigned URL (SINGLE) or chunk URLs (MULTIPART) |
 | POST | `/api/v1/ota/packages/upload-artefact/complete` | Admin | Complete a multipart upload after all chunks are PUT |
 | GET | `/api/v1/ota/packages/{packageName}/{version}` | Admin | Get upload/package status — poll after upload |
-| PATCH | `/api/v1/ota/packages/{packageName}/{version}/activate` | Admin | Publish or withdraw a package |
+| PATCH | `/api/v1/ota/packages/{packageName}/{version}/activate` | Admin | Publish/withdraw, recall, promote BETA→PROD, or restore SUPERSEDED→ACTIVE |
+| GET | `/api/v1/ota/beta-users` | Admin | List registered beta users |
+| POST | `/api/v1/ota/beta-users` | Admin | Add a beta user by email |
+| DELETE | `/api/v1/ota/beta-users/{email}` | Admin | Remove a beta user |
 | GET | `/api/v1/controllers/{deviceId}/updates/available` | Admin | Compatibility check for a device |
 | POST | `/api/v1/ota/deployments` | Admin | Create deployment (push update) |
 | GET | `/api/v1/ota/deployments` | Admin | List all deployments |
@@ -174,7 +186,7 @@ GET /api/v1/ota/packages
 
 | Parameter | Default | Description |
 |---|---|---|
-| `status` | `ACTIVE` | Filter by status: `ACTIVE`, `PENDING` |
+| `status` | `ACTIVE` | Filter by status: `ACTIVE`, `SUPERSEDED`, `PENDING`, `CORRUPTED`, `RECALLED` |
 | `packageName` | — | List all versions of a specific package |
 | `deviceType` | — | Filter by device type (e.g. `Network_controller_firmware`) |
 
@@ -363,29 +375,23 @@ Poll this after any upload (SINGLE or MULTIPART) until `status` resolves.
 
 ---
 
-### 4.3 Activate / Withdraw Package
+### 4.3 Package State Management
 
 ```
 PATCH /api/v1/ota/packages/{packageName}/{version}/activate
 ```
 
-After a package reaches `status=ACTIVE` it is still hidden from end users until an admin explicitly publishes it. This two-step design lets you upload and validate a firmware binary before it becomes visible.
+This single endpoint handles all package state transitions. Pass one of the following body variants:
 
-**Path parameters:**
+#### 4.3a Publish / Withdraw
 
-| Parameter | Description |
-|---|---|
-| `packageName` | e.g. `HomeAssistantUtility` (returned by Get Upload URL) |
-| `version` | e.g. `1.2.3` |
+After a package reaches `status=ACTIVE` it is hidden from end users until explicitly published. This lets you upload and validate a binary before making it visible.
 
-**Request body:**
 ```json
 { "activated": true }
 ```
 
-Set `"activated": false` to withdraw a previously published package (removes it from user update checks without deleting the binary).
-
-**Prerequisite:** Package must have `status=ACTIVE` (set automatically by the artifact processor after upload).
+Set `"activated": false` to withdraw (removes from user update checks without deleting the binary). Package must have `status=ACTIVE`.
 
 **Response `200`:**
 ```json
@@ -393,18 +399,77 @@ Set `"activated": false` to withdraw a previously published package (removes it 
   "packageName": "HomeAssistantUtility",
   "version":     "1.2.3",
   "activated":   true,
-  "activatedBy": "admin@example.com",
-  "activatedAt": 1785475706560
+  "releaseType": "PROD",
+  "updatedBy":   "admin@example.com"
 }
 ```
 
-**Validation errors:**
+#### 4.3b Recall
+
+Permanently removes the package from all device update checks and flags it in audit logs. Use when a released version has a critical bug.
+
+```json
+{ "recalled": true, "recallReason": "Critical memory leak in v1.2.3" }
+```
+
+Package must have `status=ACTIVE`. Sets `status=RECALLED`, `activated=false`. Cannot be undone via API — use restore on a previous version instead.
+
+#### 4.3c Promote BETA → PROD
+
+Promotes a Beta (UAT) artefact to production. This is **permanent and irreversible** — PROD cannot be downgraded.
+
+```json
+{ "promote": true }
+```
+
+- Package must have `releaseType=BETA` and `status=ACTIVE`.
+- After promotion, any existing PROD version of the same package with a lower semver is automatically set to `SUPERSEDED`.
+- If the promoted version is lower than an existing live PROD version, it becomes PROD but does not supersede the higher version.
+
+**Response `200`:**
+```json
+{
+  "packageName": "HomeAssistantUtility",
+  "version":     "4.6.1",
+  "releaseType": "PROD",
+  "status":      "ACTIVE",
+  "promotedBy":  "admin@example.com",
+  "message":     "Package HomeAssistantUtility v4.6.1 promoted from BETA to PROD. Lower PROD versions have been superseded."
+}
+```
+
+#### 4.3d Restore SUPERSEDED → ACTIVE (Rollback)
+
+Restores a previously superseded version back to ACTIVE. Use when the current live version is buggy and needs to be rolled back to an earlier release.
+
+```json
+{ "restore": true }
+```
+
+- Package must have `status=SUPERSEDED` and `releaseType` of `PROD` or `BETA`.
+- Any currently `ACTIVE` version of the same package + releaseType is superseded (admin override — semver order is not enforced for rollback).
+- Recall the buggy version separately if you want to prevent it from being restored again.
+
+**Response `200`:**
+```json
+{
+  "packageName": "HomeAssistantUtility",
+  "version":     "4.6.0",
+  "releaseType": "PROD",
+  "status":      "ACTIVE",
+  "restoredBy":  "admin@example.com",
+  "message":     "Package HomeAssistantUtility v4.6.0 restored to ACTIVE. Any previously active version of the same type has been superseded."
+}
+```
+
+**Validation errors (all variants):**
 
 | HTTP | Condition |
 |---|---|
-| `400` | Package is not yet `ACTIVE` (still `PENDING`) |
+| `400` | Missing required action field |
 | `403` | Non-admin token |
 | `404` | Package/version not found |
+| `409` | State pre-condition not met (e.g. promote on non-BETA, restore on non-SUPERSEDED) |
 
 ---
 
@@ -460,25 +525,47 @@ GET /api/v1/controllers/{deviceId}/updates/available
 POST /api/v1/ota/deployments
 ```
 
-**Request body:**
+**Request body — CANARY / PRODUCTION (single device or group):**
 ```json
 {
-  "packageName": "controller-app",
-  "version": "4.0.0",
+  "packageName": "HomeAssistantUtility",
+  "version": "4.6.1",
   "targetType": "THING",
   "targetId": "edb39bba-baf1-4700-968c-a42228e53aa0",
   "rolloutStage": "CANARY"
 }
 ```
 
-| Field | Required | Description |
+**Request body — BETA (all registered beta users, multi-target):**
+```json
+{
+  "packageName": "HomeAssistantUtility",
+  "version": "4.6.1",
+  "rolloutStage": "BETA",
+  "targetIds": ["<deviceId1>", "<deviceId2>"]
+}
+```
+`targetIds` is the list of device IDs to include (retrieved from the beta users list). The backend creates a single IoT Job targeting all of them.
+
+**Request body — CUSTOM (specific device IDs, CUSTOM-tagged artefact only):**
+```json
+{
+  "packageName": "HomeAssistantUtility",
+  "version": "4.6.1-custom",
+  "rolloutStage": "CUSTOM",
+  "targetIds": ["<deviceId1>", "<deviceId2>"]
+}
+```
+Package must have `releaseType=CUSTOM`. This stage is used for one-off deliveries to specific devices.
+
+| Field | Required for | Description |
 |---|---|---|
-| `packageName` | Yes | Must match an ACTIVE package |
-| `version` | Yes | Must match an ACTIVE version |
-| `targetType` | Yes | `THING` (single device by UUID) or `THING_GROUP` (e.g. `DGX-Canary`) |
-| `targetId` | Yes | Device UUID (for THING) or group name (for THING_GROUP) |
-| `rolloutStage` | No | `CANARY` / `BETA` / `PRODUCTION`. Defaults to `PRODUCTION` |
-| `rolloutConfig` | No | Override rollout rate settings |
+| `packageName` | All | Must match an ACTIVE package |
+| `version` | All | Must match an ACTIVE version |
+| `targetType` | CANARY / PRODUCTION | `THING` or `THING_GROUP` |
+| `targetId` | CANARY / PRODUCTION | Device UUID (THING) or group name (THING_GROUP) |
+| `targetIds` | BETA / CUSTOM | Array of device UUIDs |
+| `rolloutStage` | All | `CANARY`, `PRODUCTION`, `BETA`, or `CUSTOM`. Defaults to `PRODUCTION` |
 
 **Response `201`:**
 ```json
@@ -1510,3 +1597,4 @@ Results are printed to stdout and saved to `infrastructure/e2e_test_results.txt`
 | `1.4` | 2026-08-04 | Digilux Engineering | App-mediated download-link flow: Section 4.11 (`POST /api/v1/ota/my/updates/download-link`); Lambda returns pre-signed URL to Flutter app and simultaneously publishes download payload to device MQTT OTA topic; Section 5.3 (flow comparison table: consent vs download-link); new Lambda `digilux_ota_user_get_download_link`; IAM `iot:Publish` permission on `iot/device/*/ota` |
 | `1.8` | 2026-08-16 | Digilux Engineering | REJECTED status with error codes: `digilux_ota_status_handler` now parses `statusDetails.errorCode` from controller, resolves reason from `ERROR_CODE_MAP`, stores `errorCode`+`errorReason` in job device statuses, clears `pendingJobId` on rejection, emits `DEVICE_UPDATE_REJECTED` audit event; security codes (`10002–10006`) also emit `SECURITY_ALERT`; job-level status mapped to `FAILED` on REJECTED; admin job document renamed `operation` → `operationType` (integer) and removed `mandatory` field; user-initiated MQTT payload aligned: same `operationType` integer, removed `mandatory`; new Section 6.9 (REJECTED error code table); security section updated (removed mandatory, added tamper-detection row) |
 | `1.9` | 2026-08-19 | Digilux Engineering | Beta users management: new Lambda `digilux_ota_beta_users` with `GET`/`POST`/`DELETE /ota/beta-users`; auto-resolves email → Cognito userId → deviceId via `userId-index` GSI on `digilux_device_data`; new DynamoDB table `digilux_ota_beta_users`; new Section 4.8a; `digilux_ota_user_consent` aligned to use integer `operationType` (via `OPERATION_TYPE_MAP`) in IoT Job document — consistent with admin-side `job_create`; e2e suite at 70/70 PASS |
+| `2.0` | 2026-08-24 | Digilux Engineering | Release type lifecycle: added `BETA` (Beta/UAT) and `CUSTOM` release types; removed `UAT`; BETA→PROD promotion (`{"promote":true}` on activate endpoint) — permanent, PROD is terminal; SUPERSEDED→ACTIVE rollback (`{"restore":true}`) for buggy-version recovery; semver-aware auto-supersede in `artifact_processor` — new upload only supersedes lower-version ACTIVE entries, not higher ones; BETA multi-target deployment (`rolloutStage=BETA`, `targetIds` from beta-users list); CUSTOM deployment (`rolloutStage=CUSTOM`, explicit `targetIds`, CUSTOM-tagged artefacts only); S3 HTTPS-only bucket policy (DenyNonHTTPS on `digilux-ota-artifacts`); `thingName` convention changed from `digilux-{mac}` to `deviceId` for new device registrations; admin UI: Beta(UAT) display labels, multi-select beta user checkboxes, CUSTOM tag-input, Promote/Restore buttons, SUPERSEDED status filter |

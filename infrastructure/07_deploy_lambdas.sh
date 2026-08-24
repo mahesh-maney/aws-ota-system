@@ -111,7 +111,8 @@ cat > "$LAMBDA_DIR/digilux_ota_package_register/requirements.txt" << 'EOF'
 cryptography>=42.0.0
 EOF
 
-deploy_lambda "digilux_ota_package_register"  "lambda_function.lambda_handler"
+deploy_lambda "digilux_ota_package_register"    "lambda_function.lambda_handler"
+deploy_lambda "digilux_ota_artifact_processor"  "lambda_function.lambda_handler"
 deploy_lambda "digilux_ota_compatibility_check" "lambda_function.lambda_handler"
 deploy_lambda "digilux_ota_job_create"          "lambda_function.lambda_handler"
 deploy_lambda "digilux_ota_status_handler"      "lambda_function.lambda_handler"

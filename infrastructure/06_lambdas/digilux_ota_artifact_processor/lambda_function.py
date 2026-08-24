@@ -234,6 +234,73 @@ def _process_artifact(bucket: str, s3_key: str, obj_size: int) -> None:
         "sizeBytes": obj_size, "sha256": sha256,
     }))
 
+    # ── 6. Supersede previous ACTIVE versions for same packageName + releaseType ──
+    # CUSTOM release type is isolated — it never supersedes nor gets superseded by other types.
+    release_type = item.get("releaseType")
+    if release_type:
+        _supersede_previous_versions(table, pkg_name, version, release_type, now_ms)
+
+
+def _semver_tuple(version: str) -> tuple:
+    """Convert version string like '2.1.3' to (2, 1, 3) for numeric comparison."""
+    parts = []
+    for p in version.split("."):
+        try:
+            parts.append(int(p))
+        except ValueError:
+            parts.append(0)
+    return tuple(parts)
+
+
+def _supersede_previous_versions(table, pkg_name: str, current_version: str,
+                                  release_type: str, now_ms: int) -> None:
+    """Mark ACTIVE versions of the same package+releaseType as SUPERSEDED.
+
+    Only supersedes versions with a LOWER semver than current_version.
+    This prevents an accidentally uploaded older version from wiping a newer live release.
+    """
+    from boto3.dynamodb.conditions import Key, Attr
+    result = table.query(
+        KeyConditionExpression=Key("packageName").eq(pkg_name),
+        FilterExpression=Attr("status").eq("ACTIVE") & Attr("releaseType").eq(release_type),
+    )
+    current_semver = _semver_tuple(current_version)
+    superseded = []
+    for old_item in result.get("Items", []):
+        if old_item["version"] == current_version:
+            continue
+        if _semver_tuple(old_item["version"]) >= current_semver:
+            log.info(
+                f"Skipping supersede of {pkg_name}@{old_item['version']} "
+                f"— its semver >= {current_version} (not an older release)"
+            )
+            continue
+        try:
+            table.update_item(
+                Key={"packageName": pkg_name, "version": old_item["version"]},
+                UpdateExpression="SET #st = :sup, supersededAt = :ts, supersededBy = :v",
+                ExpressionAttributeNames={"#st": "status"},
+                ExpressionAttributeValues={
+                    ":sup": "SUPERSEDED",
+                    ":ts":  now_ms,
+                    ":v":   current_version,
+                },
+                ConditionExpression=Attr("status").eq("ACTIVE"),
+            )
+            superseded.append(old_item["version"])
+            log.info(f"Superseded {pkg_name}@{old_item['version']} (releaseType={release_type}) → replaced by {current_version}")
+        except ClientError as e:
+            if e.response["Error"]["Code"] == "ConditionalCheckFailedException":
+                log.debug(f"Version {old_item['version']} already not ACTIVE — skipping")
+            else:
+                log.error(f"Failed to supersede {pkg_name}@{old_item['version']}: {e}")
+    if superseded:
+        log.info(json.dumps({
+            "msg": "versions_superseded",
+            "packageName": pkg_name, "releaseType": release_type,
+            "newVersion": current_version, "superseded": superseded,
+        }))
+
 
 def _compute_sha256(bucket: str, key: str) -> str:
     obj = s3.get_object(Bucket=bucket, Key=key)

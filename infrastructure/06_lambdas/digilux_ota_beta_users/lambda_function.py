@@ -118,14 +118,16 @@ def _add_beta_user(body: dict, caller: str) -> dict:
     if not items:
         return _response(404, {"error": f"No device registered for {email}. User must complete onboarding first."})
 
-    device    = items[0]
-    device_id = device.get("deviceId")
+    device     = items[0]
+    device_id  = device.get("deviceId")
     thing_name = device.get("thingName")
 
     if not device_id:
         return _response(404, {"error": f"Device record for {email} is missing deviceId"})
     if not thing_name:
-        return _response(404, {"error": f"Device for {email} has no thingName — OTA agent may not be running"})
+        # thingName == deviceId directly — derive it if not yet set by OTA agent
+        thing_name = device_id
+        log.info(f"thingName not set for {email}, using deviceId as thingName: {thing_name}")
 
     log.info(f"Device resolved: userId={user_id} → deviceId={device_id}, thingName={thing_name}")
 

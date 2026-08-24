@@ -55,6 +55,7 @@ INVENTORY_TABLE = os.environ.get("INVENTORY_TABLE", "digilux_device_inventory")
 OTA_JOBS_TABLE = os.environ.get("OTA_JOBS_TABLE", "digilux_ota_jobs")
 ARTIFACT_BUCKET = os.environ.get("ARTIFACT_BUCKET", "digilux-ota-artifacts")
 PRESIGN_EXPIRY_SEC = int(os.environ.get("PRESIGN_EXPIRY_SEC", "3600"))
+BETA_USERS_TABLE = os.environ.get("BETA_USERS_TABLE", "digilux_ota_beta_users")
 
 # Mapping: deviceType string → integer operation-type code sent to controller.
 # Controller firmware maintains the reverse mapping on its end.
@@ -71,6 +72,12 @@ s3 = boto3.client("s3", region_name=REGION)
 
 # Staged rollout defaults (startup scale)
 ROLLOUT_CONFIGS = {
+    "BETA": {
+        "maximumPerMinute": 2,
+    },
+    "CUSTOM": {
+        "maximumPerMinute": 2,
+    },
     "CANARY": {
         "maximumPerMinute": 2,
     },
@@ -139,30 +146,96 @@ def lambda_handler(event, context):
         body = json.loads(event.get("body") or "{}")
         log.debug(json.dumps({"msg": "request_body_parsed", "keys": list(body.keys())}))
 
-        required = ["packageName", "version", "targetType", "targetId"]
-        for field in required:
+        for field in ["packageName", "version"]:
             if not body.get(field):
                 log.warning(f"Validation failed — missing required field: {field}")
                 return _response(400, {"error": f"Missing required field: {field}"})
 
         pkg_name      = body["packageName"]
         version       = body["version"]
-        target_type   = body["targetType"].upper()
-        target_id     = body["targetId"]
         rollout_stage = body.get("rolloutStage", "PRODUCTION").upper()
 
-        log.info(json.dumps({
-            "msg": "deployment_request",
-            "actor": caller, "packageName": pkg_name, "version": version,
-            "targetType": target_type, "targetId": target_id, "rolloutStage": rollout_stage,
-        }))
-
-        if target_type not in ("THING", "THING_GROUP"):
-            log.warning(f"Invalid targetType: {target_type}")
-            return _response(400, {"error": "targetType must be THING or THING_GROUP"})
         if rollout_stage not in ROLLOUT_CONFIGS:
             log.warning(f"Invalid rolloutStage: {rollout_stage}")
             return _response(400, {"error": f"rolloutStage must be one of: {', '.join(ROLLOUT_CONFIGS)}"})
+
+        # BETA: resolve targets from selected deviceIds (sent by UI)
+        if rollout_stage == "BETA":
+            target_ids = body.get("targetIds", [])
+            if not target_ids:
+                return _response(400, {"error": "No beta users selected. Select at least one beta user."})
+            # Look up thingName for each selected deviceId from beta users table
+            beta_table = dynamo.Table(BETA_USERS_TABLE)
+            iot_targets = []
+            resolved_emails = []
+            for device_id in target_ids:
+                result = beta_table.scan(
+                    FilterExpression=boto3.dynamodb.conditions.Attr("deviceId").eq(device_id)
+                )
+                items = result.get("Items", [])
+                if items and items[0].get("thingName"):
+                    iot_targets.append(f"arn:aws:iot:{REGION}:{ACCOUNT_ID}:thing/{items[0]['thingName']}")
+                    resolved_emails.append(items[0].get("email", device_id))
+                else:
+                    log.warning(f"Beta user with deviceId={device_id} not found or has no thingName — skipping")
+            if not iot_targets:
+                return _response(400, {"error": "None of the selected beta users have a registered device."})
+            target_type = "THING_LIST"
+            target_id   = ",".join(resolved_emails)
+            log.info(json.dumps({
+                "msg": "deployment_request",
+                "actor": caller, "packageName": pkg_name, "version": version,
+                "rolloutStage": rollout_stage, "betaUserCount": len(iot_targets),
+                "targets": iot_targets,
+            }))
+        elif rollout_stage == "CUSTOM":
+            target_ids = body.get("targetIds", [])
+            if not target_ids:
+                return _response(400, {"error": "No device IDs provided. Add at least one device ID for a CUSTOM deployment."})
+            # Validate package is tagged as CUSTOM
+            pkg_release_type = pkg.get("releaseType", "")
+            if pkg_release_type != "CUSTOM":
+                return _response(400, {
+                    "error": f"Package {pkg_name}@{version} is tagged as '{pkg_release_type}', not 'CUSTOM'. "
+                             "Only CUSTOM-tagged artefacts can be used for a CUSTOM deployment."
+                })
+            # Resolve thingName for each deviceId from digilux_device_data
+            device_table = dynamo.Table(os.environ.get("DEVICE_DATA_TABLE", "digilux_device_data"))
+            iot_targets = []
+            resolved_ids = []
+            for device_id in target_ids:
+                items = device_table.query(
+                    KeyConditionExpression=boto3.dynamodb.conditions.Key("deviceId").eq(device_id)
+                ).get("Items", [])
+                if not items:
+                    log.warning(f"DeviceId {device_id} not found in device_data — skipping")
+                    continue
+                thing_name = items[0].get("thingName") or device_id
+                iot_targets.append(f"arn:aws:iot:{REGION}:{ACCOUNT_ID}:thing/{thing_name}")
+                resolved_ids.append(device_id)
+            if not iot_targets:
+                return _response(400, {"error": "None of the provided device IDs were found in the system."})
+            target_type = "THING_LIST"
+            target_id   = ",".join(resolved_ids)
+            log.info(json.dumps({
+                "msg": "deployment_request",
+                "actor": caller, "packageName": pkg_name, "version": version,
+                "rolloutStage": rollout_stage, "deviceCount": len(iot_targets),
+                "targets": iot_targets,
+            }))
+        else:
+            target_type = (body.get("targetType") or "").upper()
+            target_id   = body.get("targetId", "")
+            if not target_type or not target_id:
+                return _response(400, {"error": "Missing required fields: targetType, targetId"})
+            if target_type not in ("THING", "THING_GROUP"):
+                log.warning(f"Invalid targetType: {target_type}")
+                return _response(400, {"error": "targetType must be THING or THING_GROUP"})
+            log.info(json.dumps({
+                "msg": "deployment_request",
+                "actor": caller, "packageName": pkg_name, "version": version,
+                "targetType": target_type, "targetId": target_id, "rolloutStage": rollout_stage,
+            }))
 
         # Look up package
         pkg_table = dynamo.Table(PACKAGES_TABLE)
@@ -175,39 +248,40 @@ def lambda_handler(event, context):
             log.warning(f"Package {pkg_name}@{version} is {pkg.get('status')}, not ACTIVE")
             return _response(400, {"error": f"Package {pkg_name}@{version} is not ACTIVE"})
 
-        # Resolve thingName if targetType=THING (caller passes deviceId)
-        if target_type == "THING":
-            log.debug(f"Looking up device inventory for deviceId={target_id}")
-            inv = dynamo.Table(INVENTORY_TABLE).get_item(Key={"deviceId": target_id}).get("Item", {})
-            if not inv:
-                log.warning(f"Device not found in inventory: {target_id}")
-                return _response(404, {
-                    "error": f"Device {target_id} not found in OTA inventory. "
-                             "Ensure the OTA agent is running on the device."
-                })
-            current_version = inv.get("installedVersions", {}).get(pkg_name)
-            log.debug(f"Device {target_id} current {pkg_name} version: {current_version}")
-            if current_version == version:
-                log.info(f"Deployment rejected — device {target_id} already has {pkg_name}@{version}")
-                _audit("DEPLOYMENT_REJECTED", caller,
-                       {"packageName": pkg_name, "version": version, "deviceId": target_id},
-                       "FAILURE", reason="already_installed", currentVersion=current_version)
-                return _response(400, {
-                    "error": f"Device already has {pkg_name}@{version} installed. "
-                             "No deployment needed."
-                })
-            thing_name = inv.get("thingName")
-            if not thing_name:
-                log.error(f"Device {target_id} has no thingName in inventory")
-                return _response(404, {
-                    "error": f"Device {target_id} has no thingName in inventory. "
-                             "Ensure the OTA agent is running on the device."
-                })
-            log.info(f"Device resolved: deviceId={target_id} → thingName={thing_name}")
-            iot_targets = [f"arn:aws:iot:{REGION}:{ACCOUNT_ID}:thing/{thing_name}"]
-        else:
-            log.info(f"Group target: {target_id}")
-            iot_targets = [f"arn:aws:iot:{REGION}:{ACCOUNT_ID}:thinggroup/{target_id}"]
+        # Resolve IoT targets for non-BETA stages
+        if rollout_stage != "BETA":
+            if target_type == "THING":
+                log.debug(f"Looking up device inventory for deviceId={target_id}")
+                inv = dynamo.Table(INVENTORY_TABLE).get_item(Key={"deviceId": target_id}).get("Item", {})
+                if not inv:
+                    log.warning(f"Device not found in inventory: {target_id}")
+                    return _response(404, {
+                        "error": f"Device {target_id} not found in OTA inventory. "
+                                 "Ensure the OTA agent is running on the device."
+                    })
+                current_version = inv.get("installedVersions", {}).get(pkg_name)
+                log.debug(f"Device {target_id} current {pkg_name} version: {current_version}")
+                if current_version == version:
+                    log.info(f"Deployment rejected — device {target_id} already has {pkg_name}@{version}")
+                    _audit("DEPLOYMENT_REJECTED", caller,
+                           {"packageName": pkg_name, "version": version, "deviceId": target_id},
+                           "FAILURE", reason="already_installed", currentVersion=current_version)
+                    return _response(400, {
+                        "error": f"Device already has {pkg_name}@{version} installed. "
+                                 "No deployment needed."
+                    })
+                thing_name = inv.get("thingName")
+                if not thing_name:
+                    log.error(f"Device {target_id} has no thingName in inventory")
+                    return _response(404, {
+                        "error": f"Device {target_id} has no thingName in inventory. "
+                                 "Ensure the OTA agent is running on the device."
+                    })
+                log.info(f"Device resolved: deviceId={target_id} → thingName={thing_name}")
+                iot_targets = [f"arn:aws:iot:{REGION}:{ACCOUNT_ID}:thing/{thing_name}"]
+            else:
+                log.info(f"Group target: {target_id}")
+                iot_targets = [f"arn:aws:iot:{REGION}:{ACCOUNT_ID}:thinggroup/{target_id}"]
 
         # Generate pre-signed GET URL for artifact download (embedded in IoT Job document)
         log.debug(f"Generating pre-signed GET URL for s3://{pkg['s3Bucket']}/{pkg['s3Key']}")

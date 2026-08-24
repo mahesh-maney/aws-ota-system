@@ -75,7 +75,7 @@ DEVICE_TYPE_MAP = {
     },
 }
 
-VALID_RELEASE_TYPES = {"UAT", "PROD"}
+VALID_RELEASE_TYPES = {"UAT", "PROD", "BETA", "CUSTOM"}
 
 dynamo = boto3.resource("dynamodb", region_name=REGION)
 s3     = boto3.client("s3",         region_name=REGION)

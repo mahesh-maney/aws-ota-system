@@ -1,7 +1,7 @@
 # Digilux OTA System — Flow Document
 
-**Version:** 1.2
-**Date:** 2026-08-12
+**Version:** 1.3
+**Date:** 2026-08-24
 **Audience:** Engineering, Integration, QA Teams
 
 This document describes all key flows in the Digilux OTA update system — from package upload through to device installation and failure recovery. Each flow shows the components involved, the sequence of operations, and the MQTT topics or API calls used.
@@ -15,7 +15,7 @@ This document describes all key flows in the Digilux OTA update system — from 
 | **Admin / Integration App** | Client | Uploads packages, triggers deployments, monitors status |
 | **API Gateway** | AWS | Routes HTTP requests to Lambda functions |
 | `digilux_ota_upload_url` | Lambda | Issues pre-signed S3 upload URLs, writes PENDING record. Derives `packageName` and `fileName` from `deviceType` automatically. |
-| `digilux_ota_artifact_processor` | Lambda | Triggered by S3 event; verifies upload token + checksum; computes SHA256, signs with ECDSA, promotes package to ACTIVE (still hidden until activated). Quarantines invalid uploads (deletes S3 object, marks `CORRUPTED`). |
+| `digilux_ota_artifact_processor` | Lambda | Triggered by S3 event; verifies upload token + checksum; computes SHA256, signs with ECDSA, promotes package PENDING→ACTIVE. Automatically supersedes lower-semver ACTIVE versions of the same package+releaseType. Quarantines invalid uploads (deletes S3 object, marks `CORRUPTED`). |
 | `digilux_ota_job_create` | Lambda | Creates IoT Jobs, lists/gets/aborts deployments |
 | `digilux_ota_compatibility_check` | Lambda | Returns available updates for a specific device |
 | `digilux_ota_status_handler` | Lambda | Receives device status via IoT Rule; updates DynamoDB |
@@ -174,11 +174,124 @@ S3                  artifact_processor Lambda    Secrets Manager    DynamoDB (pa
 8. Lambda signs the SHA256 hex string with ECDSA → base64 signature
 9. Lambda updates the DynamoDB record: `status = ACTIVE`, writes `sha256`, `signature`, `artifactSize`; **removes** `uploadToken` and `expectedChecksum` (no longer needed)
 10. Lambda emits `PACKAGE_REGISTERED_ACTIVE` audit log
+11. **Semver-aware auto-supersede:** Lambda queries all ACTIVE versions of the same `packageName + releaseType`. Any version with a **lower semver** is set to `SUPERSEDED` (with `supersededBy = currentVersion`). Versions with equal or higher semver are left untouched — this prevents a late-uploaded older version from wiping a live release.
 
 > **CORRUPTED status:** A package marked `CORRUPTED` is permanently rejected. Any future upload attempts to the same `packageName@version` are automatically deleted by the processor.
-9. Package is now deployable — typically completes within **2–3 seconds** of S3 upload
 
 > **Idempotency:** If S3 fires a duplicate event (e.g. retry), the Lambda skips processing if the record is already `ACTIVE`.
+
+---
+
+## Flow 2b: Package Lifecycle Management (Promote / Restore)
+
+This flow covers admin-driven state changes after a package is already ACTIVE: promoting a BETA artefact to PROD, or rolling back to a previous version.
+
+### Package Status State Machine
+
+```
+Upload complete
+      │
+      ▼
+  PENDING ──(artifact_processor validates)──> ACTIVE
+                                                │
+                              ┌─────────────────┼──────────────────┐
+                              ▼                 ▼                  ▼
+                         SUPERSEDED          RECALLED          (stays ACTIVE)
+                         (auto, on           (admin)
+                          new upload
+                          or promote)
+                              │
+                    (admin: restore)
+                              │
+                              ▼
+                           ACTIVE  ──────(supersedes current ACTIVE)
+```
+
+### Promote BETA → PROD
+
+```
+Admin                   API Gateway       package_activate Lambda     DynamoDB (packages)
+  │                          │                     │                        │
+  │  PATCH /packages/        │                     │                        │
+  │  {pkg}/{ver}/activate    │                     │                        │
+  │  {"promote": true}       │                     │                        │
+  │─────────────────────────>│                     │                        │
+  │                          │  Validate admin     │                        │
+  │                          │  token + group      │                        │
+  │                          │────────────────────>│                        │
+  │                          │                     │  Check: releaseType    │
+  │                          │                     │  must be BETA,         │
+  │                          │                     │  status must be ACTIVE │
+  │                          │                     │────────────────────────>
+  │                          │                     │  ← item                │
+  │                          │                     │                        │
+  │                          │                     │  Update releaseType    │
+  │                          │                     │  BETA → PROD           │
+  │                          │                     │  Set promotedBy/At     │
+  │                          │                     │────────────────────────>
+  │                          │                     │                        │
+  │                          │                     │  Query: all ACTIVE     │
+  │                          │                     │  PROD versions of      │
+  │                          │                     │  same package          │
+  │                          │                     │────────────────────────>
+  │                          │                     │  ← list of versions    │
+  │                          │                     │                        │
+  │                          │                     │  For each version with │
+  │                          │                     │  lower semver:         │
+  │                          │                     │  status → SUPERSEDED   │
+  │                          │                     │  supersededBy = ver    │
+  │                          │                     │────────────────────────>
+  │  ← 200 {releaseType:     │                     │                        │
+  │    "PROD", status:       │                     │                        │
+  │    "ACTIVE", promotedBy} │                     │                        │
+  │<─────────────────────────│                     │                        │
+```
+
+**Rules:**
+- PROD is terminal — cannot be re-promoted or downgraded.
+- CUSTOM artefacts cannot be promoted.
+- Only lower-semver PROD versions are superseded (higher versions are untouched).
+
+### Restore SUPERSEDED → ACTIVE (Rollback)
+
+Used when the current live version is buggy and needs to be rolled back to an earlier release.
+
+```
+Admin                   API Gateway       package_activate Lambda     DynamoDB (packages)
+  │                          │                     │                        │
+  │  PATCH /packages/        │                     │                        │
+  │  {pkg}/{ver}/activate    │                     │                        │
+  │  {"restore": true}       │                     │                        │
+  │─────────────────────────>│                     │                        │
+  │                          │─────────────────────>                        │
+  │                          │                     │  Check: status must    │
+  │                          │                     │  be SUPERSEDED;        │
+  │                          │                     │  releaseType PROD/BETA │
+  │                          │                     │────────────────────────>
+  │                          │                     │  ← item                │
+  │                          │                     │                        │
+  │                          │                     │  Query: currently      │
+  │                          │                     │  ACTIVE version of     │
+  │                          │                     │  same package+type     │
+  │                          │                     │────────────────────────>
+  │                          │                     │  Set that version to   │
+  │                          │                     │  SUPERSEDED            │
+  │                          │                     │────────────────────────>
+  │                          │                     │                        │
+  │                          │                     │  Set this version:     │
+  │                          │                     │  status → ACTIVE       │
+  │                          │                     │  restoredBy/At set     │
+  │                          │                     │  Remove supersededAt/By│
+  │                          │                     │────────────────────────>
+  │  ← 200 {status: "ACTIVE",│                     │                        │
+  │    restoredBy}           │                     │                        │
+  │<─────────────────────────│                     │                        │
+```
+
+**Rules:**
+- Semver order is NOT enforced for restore — this is an explicit admin override.
+- The previously active (buggy) version becomes SUPERSEDED (recall it separately if it should never be restored again).
+- CUSTOM artefacts cannot be restored.
 
 ---
 
@@ -901,3 +1014,5 @@ Key: `packageName` (hash) + `version` (range)
 |---|---|---|
 | `1.0` | 2026-07-31 | Initial release — covers all 13 flows including package upload, device registration, deployment, happy path, failure, rollback, NEEDS_RECOVERY, abort, offline, staged rollout, reconnect recovery, and compatibility check |
 | `1.1` | 2026-08-12 | Consolidated `digilux_device_inventory` into `digilux_device_data` (OTA fields as attributes); CloudFront signed URLs replace S3 presigned URLs for artifact delivery; tiered presign expiry based on artifact size (1hr–48hr); IoT Job in-progress timeout raised from 60min to 24hr (`IOT_JOB_TIMEOUT_MINUTES=1440`) |
+| `1.2` | 2026-08-19 | Beta users flow: `device_register` now sets `thingName = deviceId`; `digilux_ota_beta_users` Lambda resolves email → deviceId via Cognito + `digilux_device_data`; BETA multi-target deployment creates one IoT Job for all registered beta users |
+| `1.3` | 2026-08-24 | Package lifecycle management: new Flow 2b (Promote / Restore); `artifact_processor` semver-aware auto-supersede on ACTIVE promotion; `package_activate` extended with `promote` (BETA→PROD, terminal) and `restore` (SUPERSEDED→ACTIVE rollback) actions; new release types `BETA` and `CUSTOM`; CUSTOM rollout stage for targeted per-device deployments |
