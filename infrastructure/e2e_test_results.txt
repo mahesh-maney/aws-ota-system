@@ -14,29 +14,28 @@
   ✓ Missing packageName → 400 (HTTP 400)
   ✓ Invalid targetType → 400 (HTTP 400)
   ✓ Non-existent package → 404 (HTTP 404)
-  ✓ Re-deploy already-installed version → 400 (HTTP 400)
 
 ━━━ T04 — INPUT VALIDATION: compatibility check ━━━
   ✓ Unknown deviceId → 404 (HTTP 404)
   ✓ Known deviceId → 200 (HTTP 200)
 
 ━━━ T05 — PACKAGE UPLOAD FLOW ━━━
-  → test artifact SHA256: 43f5f00f2878e91b...
+  → test artifact SHA256: da8f9b185416c1a6...
   ✓ Upload URL request returns 200 (HTTP 200)
   ✓ Package starts as PENDING (status=PENDING)
   ✓ Response has uploadUrl (has field: uploadUrl)
   ✓ Response has s3Key (has field: s3Key)
   ✓ Response has uploadToken (has field: uploadToken)
-  → packageName: HomeAssistantUtility  s3Key: Network_controller_firmware/HomeAssistantUtility/5.0.1787125342-9474/HomeAssistantUtility-5.0.1787125342-9474.jar
+  → packageName: HomeAssistantUtility  s3Key: Network_controller_firmware/Network_controller_firmware/5.0.1787650621-6769/HomeAssistantUtility-5.0.1787650621-6769.jar
   ✓ Binary PUT to S3 pre-signed URL → 200 (HTTP 200)
   → Waiting for artifact_processor (up to 15s)...
-  ✓ Package auto-promoted to ACTIVE in 2s (S3 event → artifact_processor)
-  ✓ SHA256 written by artifact_processor: 43f5f00f2878e91b...
+  ✓ Package auto-promoted to ACTIVE in 1s (S3 event → artifact_processor)
+  ✓ SHA256 written by artifact_processor: da8f9b185416c1a6...
   ✓ ECDSA signature written by artifact_processor
   ✓ Duplicate ACTIVE version upload → 409 (HTTP 409)
 
 ━━━ T06 — LIST PACKAGES ━━━
-  ✓ GET /packages returns 30 packages
+  ✓ GET /packages returns 36 packages
   ✓ Filter by deviceType returns packages array (has field: packages)
 
 ━━━ T07 — COMPATIBILITY CHECK ━━━
@@ -46,7 +45,7 @@
   → Device installed controller-app: 2.0.0
 
 ━━━ T08 — DEPLOYMENT CREATION ━━━
-  ✓ Deployment created: digilux-ota-HomeAssistantUtility-5-0-1787125342-9474-1787125351
+  ✓ Deployment created: digilux-ota-HomeAssistantUtility-5-0-1787650621-6769-1787650625
   ✓ New deployment starts as QUEUED (status=QUEUED)
   ✓ Rollout stage preserved (rolloutStage=CANARY)
   ✓ Response has iotJobArn (has field: iotJobArn)
@@ -62,12 +61,13 @@
   ✓ IN_PROGRESS published to IoT MQTT topic
   ✓ SUCCEEDED published to IoT MQTT topic
   ✓ Job status updated to SUCCEEDED in DynamoDB
-  ✓ Device data updated: HomeAssistantUtility=5.0.1787125342-9474
+  ✓ Device data updated: HomeAssistantUtility=5.0.1787650621-6769
   ✓ pendingJobId cleared after SUCCEEDED
+  ✓ Re-deploy already-installed version → 400 (HTTP 400)
 
 ━━━ T11 — SIMULATE FAILED UPDATE (with rollback detail) ━━━
-  → Reset device to controller-app@3.0.0 for failure test
-  ✓ Created failure-test job: digilux-ota-controller-app-4-0-0-1787125365
+  → Reset device to HomeAssistantUtility@1.0.0 for failure test
+  ✓ Created failure-test job: digilux-ota-HomeAssistantUtility-5-0-1787650621-6769-1787650637
   ✓ FAILED status recorded in DynamoDB (device rolled back)
   ✓ pendingJobId cleared after FAILED (device can accept next job)
 
@@ -84,9 +84,9 @@
   ✓ DEVICE_UPDATE_FAILED audit — audit event found in /aws/lambda/digilux_ota_status_handler
 
 ━━━ T14 — DYNAMODB CONSISTENCY ━━━
-  ✓ Table digilux_ota_packages has 49 records
-  ✓ Table digilux_device_data has 56 records
-  ✓ Table digilux_ota_jobs has 90 records
+  ✓ Table digilux_ota_packages has 36 records
+  ✓ Table digilux_device_data has 57 records
+  ✓ Table digilux_ota_jobs has 105 records
   ✓ Table digilux_ota_compatibility has 18 records
 
 ━━━ T15 — IOT INFRASTRUCTURE ━━━
