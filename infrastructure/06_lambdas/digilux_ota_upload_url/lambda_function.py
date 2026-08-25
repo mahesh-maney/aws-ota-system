@@ -104,14 +104,16 @@ def lambda_handler(event, context):
 
     try:
         claims = event.get("requestContext", {}).get("authorizer", {}).get("claims", {})
+        caller = claims.get("email", claims.get("sub", "unknown"))
+
+        # GET (list packages) is available to any authenticated user
+        if method == "GET":
+            return _list_packages(event, caller)
+
+        # All write operations require ota-admin group
         if "ota-admin" not in claims.get("cognito:groups", ""):
             log.warning("Unauthorized — not in admin group")
             return _response(403, {"error": "Admin access required"})
-
-        caller = claims.get("email", claims.get("sub", "unknown"))
-
-        if method == "GET":
-            return _list_packages(event, caller)
 
         body = json.loads(event.get("body") or "{}")
 

@@ -264,7 +264,7 @@
                 }
               ]
             },
-            "description": "Returns all OTA packages.\n\n**Query params:**\n- `status` — filter by status (`ACTIVE`, `SUPERSEDED`, `RECALLED`, `PENDING`, `CORRUPTED`, `DELETED`). Omit or leave empty to return **all statuses**.\n- `deviceType` — filter by device type (returns all versions of that package name).\n\nPoll this endpoint after uploading a package until `status` changes from `PENDING` → `ACTIVE` (usually under 5 seconds)."
+            "description": "Returns all OTA packages.\n\n**Auth:** Any authenticated user (admin or non-admin token).\n\n**Query params:**\n- `status` — filter by status (`ACTIVE`, `SUPERSEDED`, `RECALLED`, `PENDING`, `CORRUPTED`, `DELETED`). Omit or leave empty to return **all statuses**.\n- `deviceType` — filter by device type (returns all versions of that package name).\n\nPoll this endpoint after uploading a package until `status` changes from `PENDING` → `ACTIVE` (usually under 5 seconds)."
           },
           "response": [
             {
