@@ -37,44 +37,26 @@ aws s3api put-bucket-encryption \
     }]
   }'
 
-echo "==> Setting bucket policy (HTTPS-only + CloudFront OAC read access)"
-# CloudFront distribution E2P92N4YRVH40S uses OAC (not legacy OAI).
-# With OAC, the bucket must explicitly allow s3:GetObject from the
-# cloudfront.amazonaws.com service principal scoped to the distribution ARN.
-# Without this statement, CloudFront returns 403 even for valid signed URLs.
-ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+echo "==> Enforcing HTTPS-only access (deny HTTP)"
+# Artifact downloads use S3 pre-signed URLs directly — no CloudFront.
 aws s3api put-bucket-policy \
   --bucket "$BUCKET" \
-  --policy "{
-    \"Version\": \"2012-10-17\",
-    \"Statement\": [
-      {
-        \"Sid\": \"DenyNonHTTPS\",
-        \"Effect\": \"Deny\",
-        \"Principal\": \"*\",
-        \"Action\": \"s3:*\",
-        \"Resource\": [
-          \"arn:aws:s3:::$BUCKET\",
-          \"arn:aws:s3:::$BUCKET/*\"
-        ],
-        \"Condition\": {
-          \"Bool\": { \"aws:SecureTransport\": \"false\" }
-        }
-      },
-      {
-        \"Sid\": \"AllowCloudFrontOAC\",
-        \"Effect\": \"Allow\",
-        \"Principal\": { \"Service\": \"cloudfront.amazonaws.com\" },
-        \"Action\": \"s3:GetObject\",
-        \"Resource\": \"arn:aws:s3:::$BUCKET/*\",
-        \"Condition\": {
-          \"StringEquals\": {
-            \"AWS:SourceArn\": \"arn:aws:cloudfront::${ACCOUNT_ID}:distribution/E2P92N4YRVH40S\"
-          }
-        }
+  --policy '{
+    "Version": "2012-10-17",
+    "Statement": [{
+      "Sid": "DenyNonHTTPS",
+      "Effect": "Deny",
+      "Principal": "*",
+      "Action": "s3:*",
+      "Resource": [
+        "arn:aws:s3:::digilux-ota-artifacts",
+        "arn:aws:s3:::digilux-ota-artifacts/*"
+      ],
+      "Condition": {
+        "Bool": { "aws:SecureTransport": "false" }
       }
-    ]
-  }"
+    }]
+  }'
 
 echo "==> Adding lifecycle rule (abort incomplete multipart uploads after 7 days)"
 aws s3api put-bucket-lifecycle-configuration \

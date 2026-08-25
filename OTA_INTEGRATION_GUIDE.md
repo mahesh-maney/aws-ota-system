@@ -1,6 +1,6 @@
 # Digilux OTA (Over-The-Air) Update System — Integration Guide
 
-**Version:** 2.4
+**Version:** 2.5
 **Date:** 2026-08-24 (updated 2026-08-25)
 **Audience:** Integration / QA Team
 **Base URL:** `https://iot.digilux.co.in/smarthome` (custom domain)
@@ -1183,7 +1183,7 @@ Attempt 3: connection drops → partial file deleted → FAILED reported to clou
 - Non-retryable errors (HTTP 403, expired pre-signed URL, 404) fail immediately without retry
 - After 3 failures: job marked `FAILED`, admin must create a new deployment (which generates a fresh pre-signed URL)
 
-**Artifact URL expiry** is tiered by file size: ≤50MB → 1hr, ≤200MB → 6hr, ≤500MB → 24hr, >500MB → 48hr (configurable via `ota.config`). URLs are served via **CloudFront signed URLs** (not S3 presigned) for CDN-accelerated delivery. The **IoT Job in-progress timeout is 24 hours** (`IOT_JOB_TIMEOUT_MINUTES=1440`) — if a device is offline for more than 24hr, the job times out and a new deployment is required.
+**Artifact URL expiry** is tiered by file size: ≤50MB → 1hr, ≤200MB → 6hr, ≤500MB → 24hr, >500MB → 48hr (configurable via `ota.config`). URLs are **S3 pre-signed GET URLs** served directly from `digilux-ota-artifacts`. The **IoT Job in-progress timeout is 24 hours** (`IOT_JOB_TIMEOUT_MINUTES=1440`) — if a device is offline for more than 24hr, the job times out and a new deployment is required.
 
 ---
 
@@ -1499,7 +1499,7 @@ The 90-day retention on non-current versions allows rollback reference while con
 | Single-partition device | No A/B partition — rollback uses file-system backup (3 generations kept) |
 | Version skipping | Fully supported; no sequential upgrade enforcement |
 | Group deployments | No per-device version check — target all devices in group regardless of current version |
-| Artifact URL TTL | Tiered by file size: ≤50MB→1hr / ≤200MB→6hr / ≤500MB→24hr / >500MB→48hr (CloudFront signed URL) |
+| Artifact URL TTL | Tiered by file size: ≤50MB→1hr / ≤200MB→6hr / ≤500MB→24hr / >500MB→48hr (S3 pre-signed URL) |
 | Agent prerequisite | Device must have run OTA agent at least once to appear in inventory |
 | Zigbee OTA | Routed via zigbee2mqtt bridge API — 10-minute per-device timeout |
 
@@ -1678,6 +1678,7 @@ Results are printed to stdout and saved to `infrastructure/e2e_test_results.txt`
 | `1.8` | 2026-08-16 | Digilux Engineering | REJECTED status with error codes: `digilux_ota_status_handler` now parses `statusDetails.errorCode` from controller, resolves reason from `ERROR_CODE_MAP`, stores `errorCode`+`errorReason` in job device statuses, clears `pendingJobId` on rejection, emits `DEVICE_UPDATE_REJECTED` audit event; security codes (`10002–10006`) also emit `SECURITY_ALERT`; job-level status mapped to `FAILED` on REJECTED; admin job document renamed `operation` → `operationType` (integer) and removed `mandatory` field; user-initiated MQTT payload aligned: same `operationType` integer, removed `mandatory`; new Section 6.9 (REJECTED error code table); security section updated (removed mandatory, added tamper-detection row) |
 | `1.9` | 2026-08-19 | Digilux Engineering | Beta users management: new Lambda `digilux_ota_beta_users` with `GET`/`POST`/`DELETE /ota/beta-users`; auto-resolves email → Cognito userId → deviceId via `userId-index` GSI on `digilux_device_data`; new DynamoDB table `digilux_ota_beta_users`; new Section 4.8a; `digilux_ota_user_consent` aligned to use integer `operationType` (via `OPERATION_TYPE_MAP`) in IoT Job document — consistent with admin-side `job_create`; e2e suite at 70/70 PASS |
 | `2.0` | 2026-08-24 | Digilux Engineering | Release type lifecycle: added `BETA` (Beta/UAT) and `CUSTOM` release types; removed `UAT`; BETA→PROD promotion (`{"promote":true}` on activate endpoint) — permanent, PROD is terminal; SUPERSEDED→ACTIVE rollback (`{"restore":true}`) for buggy-version recovery; semver-aware auto-supersede in `artifact_processor` — new upload only supersedes lower-version ACTIVE entries, not higher ones; BETA multi-target deployment (`rolloutStage=BETA`, `targetIds` from beta-users list); CUSTOM deployment (`rolloutStage=CUSTOM`, explicit `targetIds`, CUSTOM-tagged artefacts only); S3 HTTPS-only bucket policy (DenyNonHTTPS on `digilux-ota-artifacts`); `thingName` convention changed from `digilux-{mac}` to `deviceId` for new device registrations; admin UI: Beta(UAT) display labels, multi-select beta user checkboxes, CUSTOM tag-input, Promote/Restore buttons, SUPERSEDED status filter |
+| `2.5` | 2026-08-25 | Digilux Engineering | Remove CloudFront — artifact download URLs now use S3 pre-signed GET URLs directly (CloudFront removed for cost reasons); removed `CLOUDFRONT_DOMAIN`, `CLOUDFRONT_KEY_PAIR_ID`, `CLOUDFRONT_PRIVATE_KEY_SECRET` env vars from `digilux_ota_user_get_download_link`; reverted S3 bucket policy to `DenyNonHTTPS`-only (removed `AllowCloudFrontOAC`); updated `01_s3.sh` accordingly; download URL format changes from `https://d2lr14tk4wqz8z.cloudfront.net/...` to `https://digilux-ota-artifacts.s3.amazonaws.com/...`; TTL tiers unchanged |
 | `2.4` | 2026-08-25 | Digilux Engineering | CloudFront artifact delivery fix: S3 bucket policy was missing the `AllowCloudFrontOAC` statement required for OAC-based distributions — CloudFront returned HTTP 403 on all signed download URLs even though the key pair and signing logic were correct; added `s3:GetObject` allow for `cloudfront.amazonaws.com` service principal scoped to distribution `E2P92N4YRVH40S`; updated `01_s3.sh` so the policy is reproducible on fresh deploys; full 13-step API smoke test now passes 13/13 — all endpoints verified healthy for integration team handoff |
 | `2.3` | 2026-08-25 | Digilux Engineering | Non-admin package visibility: `GET /ota/packages` no longer requires `ota-admin` group — any authenticated user can list packages (read-only); admin UI Packages page and nav link now accessible to all users; action buttons (Publish/Withdraw/Recall/Promote/Restore/Delete) remain admin-only; non-admin badge changed from "Upload only" to "Read only" |
 | `2.2` | 2026-08-24 | Digilux Engineering | Package delete endpoint: `DELETE /api/v1/ota/packages/{packageName}/{version}` with 6 validations (block ACTIVE, require reason, check active deployments, 7-day cooling-off for SUPERSEDED with force override, S3 artifact deletion, soft delete for RECALLED); role-based admin UI: non-admin users restricted to upload-only (no Packages/Deployments nav, no admin routes); admin detected from `cognito:groups` JWT claim; Delete modal on PackagesPage with reason input, version type-to-confirm, cooling-off force checkbox; `GET /ota/packages` status filter fixed — omitting or sending empty `status=` now returns all statuses (was incorrectly defaulting to ACTIVE) |
