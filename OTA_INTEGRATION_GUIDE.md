@@ -980,7 +980,7 @@ Returns the status of a user-initiated update. The `jobId` must belong to a cons
 POST /api/v1/ota/my/updates/download-link
 ```
 
-An alternative to the consent flow. The Lambda returns a **CloudFront signed download URL** directly to the Flutter app and simultaneously publishes the same payload to the device's OTA MQTT topic (`iot/device/{deviceId}/ota`). The device receives the URL over MQTT and downloads the firmware over HTTPS.
+An alternative to the consent flow. The Lambda returns an **S3 pre-signed download URL** directly to the Flutter app and simultaneously publishes the same payload to the device's OTA MQTT topic (`iot/device/{deviceId}/ota`). The device receives the URL over MQTT and downloads the firmware over HTTPS.
 
 **When to use this instead of `/consent`:**
 - You want the Flutter app to hold the URL (e.g., to display progress, pass to a `NetworkController`, or handle offline-device scenarios)
@@ -1000,7 +1000,7 @@ An alternative to the consent flow. The Lambda returns a **CloudFront signed dow
 **Response `200`:**
 ```json
 {
-  "downloadUrl":   "https://d2lr14tk4wqz8z.cloudfront.net/application/controller-app/4.0.0/controller-app-4.0.0.tar.gz?Policy=...&Signature=...&Key-Pair-Id=K3CL07APICBEMS",
+  "downloadUrl":   "https://digilux-ota-artifacts.s3.amazonaws.com/Network_controller_firmware/HomeAssistantUtility/4.0.0/HomeAssistantUtility-4.0.0.jar?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=...&X-Amz-Expires=3600&X-Amz-Signature=...",
   "sha256":        "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
   "signature":     "MEUCIQDx...",
   "packageName":   "controller-app",
@@ -1658,7 +1658,7 @@ echo "https://iot.digilux.co.in/smarthome" > /tmp/ota_base_url.txt
 bash infrastructure/e2e_test.sh
 ```
 
-Results are printed to stdout and saved to `infrastructure/e2e_test_results.txt`. Last verified: **70/70 PASS** (2026-08-19). API smoke test (all endpoints): **13/13 PASS** (2026-08-25).
+Results are printed to stdout and saved to `infrastructure/e2e_test_results.txt`. Last verified: **70/70 PASS** (2026-08-19). API smoke test (all endpoints, 9 phases): **15/15 PASS** (2026-08-25).
 
 > The E2E suite covers the admin flow (T01–T16). User-flow endpoint tests (consent, download-link) are covered by the Postman collection.
 
