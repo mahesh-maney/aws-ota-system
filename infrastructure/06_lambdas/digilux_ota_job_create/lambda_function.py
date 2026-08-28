@@ -165,28 +165,31 @@ def lambda_handler(event, context):
             target_ids = body.get("targetIds", [])
             if not target_ids:
                 return _response(400, {"error": "No beta users selected. Select at least one beta user."})
-            # Look up thingName for each selected deviceId from beta users table
-            beta_table = dynamo.Table(BETA_USERS_TABLE)
+            # Look up thingName fresh from device_data for each selected deviceId
+            device_table = dynamo.Table(DEVICE_DATA_TABLE)
             iot_targets = []
-            resolved_emails = []
+            resolved_ids = []
             for device_id in target_ids:
-                result = beta_table.scan(
-                    FilterExpression=boto3.dynamodb.conditions.Attr("deviceId").eq(device_id)
-                )
-                items = result.get("Items", [])
-                if items and items[0].get("thingName"):
-                    iot_targets.append(f"arn:aws:iot:{REGION}:{ACCOUNT_ID}:thing/{items[0]['thingName']}")
-                    resolved_emails.append(items[0].get("email", device_id))
-                else:
-                    log.warning(f"Beta user with deviceId={device_id} not found or has no thingName — skipping")
+                items = device_table.query(
+                    KeyConditionExpression=boto3.dynamodb.conditions.Key("deviceId").eq(device_id)
+                ).get("Items", [])
+                if not items:
+                    log.warning(f"Beta deviceId={device_id} not found in device_data — skipping")
+                    continue
+                thing_name = items[0].get("thingName")
+                if not thing_name:
+                    log.warning(f"Beta deviceId={device_id} has no thingName in device_data — skipping")
+                    continue
+                iot_targets.append(f"arn:aws:iot:{REGION}:{ACCOUNT_ID}:thing/{thing_name}")
+                resolved_ids.append(device_id)
             if not iot_targets:
                 return _response(400, {"error": "None of the selected beta users have a registered device."})
             target_type = "THING_LIST"
-            target_id   = ",".join(resolved_emails)
+            target_id   = ",".join(resolved_ids)
             log.info(json.dumps({
                 "msg": "deployment_request",
                 "actor": caller, "packageName": pkg_name, "version": version,
-                "rolloutStage": rollout_stage, "betaUserCount": len(iot_targets),
+                "rolloutStage": rollout_stage, "betaDeviceCount": len(iot_targets),
                 "targets": iot_targets,
             }))
         elif rollout_stage == "CUSTOM":

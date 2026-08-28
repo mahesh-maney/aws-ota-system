@@ -51,7 +51,8 @@ OTA_JOBS_TABLE  = os.environ.get("OTA_JOBS_TABLE",  "digilux_ota_jobs")
 COOLING_OFF_DAYS = int(os.environ.get("COOLING_OFF_DAYS", "7"))
 
 dynamo = boto3.resource("dynamodb", region_name=REGION)
-s3     = boto3.client("s3", region_name=REGION)
+s3     = boto3.client("s3",  region_name=REGION)
+iot    = boto3.client("iot", region_name=REGION)
 
 
 def _audit(event: str, actor: str, resource: dict, result: str, **extra) -> None:
@@ -121,6 +122,7 @@ def lambda_handler(event, context):
 
             recall_reason = str(body.get("recallReason", "")).strip()
 
+            # Mark package RECALLED
             table.update_item(
                 Key={"packageName": package_name, "version": version},
                 UpdateExpression=(
@@ -137,25 +139,41 @@ def lambda_handler(event, context):
                 },
             )
 
+            # Auto-cancel QUEUED deployments; collect IN_PROGRESS for warning
+            cancelled_jobs, in_progress_jobs = _cancel_queued_deployments(
+                package_name, version, caller, recall_reason, now_ms
+            )
+
             log.info(json.dumps({
                 "msg": "package_recalled",
                 "packageName": package_name, "version": version,
                 "actor": caller, "recallReason": recall_reason,
+                "cancelledJobs": len(cancelled_jobs),
+                "inProgressJobs": len(in_progress_jobs),
             }))
             _audit("PACKAGE_RECALLED", caller,
                    {"packageName": package_name, "version": version},
-                   "SUCCESS", recallReason=recall_reason, releaseType=item.get("releaseType"))
+                   "SUCCESS", recallReason=recall_reason, releaseType=item.get("releaseType"),
+                   cancelledDeployments=len(cancelled_jobs),
+                   inProgressDeployments=len(in_progress_jobs))
+
+            msg = f"Package {package_name} v{version} recalled. No longer visible to end users."
+            if cancelled_jobs:
+                msg += f" {len(cancelled_jobs)} queued deployment(s) automatically cancelled."
+            if in_progress_jobs:
+                msg += f" {len(in_progress_jobs)} in-progress deployment(s) require manual abort."
 
             return _resp(200, {
-                "packageName":  package_name,
-                "version":      version,
-                "status":       "RECALLED",
-                "activated":    False,
-                "recalledBy":   caller,
-                "recallReason": recall_reason,
-                "updatedBy":    caller,
-                "message":      f"Package {package_name} v{version} recalled. "
-                                "No longer visible to end users and flagged in audit logs.",
+                "packageName":          package_name,
+                "version":              version,
+                "status":               "RECALLED",
+                "activated":            False,
+                "recalledBy":           caller,
+                "recallReason":         recall_reason,
+                "updatedBy":            caller,
+                "cancelledDeployments": cancelled_jobs,
+                "inProgressDeployments": in_progress_jobs,
+                "message":              msg,
             })
 
         # ── PROMOTE (BETA → PROD) ─────────────────────────────────────────────
@@ -307,6 +325,73 @@ def lambda_handler(event, context):
     except Exception as e:
         log.exception(f"Unhandled error: {e}")
         return _resp(500, {"error": "Internal server error"})
+
+
+def _cancel_queued_deployments(package_name: str, version: str,
+                                caller: str, recall_reason: str, now_ms: int):
+    """
+    Scan digilux_ota_jobs for deployments of this package version.
+    - QUEUED  → cancel IoT Job + mark CANCELLED in DynamoDB
+    - IN_PROGRESS → collect for warning only (returned to caller)
+    Returns (cancelled_job_ids, in_progress_job_ids).
+    """
+    from boto3.dynamodb.conditions import Attr
+
+    jobs_table = dynamo.Table(OTA_JOBS_TABLE)
+    scan_result = jobs_table.scan(
+        FilterExpression=(
+            Attr("packageName").eq(package_name) &
+            Attr("version").eq(version) &
+            Attr("status").is_in(["QUEUED", "IN_PROGRESS"])
+        )
+    )
+    jobs = scan_result.get("Items", [])
+
+    cancelled    = []
+    in_progress  = []
+
+    for job in jobs:
+        job_id = job.get("jobId")
+        if not job_id:
+            continue
+
+        if job.get("status") == "QUEUED":
+            # Cancel IoT Job
+            try:
+                iot.cancel_job(jobId=job_id, reasonCode="PACKAGE_RECALLED", force=False)
+                log.info(f"IoT Job {job_id} cancelled due to package recall")
+            except iot.exceptions.ResourceNotFoundException:
+                log.warning(f"IoT Job {job_id} not found in IoT Core — marking cancelled in DDB only")
+            except ClientError as e:
+                log.error(f"Failed to cancel IoT Job {job_id}: {e}")
+
+            # Update DynamoDB record
+            try:
+                jobs_table.update_item(
+                    Key={"jobId": job_id},
+                    UpdateExpression=(
+                        "SET #s = :s, cancelledAt = :ts, cancelledBy = :by, "
+                        "cancelReason = :r"
+                    ),
+                    ExpressionAttributeNames={"#s": "status"},
+                    ExpressionAttributeValues={
+                        ":s":  "CANCELLED",
+                        ":ts": now_ms,
+                        ":by": caller,
+                        ":r":  f"Package recalled: {recall_reason}",
+                    },
+                )
+                cancelled.append(job_id)
+                _audit("DEPLOYMENT_CANCELLED", caller,
+                       {"jobId": job_id, "packageName": package_name, "version": version},
+                       "SUCCESS", trigger="PACKAGE_RECALLED", recallReason=recall_reason)
+            except ClientError as e:
+                log.error(f"Failed to update DDB job {job_id} to CANCELLED: {e}")
+
+        elif job.get("status") == "IN_PROGRESS":
+            in_progress.append(job_id)
+
+    return cancelled, in_progress
 
 
 def _delete_package(package_name: str, version: str, caller: str, body: dict) -> dict:

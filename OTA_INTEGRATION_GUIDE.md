@@ -1,7 +1,7 @@
 # Digilux OTA (Over-The-Air) Update System — Integration Guide
 
-**Version:** 2.5
-**Date:** 2026-08-24 (updated 2026-08-25)
+**Version:** 2.6
+**Date:** 2026-08-28
 **Audience:** Integration / QA Team
 **Base URL:** `https://iot.digilux.co.in/smarthome` (custom domain)
 **Alternate URL:** `https://ds6nxf8ac5.execute-api.ap-south-1.amazonaws.com/smarthome`
@@ -68,7 +68,7 @@ Each upload is tied to a `deviceType` which determines the package name and file
 | DELETE | `/api/v1/ota/packages/{packageName}/{version}` | Admin | Delete a package (hard delete; soft delete for RECALLED; blocked if ACTIVE or has active deployments) |
 | GET | `/api/v1/ota/beta-users` | Admin | List registered beta users |
 | POST | `/api/v1/ota/beta-users` | Admin | Add a beta user by email |
-| DELETE | `/api/v1/ota/beta-users/{email}` | Admin | Remove a beta user |
+| DELETE | `/api/v1/ota/beta-users/{userId}` | Admin | Remove a beta user by Cognito userId |
 | GET | `/api/v1/controllers/{deviceId}/updates/available` | Admin | Compatibility check for a device |
 | POST | `/api/v1/ota/deployments` | Admin | Create deployment (push update) |
 | GET | `/api/v1/ota/deployments` | Admin | List all deployments |
@@ -127,7 +127,7 @@ Admin (API)                  AWS Cloud                        Controller Device
 
 ## 3. Authentication
 
-### Admin endpoints (Sections 4.1–4.8)
+### Admin endpoints (Sections 4.1–4.8b)
 
 Require a **Cognito ID Token** from the **OTA Admin user pool** (`ap-south-1_jUErEu7CL`). The token must belong to the `ota-admin` group.
 
@@ -775,17 +775,19 @@ GET /api/v1/ota/beta-users
 {
   "users": [
     {
-      "email":     "user@example.com",
-      "userId":    "a1b2c3d4-...",
-      "deviceId":  "edb39bba-baf1-4700-968c-a42228e53aa0",
-      "thingName": "DGX-edb39bba",
-      "addedAt":   1787000000000,
-      "addedBy":   "admin@digilux.co.in"
+      "email":    "user@example.com",
+      "userId":   "a1b2c3d4-...",
+      "deviceId": "edb39bba-baf1-4700-968c-a42228e53aa0",
+      "addedAt":  "2026-08-28T07:01:24Z",
+      "addedBy":  "admin@digilux.co.in"
     }
   ],
   "count": 1
 }
 ```
+
+> `email` is resolved live from Cognito at list time — it is **not stored** in DynamoDB.
+> `thingName` is no longer stored; it is looked up fresh from `digilux_device_data` at deployment time.
 
 #### Add Beta User
 
@@ -799,20 +801,21 @@ POST /api/v1/ota/beta-users
 
 The Lambda performs the full resolution chain:
 1. `Cognito AdminGetUser` by email → `userId`
-2. `digilux_device_data` query on `userId-index` GSI → `deviceId` + `thingName`
-3. Writes record to `digilux_ota_beta_users` table
+2. `digilux_device_data` query on `userId-index` GSI → `deviceId` (confirms device exists)
+3. Writes `{ userId, deviceId, addedAt, addedBy }` to `digilux_ota_beta_users` — **email and thingName are not stored**
 
 **Response `201`:**
 ```json
 {
-  "email":     "user@example.com",
-  "userId":    "a1b2c3d4-...",
-  "deviceId":  "edb39bba-baf1-4700-968c-a42228e53aa0",
-  "thingName": "DGX-edb39bba",
-  "addedAt":   1787000000000,
-  "addedBy":   "admin@digilux.co.in"
+  "email":    "user@example.com",
+  "userId":   "a1b2c3d4-...",
+  "deviceId": "edb39bba-baf1-4700-968c-a42228e53aa0",
+  "addedAt":  "2026-08-28T07:01:24Z",
+  "addedBy":  "admin@digilux.co.in"
 }
 ```
+
+> `email` in the `201` response is sourced from Cognito (not stored). It is present for immediate UI feedback only.
 
 | HTTP | Condition |
 |---|---|
@@ -824,26 +827,70 @@ The Lambda performs the full resolution chain:
 #### Remove Beta User
 
 ```
-DELETE /api/v1/ota/beta-users/{email}
+DELETE /api/v1/ota/beta-users/{userId}
 ```
 
-URL-encode the `@` symbol (e.g. `user%40example.com`).
+`{userId}` is the Cognito sub (UUID), available from the `GET /beta-users` response.
 
 **Response `200`:**
 ```json
-{ "message": "Beta user user@example.com removed" }
+{ "message": "Beta user removed" }
 ```
 
 #### DynamoDB Table: `digilux_ota_beta_users`
 
 | Attribute | Type | Description |
 |---|---|---|
-| `email` | String (PK) | User email — primary lookup key |
-| `userId` | String | Cognito sub / userId |
+| `userId` | String (PK) | Cognito sub — primary key |
 | `deviceId` | String | Device UUID |
-| `thingName` | String | AWS IoT Thing name |
-| `addedAt` | Number | Unix timestamp (ms) |
+| `addedAt` | String | ISO-8601 timestamp |
 | `addedBy` | String | Admin email who enrolled this user |
+
+> `email` and `thingName` are **not stored**. Email is resolved live from Cognito on every GET. `thingName` is looked up fresh from `digilux_device_data` at BETA deployment time — ensuring stale snapshots never reach IoT Core.
+
+---
+
+### 4.8b Job Lifecycle Management
+
+The `digilux_ota_job_sync` Lambda keeps `digilux_ota_jobs` consistent with IoT Core automatically, without manual intervention.
+
+#### Trigger 1 — Daily Staleness Check (EventBridge)
+
+Runs once per day via an EventBridge scheduled rule. Scans for any jobs stuck in `QUEUED` or `IN_PROGRESS` for more than 7 days (`STALE_JOB_DAYS` env var).
+
+For each stale job:
+- **IoT already terminal** (COMPLETED / CANCELED) → DDB record is synced to `SUCCEEDED` or `CANCELLED`
+- **IoT still active** → IoT job is cancelled (`reasonCode: STALE_JOB`), DDB updated to `CANCELLED`
+- **IoT job not found** → DDB updated to `CANCELLED` (orphan cleanup)
+
+This covers the case where a device never comes online after a deployment was queued.
+
+#### Trigger 2 — IoT Job Lifecycle Events (IoT Rule)
+
+An IoT Rule (`digilux_ota_job_lifecycle_sync`) subscribes to `$aws/events/job/+/+` and fires the same Lambda when any job is cancelled or completed directly in the IoT Console, AWS CLI, or SDK — outside the OTA API.
+
+- `canceled` event → DDB status set to `CANCELLED`
+- `completed` event → Lambda calls `iot:DescribeJob`, inspects `jobProcessDetails` counts, sets `SUCCEEDED` or `FAILED` accordingly
+
+> Jobs that complete via the normal device MQTT path are already handled by `digilux_ota_status_handler`. The lifecycle sync only fires for out-of-band changes.
+
+#### Trigger 3 — Auto-Cancel on Recall
+
+When an artefact is recalled via `PATCH /packages/{packageName}/{version}/activate` with `{"recall": true}`, the `digilux_ota_package_activate` Lambda automatically:
+- Cancels all **QUEUED** IoT Jobs for that package version (via `iot:CancelJob`)
+- Updates their DDB status to `CANCELLED` with `cancelReason: "Package recalled: <reason>"`
+- Returns `cancelledDeployments[]` and `inProgressDeployments[]` in the recall response
+
+**IN_PROGRESS** deployments are not force-cancelled (device may already be installing) — a warning list is returned so the admin can monitor and abort manually if needed.
+
+**Recall response example:**
+```json
+{
+  "message": "Package HomeAssistantUtility v4.5.0 recalled",
+  "cancelledDeployments": ["digilux-ota-HomeAssistantUtility-4-5-0-1787934251"],
+  "inProgressDeployments": []
+}
+```
 
 ---
 
@@ -1678,6 +1725,7 @@ Results are printed to stdout and saved to `infrastructure/e2e_test_results.txt`
 | `1.8` | 2026-08-16 | Digilux Engineering | REJECTED status with error codes: `digilux_ota_status_handler` now parses `statusDetails.errorCode` from controller, resolves reason from `ERROR_CODE_MAP`, stores `errorCode`+`errorReason` in job device statuses, clears `pendingJobId` on rejection, emits `DEVICE_UPDATE_REJECTED` audit event; security codes (`10002–10006`) also emit `SECURITY_ALERT`; job-level status mapped to `FAILED` on REJECTED; admin job document renamed `operation` → `operationType` (integer) and removed `mandatory` field; user-initiated MQTT payload aligned: same `operationType` integer, removed `mandatory`; new Section 6.9 (REJECTED error code table); security section updated (removed mandatory, added tamper-detection row) |
 | `1.9` | 2026-08-19 | Digilux Engineering | Beta users management: new Lambda `digilux_ota_beta_users` with `GET`/`POST`/`DELETE /ota/beta-users`; auto-resolves email → Cognito userId → deviceId via `userId-index` GSI on `digilux_device_data`; new DynamoDB table `digilux_ota_beta_users`; new Section 4.8a; `digilux_ota_user_consent` aligned to use integer `operationType` (via `OPERATION_TYPE_MAP`) in IoT Job document — consistent with admin-side `job_create`; e2e suite at 70/70 PASS |
 | `2.0` | 2026-08-24 | Digilux Engineering | Release type lifecycle: added `BETA` (Beta/UAT) and `CUSTOM` release types; removed `UAT`; BETA→PROD promotion (`{"promote":true}` on activate endpoint) — permanent, PROD is terminal; SUPERSEDED→ACTIVE rollback (`{"restore":true}`) for buggy-version recovery; semver-aware auto-supersede in `artifact_processor` — new upload only supersedes lower-version ACTIVE entries, not higher ones; BETA multi-target deployment (`rolloutStage=BETA`, `targetIds` from beta-users list); CUSTOM deployment (`rolloutStage=CUSTOM`, explicit `targetIds`, CUSTOM-tagged artefacts only); S3 HTTPS-only bucket policy (DenyNonHTTPS on `digilux-ota-artifacts`); `thingName` convention changed from `digilux-{mac}` to `deviceId` for new device registrations; admin UI: Beta(UAT) display labels, multi-select beta user checkboxes, CUSTOM tag-input, Promote/Restore buttons, SUPERSEDED status filter |
+| `2.6` | 2026-08-28 | Digilux Engineering | Job lifecycle management: new Lambda `digilux_ota_job_sync` with two triggers — (1) EventBridge daily staleness check auto-cancels QUEUED/IN_PROGRESS jobs older than 7 days; (2) IoT Rule `digilux_ota_job_lifecycle_sync` syncs DDB immediately when jobs are cancelled/completed outside the OTA API; auto-cancel on recall: `package_activate` now cancels all QUEUED deployments when an artefact is recalled, returning `cancelledDeployments[]` and `inProgressDeployments[]` in the recall response; beta users: `thingName` removed from `digilux_ota_beta_users` table — `job_create` now looks up `thingName` fresh from `digilux_device_data` at deployment time (single source of truth, no stale snapshots); DELETE endpoint changed from `/{email}` to `/{userId}`; admin UI: file extension validation per device type (`.jar`/`.tar`/`.bin`/misc), form auto-resets after upload (no "Upload Another" button), Rollback button restricted to `SUCCEEDED`/`FAILED` deployments only; new Section 4.8b; 70/70 e2e PASS |
 | `2.5` | 2026-08-25 | Digilux Engineering | Remove CloudFront — artifact download URLs now use S3 pre-signed GET URLs directly (CloudFront removed for cost reasons); removed `CLOUDFRONT_DOMAIN`, `CLOUDFRONT_KEY_PAIR_ID`, `CLOUDFRONT_PRIVATE_KEY_SECRET` env vars from `digilux_ota_user_get_download_link`; reverted S3 bucket policy to `DenyNonHTTPS`-only (removed `AllowCloudFrontOAC`); updated `01_s3.sh` accordingly; download URL format changes from `https://d2lr14tk4wqz8z.cloudfront.net/...` to `https://digilux-ota-artifacts.s3.amazonaws.com/...`; TTL tiers unchanged |
 | `2.4` | 2026-08-25 | Digilux Engineering | CloudFront artifact delivery fix: S3 bucket policy was missing the `AllowCloudFrontOAC` statement required for OAC-based distributions — CloudFront returned HTTP 403 on all signed download URLs even though the key pair and signing logic were correct; added `s3:GetObject` allow for `cloudfront.amazonaws.com` service principal scoped to distribution `E2P92N4YRVH40S`; updated `01_s3.sh` so the policy is reproducible on fresh deploys; full 13-step API smoke test now passes 13/13 — all endpoints verified healthy for integration team handoff |
 | `2.3` | 2026-08-25 | Digilux Engineering | Non-admin package visibility: `GET /ota/packages` no longer requires `ota-admin` group — any authenticated user can list packages (read-only); admin UI Packages page and nav link now accessible to all users; action buttons (Publish/Withdraw/Recall/Promote/Restore/Delete) remain admin-only; non-admin badge changed from "Upload only" to "Read only" |

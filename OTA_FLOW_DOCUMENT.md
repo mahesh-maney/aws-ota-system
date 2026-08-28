@@ -1,7 +1,7 @@
 # Digilux OTA System — Flow Document
 
-**Version:** 1.4
-**Date:** 2026-08-24
+**Version:** 1.5
+**Date:** 2026-08-28
 **Audience:** Engineering, Integration, QA Teams
 
 This document describes all key flows in the Digilux OTA update system — from package upload through to device installation and failure recovery. Each flow shows the components involved, the sequence of operations, and the MQTT topics or API calls used.
@@ -20,6 +20,7 @@ This document describes all key flows in the Digilux OTA update system — from 
 | `digilux_ota_compatibility_check` | Lambda | Returns available updates for a specific device |
 | `digilux_ota_status_handler` | Lambda | Receives device status via IoT Rule; updates DynamoDB |
 | `digilux_ota_device_register` | Lambda | Receives device registration on agent startup; upserts OTA fields (`thingName`, `installedVersions`, `pendingJobId`) on `digilux_device_data` |
+| `digilux_ota_job_sync` | Lambda | Two triggers: (1) EventBridge daily — cancels stale QUEUED/IN_PROGRESS jobs older than 7 days; (2) IoT Rule — syncs DDB immediately when jobs are cancelled/completed outside the OTA API |
 | **S3** (`digilux-ota-artifacts`) | Storage | Stores firmware/app binaries. Key structure: `Network_controller_firmware/{deviceType}/{version}/{fileName}` |
 | **DynamoDB** | Storage | `digilux_ota_packages`, `digilux_ota_jobs`, `digilux_ota_compatibility`, `digilux_device_data` (OTA fields: `installedVersions`, `pendingJobId`, `thingName`) |
 | **AWS IoT Core** | Messaging | Delivers jobs to devices over MQTT (port 8883, mTLS) |
@@ -949,6 +950,93 @@ Admin            API Gateway    compatibility_check Lambda    DynamoDB
 
 ---
 
+## Flow 14: Job Lifecycle Sync
+
+Two background mechanisms keep `digilux_ota_jobs` consistent with IoT Core without manual intervention.
+
+### Flow 14a: Daily Staleness Check
+
+```
+EventBridge (rate: 1 day)
+         │
+         ▼
+digilux_ota_job_sync Lambda
+         │  Scan digilux_ota_jobs WHERE status IN [QUEUED, IN_PROGRESS]
+         │  AND createdAt < (now - 7 days)
+         │
+         ├─ IoT job already terminal (COMPLETED/CANCELED)?
+         │       └─ Update DDB: SUCCEEDED or CANCELLED + syncReason
+         │
+         ├─ IoT job still active?
+         │       └─ iot:CancelJob (reasonCode=STALE_JOB)
+         │          Update DDB: CANCELLED
+         │
+         └─ IoT job not found?
+                 └─ Update DDB: CANCELLED (orphan cleanup)
+```
+
+**Covers:** Device never comes online after deployment is queued; jobs stuck in any non-terminal state beyond the stale threshold.
+
+### Flow 14b: IoT Lifecycle Event Sync
+
+```
+IoT Core (job canceled/completed out-of-band)
+         │
+         ▼
+IoT Rule: digilux_ota_job_lifecycle_sync
+Topic: $aws/events/job/+/+
+         │  SQL injects jobId + eventType
+         │
+         ▼
+digilux_ota_job_sync Lambda
+         │  Get job from digilux_ota_jobs — skip if not found (unrelated IoT job)
+         │
+         ├─ eventType = "canceled"
+         │       └─ DDB status → CANCELLED
+         │
+         └─ eventType = "completed"
+                 └─ iot:DescribeJob → inspect jobProcessDetails
+                    (failed=0, timedOut=0, succeeded>0) → SUCCEEDED
+                    else → FAILED
+```
+
+**Covers:** Admin cancels a job directly in the IoT Console, CLI, or SDK outside the OTA API.
+
+> The normal device MQTT path (status updates via `iot/device/+/ota/status`) is handled by `digilux_ota_status_handler` — the lifecycle sync only fires for changes made outside the OTA system.
+
+### Flow 14c: Auto-Cancel on Recall
+
+```
+Admin recalls a package
+POST /packages/{name}/{version}/activate  { "recall": true }
+         │
+         ▼
+digilux_ota_package_activate Lambda
+         │  Mark package RECALLED in digilux_ota_packages
+         │
+         │  Scan digilux_ota_jobs for QUEUED / IN_PROGRESS
+         │  WHERE packageName = name AND version = version
+         │
+         ├─ QUEUED jobs
+         │       └─ iot:CancelJob (reasonCode=PACKAGE_RECALLED)
+         │          DDB status → CANCELLED
+         │
+         └─ IN_PROGRESS jobs
+                 └─ Logged as warning; returned in response for manual review
+                    (device may already be installing — do not force-cancel)
+```
+
+**Response includes:**
+```json
+{
+  "message": "Package HomeAssistantUtility v4.5.0 recalled",
+  "cancelledDeployments": ["digilux-ota-HomeAssistantUtility-4-5-0-..."],
+  "inProgressDeployments": []
+}
+```
+
+---
+
 ## MQTT Topics Reference
 
 | Topic | Direction | Purpose |
@@ -1017,3 +1105,4 @@ Key: `packageName` (hash) + `version` (range)
 | `1.2` | 2026-08-19 | Beta users flow: `device_register` now sets `thingName = deviceId`; `digilux_ota_beta_users` Lambda resolves email → deviceId via Cognito + `digilux_device_data`; BETA multi-target deployment creates one IoT Job for all registered beta users |
 | `1.3` | 2026-08-24 | Package lifecycle management: new Flow 2b (Promote / Restore); `artifact_processor` semver-aware auto-supersede on ACTIVE promotion; `package_activate` extended with `promote` (BETA→PROD, terminal) and `restore` (SUPERSEDED→ACTIVE rollback) actions; new release types `BETA` and `CUSTOM`; CUSTOM rollout stage for targeted per-device deployments |
 | `1.4` | 2026-08-24 | S3 key structure change: artifacts now stored under `Network_controller_firmware/{deviceType}/{version}/{fileName}`; `artifact_processor` detects old vs new key format transparently; `job_create` device lookup migrated from retired `digilux_device_inventory` to `digilux_device_data` (composite key query by `deviceId`); `operationType` integers documented (1–5); new device type `Network_controller_zigbee_stack_firmware` = `operationType 5` |
+| `1.5` | 2026-08-28 | Job lifecycle management: new Flow 14 (14a staleness check, 14b IoT lifecycle event sync, 14c auto-cancel on recall); new Lambda `digilux_ota_job_sync`; IoT Rule `digilux_ota_job_lifecycle_sync`; EventBridge rule (rate: 1 day); `thingName` removed from `digilux_ota_beta_users` — `job_create` now queries `digilux_device_data` fresh at BETA deployment time |

@@ -1,7 +1,7 @@
 {
   "info": {
     "name": "Digilux OTA API v1.8",
-    "description": "REST API collection for the Digilux Over-The-Air (OTA) update system.\n\n**Base URL:** `https://iot.digilux.co.in/smarthome`\n\n---\n\n## Auth Tokens\n\n**Admin token** (for Packages, Deployments, Device folders):\n```\naws cognito-idp initiate-auth \\\n  --auth-flow USER_PASSWORD_AUTH \\\n  --client-id q7189jitfkk4ttesepkgls491 \\\n  --auth-parameters USERNAME=mahesh.maney@gmail.com,PASSWORD=Admin@1234 \\\n  --region ap-south-1 \\\n  --query 'AuthenticationResult.IdToken' \\\n  --output text\n```\nPaste into the `admin_token` collection variable.\n\n**User token** (for End User Updates folder):\n```\naws cognito-idp initiate-auth \\\n  --auth-flow USER_PASSWORD_AUTH \\\n  --client-id q7189jitfkk4ttesepkgls491 \\\n  --auth-parameters USERNAME=demotesthw5@yopmail.com,PASSWORD=DigiluxOTA@Test1 \\\n  --region ap-south-1 \\\n  --query 'AuthenticationResult.IdToken' \\\n  --output text\n```\nPaste into the `user_token` collection variable.\n\n---\n\n## Folder Structure\n\n| Folder | Auth | Description |\n|--------|------|-------------|\n| Packages | `admin_token` | Upload & manage firmware packages |\n| Device (Admin) | `admin_token` | Admin device update check |\n| Deployments | `admin_token` | Create & manage fleet deployments |\n| Full Deployment Flow | `admin_token` | End-to-end admin upload → deploy sequence |\n| End User Updates | `user_token` | User-initiated update flow (Flutter app) |\n\n---\n\n## Collection Variables\n\n| Variable | Description |\n|----------|-------------|\n| `base_url` | API base URL |\n| `admin_token` | Cognito ID token — admin group user |\n| `user_token` | Cognito ID token — regular user (owns test device) |\n| `device_id` | Test device UUID |\n| `job_id` | Auto-populated by Create Deployment / Give Consent |\n| `consent_id` | Auto-populated by Give Consent |\n| `upload_url` | Auto-populated by Get Upload URL (SINGLE mode) |\n| `upload_id` | Auto-populated by Get Upload URL (MULTIPART mode) |\n| `upload_type` | `SINGLE` or `MULTIPART` — set by Get Upload URL |\n| `package_name` | Package name for requests |\n| `package_version` | Package version for requests |",
+    "description": "REST API collection for the Digilux Over-The-Air (OTA) update system.\n\n**Base URL:** `https://iot.digilux.co.in/smarthome`\n\n---\n\n## Auth Tokens\n\n**Admin token** (for Packages, Deployments, Device folders):\n```\naws cognito-idp initiate-auth \\\n  --auth-flow USER_PASSWORD_AUTH \\\n  --client-id q7189jitfkk4ttesepkgls491 \\\n  --auth-parameters USERNAME=mahesh.maney@gmail.com,PASSWORD=Admin@1234 \\\n  --region ap-south-1 \\\n  --query 'AuthenticationResult.IdToken' \\\n  --output text\n```\nPaste into the `admin_token` collection variable.\n\n**User token** (for End User Updates folder):\n```\naws cognito-idp initiate-auth \\\n  --auth-flow USER_PASSWORD_AUTH \\\n  --client-id q7189jitfkk4ttesepkgls491 \\\n  --auth-parameters USERNAME=demotesthw5@yopmail.com,PASSWORD=DigiluxOTA@Test1 \\\n  --region ap-south-1 \\\n  --query 'AuthenticationResult.IdToken' \\\n  --output text\n```\nPaste into the `user_token` collection variable.\n\n---\n\n## Folder Structure\n\n| Folder | Auth | Description |\n|--------|------|-------------|\n| Packages | `admin_token` | Upload & manage firmware packages |\n| Device (Admin) | `admin_token` | Admin device update check |\n| Deployments | `admin_token` | Create & manage fleet deployments |\n| Full Deployment Flow | `admin_token` | End-to-end admin upload \u2192 deploy sequence |\n| End User Updates | `user_token` | User-initiated update flow (Flutter app) |\n\n---\n\n## Collection Variables\n\n| Variable | Description |\n|----------|-------------|\n| `base_url` | API base URL |\n| `admin_token` | Cognito ID token \u2014 admin group user |\n| `user_token` | Cognito ID token \u2014 regular user (owns test device) |\n| `device_id` | Test device UUID |\n| `job_id` | Auto-populated by Create Deployment / Give Consent |\n| `consent_id` | Auto-populated by Give Consent |\n| `upload_url` | Auto-populated by Get Upload URL (SINGLE mode) |\n| `upload_id` | Auto-populated by Get Upload URL (MULTIPART mode) |\n| `upload_type` | `SINGLE` or `MULTIPART` \u2014 set by Get Upload URL |\n| `package_name` | Package name for requests |\n| `package_version` | Package version for requests |",
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json",
     "_postman_id": "digilux-ota-v1-4"
   },
@@ -101,6 +101,11 @@
       "key": "upload_type",
       "value": "SINGLE",
       "type": "string"
+    },
+    {
+      "key": "beta_user_id",
+      "value": "",
+      "type": "string"
     }
   ],
   "item": [
@@ -145,7 +150,7 @@
                   "if (token) {",
                   "    pm.collectionVariables.set('admin_token', token);",
                   "    pm.test('Admin token saved', () => pm.expect(token).to.be.a('string'));",
-                  "    console.log('admin_token saved ✓');",
+                  "    console.log('admin_token saved \u2713');",
                   "} else {",
                   "    pm.test('Admin token fetch failed', () => { throw new Error(JSON.stringify(res)); });",
                   "}"
@@ -192,7 +197,7 @@
                   "if (token) {",
                   "    pm.collectionVariables.set('user_token', token);",
                   "    pm.test('User token saved', () => pm.expect(token).to.be.a('string'));",
-                  "    console.log('user_token saved ✓');",
+                  "    console.log('user_token saved \u2713');",
                   "} else {",
                   "    pm.test('User token fetch failed', () => { throw new Error(JSON.stringify(res)); });",
                   "}"
@@ -264,11 +269,11 @@
                 }
               ]
             },
-            "description": "Returns all OTA packages.\n\n**Auth:** Any authenticated user (admin or non-admin token).\n\n**Query params:**\n- `status` — filter by status (`ACTIVE`, `SUPERSEDED`, `RECALLED`, `PENDING`, `CORRUPTED`, `DELETED`). Omit or leave empty to return **all statuses**.\n- `deviceType` — filter by device type (returns all versions of that package name).\n\nPoll this endpoint after uploading a package until `status` changes from `PENDING` → `ACTIVE` (usually under 5 seconds)."
+            "description": "Returns all OTA packages.\n\n**Auth:** Any authenticated user (admin or non-admin token).\n\n**Query params:**\n- `status` \u2014 filter by status (`ACTIVE`, `SUPERSEDED`, `RECALLED`, `PENDING`, `CORRUPTED`, `DELETED`). Omit or leave empty to return **all statuses**.\n- `deviceType` \u2014 filter by device type (returns all versions of that package name).\n\nPoll this endpoint after uploading a package until `status` changes from `PENDING` \u2192 `ACTIVE` (usually under 5 seconds)."
           },
           "response": [
             {
-              "name": "200 OK — Active packages",
+              "name": "200 OK \u2014 Active packages",
               "status": "OK",
               "code": 200,
               "header": [
@@ -301,7 +306,7 @@
               }
             },
             {
-              "name": "200 OK — Empty (no packages yet)",
+              "name": "200 OK \u2014 Empty (no packages yet)",
               "status": "OK",
               "code": 200,
               "header": [
@@ -373,11 +378,11 @@
                 "upload-artefact"
               ]
             },
-            "description": "Initiates a firmware upload. Returns either a single presigned S3 URL (SINGLE mode) or per-chunk presigned URLs (MULTIPART mode).\n\n**Upload mode is selected automatically based on `totalSize`:**\n- `totalSize` not provided or ≤ 10MB → **SINGLE**: use `uploadUrl` to PUT binary directly\n- `totalSize` > 10MB → **MULTIPART**: PUT each `chunkUrls[n].url` with its chunk, then call `POST /upload-artefact/complete`\n\n**Required fields:** `deviceType`, `version`, `releaseType`, `checksum`\n\n**Optional fields:** `totalSize` (bytes), `fileName`, `releaseNotes`\n\nAfter upload, poll `GET /packages/{{package_name}}/{{package_version}}` until `status=ACTIVE`."
+            "description": "Initiates a firmware upload. Returns either a single presigned S3 URL (SINGLE mode) or per-chunk presigned URLs (MULTIPART mode).\n\n**Upload mode is selected automatically based on `totalSize`:**\n- `totalSize` not provided or \u2264 10MB \u2192 **SINGLE**: use `uploadUrl` to PUT binary directly\n- `totalSize` > 10MB \u2192 **MULTIPART**: PUT each `chunkUrls[n].url` with its chunk, then call `POST /upload-artefact/complete`\n\n**Required fields:** `deviceType`, `version`, `releaseType`, `checksum`\n\n**Optional fields:** `totalSize` (bytes), `fileName`, `releaseNotes`\n\nAfter upload, poll `GET /packages/{{package_name}}/{{package_version}}` until `status=ACTIVE`."
           },
           "response": [
             {
-              "name": "200 OK — Upload URL issued",
+              "name": "200 OK \u2014 Upload URL issued",
               "status": "OK",
               "code": 200,
               "header": [
@@ -395,7 +400,7 @@
               }
             },
             {
-              "name": "409 Conflict — Version already ACTIVE",
+              "name": "409 Conflict \u2014 Version already ACTIVE",
               "status": "Conflict",
               "code": 409,
               "header": [
@@ -413,7 +418,7 @@
               }
             },
             {
-              "name": "401 Unauthorized — Missing/invalid token",
+              "name": "401 Unauthorized \u2014 Missing/invalid token",
               "status": "Unauthorized",
               "code": 401,
               "header": [
@@ -431,7 +436,7 @@
               }
             },
             {
-              "name": "403 Forbidden — Not in admin group",
+              "name": "403 Forbidden \u2014 Not in admin group",
               "status": "Forbidden",
               "code": 403,
               "header": [
@@ -440,7 +445,7 @@
                   "value": "application/json"
                 }
               ],
-              "body": "{\n  \"error\": \"Forbidden — admin group membership required\"\n}",
+              "body": "{\n  \"error\": \"Forbidden \u2014 admin group membership required\"\n}",
               "originalRequest": {
                 "method": "POST",
                 "url": {
@@ -466,7 +471,7 @@
                 "key": "x-amz-meta-upload-token",
                 "value": "{{upload_token}}",
                 "type": "text",
-                "description": "Required — must match token from Get Upload URL response"
+                "description": "Required \u2014 must match token from Get Upload URL response"
               }
             ],
             "body": {
@@ -481,18 +486,18 @@
                 "{{upload_url}}"
               ]
             },
-            "description": "Step 2 of the upload flow. PUT the binary artifact directly to S3 using the pre-signed URL from the previous step.\n\n- **No Authorization header** — the pre-signed URL handles authentication\n- Set `Content-Type: application/octet-stream`\n- Select your binary file in Body > file tab\n- S3 returns HTTP 200 with an empty body on success\n\nAfter this completes, poll `List Packages` (with `packageName` filter) to confirm `status` moves to `ACTIVE`. The artifact processor Lambda runs SHA-256 + ECDSA signing automatically."
+            "description": "Step 2 of the upload flow. PUT the binary artifact directly to S3 using the pre-signed URL from the previous step.\n\n- **No Authorization header** \u2014 the pre-signed URL handles authentication\n- Set `Content-Type: application/octet-stream`\n- Select your binary file in Body > file tab\n- S3 returns HTTP 200 with an empty body on success\n\nAfter this completes, poll `List Packages` (with `packageName` filter) to confirm `status` moves to `ACTIVE`. The artifact processor Lambda runs SHA-256 + ECDSA signing automatically."
           },
           "response": [
             {
-              "name": "200 OK — S3 accepts the binary",
+              "name": "200 OK \u2014 S3 accepts the binary",
               "status": "OK",
               "code": 200,
               "header": [],
               "body": ""
             },
             {
-              "name": "403 Forbidden — Pre-signed URL expired",
+              "name": "403 Forbidden \u2014 Pre-signed URL expired",
               "status": "Forbidden",
               "code": 403,
               "header": [
@@ -570,7 +575,7 @@
                 "{{package_version}}"
               ]
             },
-            "description": "Returns the current status of a specific package version.\n\n**Poll this after upload until `status` is `ACTIVE` or `CORRUPTED`.**\n\n| Status | Meaning |\n|--------|---------|\n| `PENDING` | Upload in progress or artifact_processor running |\n| `ACTIVE` | Upload complete, verified, ready for deployment |\n| `CORRUPTED` | Checksum mismatch or token validation failed — re-upload required |\n\nResponse includes `sha256`, `artifactSize` once ACTIVE."
+            "description": "Returns the current status of a specific package version.\n\n**Poll this after upload until `status` is `ACTIVE` or `CORRUPTED`.**\n\n| Status | Meaning |\n|--------|---------|\n| `PENDING` | Upload in progress or artifact_processor running |\n| `ACTIVE` | Upload complete, verified, ready for deployment |\n| `CORRUPTED` | Checksum mismatch or token validation failed \u2014 re-upload required |\n\nResponse includes `sha256`, `artifactSize` once ACTIVE."
           },
           "response": [],
           "event": [
@@ -627,7 +632,7 @@
                 }
               }
             },
-            "description": "Publish (or withdraw) a firmware package so it is visible to end-user devices.\n\n`activated: true`  → package appears in user update checks (must be `status=ACTIVE` first)\n`activated: false` → withdraw / pull back the package\n\n**Path params:**\n- `packageName` — e.g. `HomeAssistantUtility`\n- `version`     — e.g. `1.2.3`\n\nThe package must be `status=ACTIVE` (set automatically by the artifact_processor Lambda after upload).\n"
+            "description": "Publish (or withdraw) a firmware package so it is visible to end-user devices.\n\n`activated: true`  \u2192 package appears in user update checks (must be `status=ACTIVE` first)\n`activated: false` \u2192 withdraw / pull back the package\n\n**Path params:**\n- `packageName` \u2014 e.g. `HomeAssistantUtility`\n- `version`     \u2014 e.g. `1.2.3`\n\nThe package must be `status=ACTIVE` (set automatically by the artifact_processor Lambda after upload).\n"
           },
           "event": [
             {
@@ -681,7 +686,7 @@
                 }
               }
             },
-            "description": "Permanently deletes a package and its S3 artifact.\n\n**Validations (in order):**\n1. Package must NOT be `ACTIVE` → `409`\n2. `reason` is required → `400`\n3. No active deployments (QUEUED / IN_PROGRESS) → `409`\n4. SUPERSEDED < 7 days → `409` with `coolingOff: true` (set `force: true` to override)\n5. S3 artifact deleted\n6. `RECALLED` → soft delete (record stays, `status=DELETED`); others → hard delete\n\n**Body:**\n- `reason` (required) — audit log entry\n- `force` (optional, default `false`) — override 7-day cooling-off for SUPERSEDED packages\n\n**Cooling-off 409 response:**\n```json\n{\n  \"coolingOff\": true,\n  \"supersededDaysAgo\": 2.3,\n  \"coolingOffDays\": 7,\n  \"error\": \"...was superseded 2.3 day(s) ago...\"\n}\n```"
+            "description": "Permanently deletes a package and its S3 artifact.\n\n**Validations (in order):**\n1. Package must NOT be `ACTIVE` \u2192 `409`\n2. `reason` is required \u2192 `400`\n3. No active deployments (QUEUED / IN_PROGRESS) \u2192 `409`\n4. SUPERSEDED < 7 days \u2192 `409` with `coolingOff: true` (set `force: true` to override)\n5. S3 artifact deleted\n6. `RECALLED` \u2192 soft delete (record stays, `status=DELETED`); others \u2192 hard delete\n\n**Body:**\n- `reason` (required) \u2014 audit log entry\n- `force` (optional, default `false`) \u2014 override 7-day cooling-off for SUPERSEDED packages\n\n**Cooling-off 409 response:**\n```json\n{\n  \"coolingOff\": true,\n  \"supersededDaysAgo\": 2.3,\n  \"coolingOffDays\": 7,\n  \"error\": \"...was superseded 2.3 day(s) ago...\"\n}\n```"
           },
           "event": [
             {
@@ -747,11 +752,11 @@
                 "available"
               ]
             },
-            "description": "Returns the installed versions and available updates for a specific device. Admin-only — no ownership check.\n\n- `deviceId` is the UUID from `digilux_device_inventory` (not the MAC-based IoT thing name)\n- `availableUpdates` is empty if the device is on the latest compatible version\n- `pendingJobId` is non-null if an active deployment is in progress\n- Version comparison uses semver integer tuples — `4.10.0 > 4.2.0`\n- `compatibleModels: []` (empty) in a package means it applies to all models\n\n**404** is returned if the OTA agent has never run on this device."
+            "description": "Returns the installed versions and available updates for a specific device. Admin-only \u2014 no ownership check.\n\n- `deviceId` is the UUID from `digilux_device_inventory` (not the MAC-based IoT thing name)\n- `availableUpdates` is empty if the device is on the latest compatible version\n- `pendingJobId` is non-null if an active deployment is in progress\n- Version comparison uses semver integer tuples \u2014 `4.10.0 > 4.2.0`\n- `compatibleModels: []` (empty) in a package means it applies to all models\n\n**404** is returned if the OTA agent has never run on this device."
           },
           "response": [
             {
-              "name": "200 OK — Update available",
+              "name": "200 OK \u2014 Update available",
               "status": "OK",
               "code": 200,
               "header": [
@@ -769,7 +774,7 @@
               }
             },
             {
-              "name": "200 OK — Up to date",
+              "name": "200 OK \u2014 Up to date",
               "status": "OK",
               "code": 200,
               "header": [
@@ -787,7 +792,7 @@
               }
             },
             {
-              "name": "404 Not Found — Device not in OTA inventory",
+              "name": "404 Not Found \u2014 Device not in OTA inventory",
               "status": "Not Found",
               "code": 404,
               "header": [
@@ -886,11 +891,11 @@
                 "deployments"
               ]
             },
-            "description": "Creates an AWS IoT Job to push a package version to a device or device group.\n\nThe `job_id` collection variable is auto-populated by the test script.\n\n**targetType values:**\n- `THING` — single device; `targetId` = device UUID\n- `THING_GROUP` — device group; `targetId` = group name (e.g. `DGX-Canary`)\n\n**rolloutStage values:**\n- `CANARY` — max 2 devices/min, first 5 devices\n- `BETA` — exponential from 2/min, ~10% of fleet\n- `PRODUCTION` — exponential from 5/min, full fleet (default)\n\n**Auto-abort criteria (fleet deployments):**\n- >10% of devices FAILED\n- >20% of devices TIMEOUT\n\n**Errors:**\n- 400 if package is not ACTIVE or device already has this version\n- 404 if package or device not found in OTA inventory"
+            "description": "Creates an AWS IoT Job to push a package version to a device or device group.\n\nThe `job_id` collection variable is auto-populated by the test script.\n\n**targetType values:**\n- `THING` \u2014 single device; `targetId` = device UUID\n- `THING_GROUP` \u2014 device group; `targetId` = group name (e.g. `DGX-Canary`)\n\n**rolloutStage values:**\n- `CANARY` \u2014 max 2 devices/min, first 5 devices\n- `BETA` \u2014 exponential from 2/min, ~10% of fleet\n- `PRODUCTION` \u2014 exponential from 5/min, full fleet (default)\n\n**Auto-abort criteria (fleet deployments):**\n- >10% of devices FAILED\n- >20% of devices TIMEOUT\n\n**Errors:**\n- 400 if package is not ACTIVE or device already has this version\n- 404 if package or device not found in OTA inventory"
           },
           "response": [
             {
-              "name": "201 Created — Deployment queued",
+              "name": "201 Created \u2014 Deployment queued",
               "status": "Created",
               "code": 201,
               "header": [
@@ -908,7 +913,7 @@
               }
             },
             {
-              "name": "400 Bad Request — Already installed",
+              "name": "400 Bad Request \u2014 Already installed",
               "status": "Bad Request",
               "code": 400,
               "header": [
@@ -926,7 +931,7 @@
               }
             },
             {
-              "name": "400 Bad Request — Package not ACTIVE",
+              "name": "400 Bad Request \u2014 Package not ACTIVE",
               "status": "Bad Request",
               "code": 400,
               "header": [
@@ -944,7 +949,7 @@
               }
             },
             {
-              "name": "404 Not Found — Package not found",
+              "name": "404 Not Found \u2014 Package not found",
               "status": "Not Found",
               "code": 404,
               "header": [
@@ -989,7 +994,7 @@
                 {
                   "key": "limit",
                   "value": "20",
-                  "description": "Max results (1–100, default 20)"
+                  "description": "Max results (1\u2013100, default 20)"
                 }
               ]
             },
@@ -1031,7 +1036,7 @@
                   "if (terminal.includes(status)) {",
                   "    pm.test('Job reached terminal state: ' + status, () => pm.expect(terminal).to.include(status));",
                   "} else {",
-                  "    console.log('Job still in progress — re-run to poll');",
+                  "    console.log('Job still in progress \u2014 re-run to poll');",
                   "}"
                 ],
                 "type": "text/javascript"
@@ -1060,11 +1065,11 @@
                 "{{job_id}}"
               ]
             },
-            "description": "Returns full status of a deployment including per-device progress.\n\n**Job status values:**\n- `QUEUED` — created, device not yet acknowledged\n- `IN_PROGRESS` — device is downloading/installing\n- `SUCCEEDED` — installed and health check passed\n- `FAILED` — failed; see `deviceStatuses[id].statusDetail`\n- `CANCELLED` — aborted by admin\n- `REJECTED` — device rejected the job (precondition not met)\n\n**NEEDS_RECOVERY** in `statusDetail` means both install AND rollback failed. Device requires manual intervention (SSH access)."
+            "description": "Returns full status of a deployment including per-device progress.\n\n**Job status values:**\n- `QUEUED` \u2014 created, device not yet acknowledged\n- `IN_PROGRESS` \u2014 device is downloading/installing\n- `SUCCEEDED` \u2014 installed and health check passed\n- `FAILED` \u2014 failed; see `deviceStatuses[id].statusDetail`\n- `CANCELLED` \u2014 aborted by admin\n- `REJECTED` \u2014 device rejected the job (precondition not met)\n\n**NEEDS_RECOVERY** in `statusDetail` means both install AND rollback failed. Device requires manual intervention (SSH access)."
           },
           "response": [
             {
-              "name": "200 OK — SUCCEEDED",
+              "name": "200 OK \u2014 SUCCEEDED",
               "status": "OK",
               "code": 200,
               "header": [
@@ -1082,7 +1087,7 @@
               }
             },
             {
-              "name": "200 OK — IN_PROGRESS",
+              "name": "200 OK \u2014 IN_PROGRESS",
               "status": "OK",
               "code": 200,
               "header": [
@@ -1100,7 +1105,7 @@
               }
             },
             {
-              "name": "200 OK — FAILED with rollback",
+              "name": "200 OK \u2014 FAILED with rollback",
               "status": "OK",
               "code": 200,
               "header": [
@@ -1109,7 +1114,7 @@
                   "value": "application/json"
                 }
               ],
-              "body": "{\n  \"jobId\": \"digilux-ota-controller-app-4-0-0-1785475706\",\n  \"packageName\": \"controller-app\",\n  \"version\": \"4.0.0\",\n  \"status\": \"FAILED\",\n  \"deviceStatuses\": {\n    \"edb39bba-baf1-4700-968c-a42228e53aa0\": {\n      \"status\": \"FAILED\",\n      \"progress\": 0,\n      \"statusDetail\": \"Install failed — previous version restored\",\n      \"updatedAt\": 1785475820000\n    }\n  },\n  \"iotJobStatus\": \"FAILED\"\n}",
+              "body": "{\n  \"jobId\": \"digilux-ota-controller-app-4-0-0-1785475706\",\n  \"packageName\": \"controller-app\",\n  \"version\": \"4.0.0\",\n  \"status\": \"FAILED\",\n  \"deviceStatuses\": {\n    \"edb39bba-baf1-4700-968c-a42228e53aa0\": {\n      \"status\": \"FAILED\",\n      \"progress\": 0,\n      \"statusDetail\": \"Install failed \u2014 previous version restored\",\n      \"updatedAt\": 1785475820000\n    }\n  },\n  \"iotJobStatus\": \"FAILED\"\n}",
               "originalRequest": {
                 "method": "GET",
                 "url": {
@@ -1118,7 +1123,7 @@
               }
             },
             {
-              "name": "200 OK — NEEDS_RECOVERY (critical — manual intervention required)",
+              "name": "200 OK \u2014 NEEDS_RECOVERY (critical \u2014 manual intervention required)",
               "status": "OK",
               "code": 200,
               "header": [
@@ -1127,7 +1132,7 @@
                   "value": "application/json"
                 }
               ],
-              "body": "{\n  \"jobId\": \"digilux-ota-controller-app-4-0-0-1785475706\",\n  \"packageName\": \"controller-app\",\n  \"version\": \"4.0.0\",\n  \"status\": \"FAILED\",\n  \"deviceStatuses\": {\n    \"edb39bba-baf1-4700-968c-a42228e53aa0\": {\n      \"status\": \"FAILED\",\n      \"progress\": 0,\n      \"statusDetail\": \"NEEDS_RECOVERY: install failed and rollback failed — manual intervention required\",\n      \"updatedAt\": 1785475820000\n    }\n  },\n  \"iotJobStatus\": \"FAILED\"\n}",
+              "body": "{\n  \"jobId\": \"digilux-ota-controller-app-4-0-0-1785475706\",\n  \"packageName\": \"controller-app\",\n  \"version\": \"4.0.0\",\n  \"status\": \"FAILED\",\n  \"deviceStatuses\": {\n    \"edb39bba-baf1-4700-968c-a42228e53aa0\": {\n      \"status\": \"FAILED\",\n      \"progress\": 0,\n      \"statusDetail\": \"NEEDS_RECOVERY: install failed and rollback failed \u2014 manual intervention required\",\n      \"updatedAt\": 1785475820000\n    }\n  },\n  \"iotJobStatus\": \"FAILED\"\n}",
               "originalRequest": {
                 "method": "GET",
                 "url": {
@@ -1162,11 +1167,11 @@
                 "abort"
               ]
             },
-            "description": "Cancels the IoT Job for all devices not yet in a terminal state.\n\n**Behaviour:** `force=false` (default) — devices already downloading or installing are NOT interrupted. Only `QUEUED` executions are cancelled.\n\nDevices already in a terminal state (SUCCEEDED, FAILED) are unaffected."
+            "description": "Cancels the IoT Job for all devices not yet in a terminal state.\n\n**Behaviour:** `force=false` (default) \u2014 devices already downloading or installing are NOT interrupted. Only `QUEUED` executions are cancelled.\n\nDevices already in a terminal state (SUCCEEDED, FAILED) are unaffected."
           },
           "response": [
             {
-              "name": "200 OK — Aborted",
+              "name": "200 OK \u2014 Aborted",
               "status": "OK",
               "code": 200,
               "header": [
@@ -1184,7 +1189,7 @@
               }
             },
             {
-              "name": "404 Not Found — Job not found",
+              "name": "404 Not Found \u2014 Job not found",
               "status": "Not Found",
               "code": 404,
               "header": [
@@ -1206,8 +1211,314 @@
       ]
     },
     {
+      "name": "Beta Users",
+      "item": [
+        {
+          "name": "List Beta Users",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "{{admin_token}}",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/ota/beta-users",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "ota",
+                "beta-users"
+              ]
+            },
+            "description": "Lists all enrolled beta users. Email is resolved live from Cognito \u2014 not stored in DynamoDB. `thingName` is not stored; it is looked up from `digilux_device_data` at deployment time."
+          },
+          "response": [
+            {
+              "name": "200 OK",
+              "status": "OK",
+              "code": 200,
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "body": "{\n  \"users\": [\n    {\n      \"userId\": \"a1b2c3d4-e5f6-7890-abcd-ef1234567890\",\n      \"deviceId\": \"edb39bba-baf1-4700-968c-a42228e53aa0\",\n      \"email\": \"user@example.com\",\n      \"addedAt\": \"2026-08-28T07:01:24Z\",\n      \"addedBy\": \"admin@digilux.co.in\"\n    }\n  ],\n  \"count\": 1\n}",
+              "originalRequest": {
+                "method": "GET",
+                "url": {
+                  "raw": "{{base_url}}/api/v1/ota/beta-users"
+                }
+              }
+            }
+          ]
+        },
+        {
+          "name": "Add Beta User",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "const res = pm.response.json();",
+                  "if (res.userId) {",
+                  "    pm.collectionVariables.set('beta_user_id', res.userId);",
+                  "    console.log('beta_user_id saved:', res.userId);",
+                  "}",
+                  "pm.test('Status is 201', () => pm.response.to.have.status(201));",
+                  "pm.test('userId present', () => pm.expect(res.userId).to.be.a('string').and.not.empty);",
+                  "pm.test('deviceId present', () => pm.expect(res.deviceId).to.be.a('string').and.not.empty);"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "{{admin_token}}",
+                "type": "text"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"user@example.com\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{base_url}}/api/v1/ota/beta-users",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "ota",
+                "beta-users"
+              ]
+            },
+            "description": "Enrolls a user as a beta tester by email.\n\n**Resolution chain:**\n1. Cognito `AdminGetUser` by email \u2192 `userId`\n2. `digilux_device_data` query via `userId-index` GSI \u2192 `deviceId` (confirms device exists)\n3. Writes `{ userId, deviceId, addedAt, addedBy }` to `digilux_ota_beta_users`\n\nEmail and thingName are **not stored**.\n\nThe `beta_user_id` collection variable is auto-set by the test script.\n\n**Errors:**\n- `400` \u2014 email missing\n- `404` \u2014 email not found in Cognito\n- `404` \u2014 no device registered for that user\n- `409` \u2014 user already enrolled"
+          },
+          "response": [
+            {
+              "name": "201 Created",
+              "status": "Created",
+              "code": 201,
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "body": "{\n  \"userId\": \"a1b2c3d4-e5f6-7890-abcd-ef1234567890\",\n  \"deviceId\": \"edb39bba-baf1-4700-968c-a42228e53aa0\",\n  \"email\": \"user@example.com\",\n  \"addedAt\": \"2026-08-28T07:01:24Z\",\n  \"addedBy\": \"admin@digilux.co.in\"\n}",
+              "originalRequest": {
+                "method": "POST",
+                "url": {
+                  "raw": "{{base_url}}/api/v1/ota/beta-users"
+                }
+              }
+            },
+            {
+              "name": "404 Not Found \u2014 No device",
+              "status": "Not Found",
+              "code": 404,
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "body": "{\n  \"error\": \"No device registered for user@example.com. User must complete onboarding first.\"\n}",
+              "originalRequest": {
+                "method": "POST",
+                "url": {
+                  "raw": "{{base_url}}/api/v1/ota/beta-users"
+                }
+              }
+            },
+            {
+              "name": "409 Conflict \u2014 Already enrolled",
+              "status": "Conflict",
+              "code": 409,
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "body": "{\n  \"error\": \"user@example.com is already a beta user\"\n}",
+              "originalRequest": {
+                "method": "POST",
+                "url": {
+                  "raw": "{{base_url}}/api/v1/ota/beta-users"
+                }
+              }
+            }
+          ]
+        },
+        {
+          "name": "Remove Beta User",
+          "request": {
+            "method": "DELETE",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "{{admin_token}}",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/ota/beta-users/{{beta_user_id}}",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "ota",
+                "beta-users",
+                "{{beta_user_id}}"
+              ]
+            },
+            "description": "Removes a user from the beta program by Cognito `userId` (UUID from `GET /beta-users` response).\n\nUse the `{{beta_user_id}}` variable set by the Add Beta User request, or paste the `userId` directly."
+          },
+          "response": [
+            {
+              "name": "200 OK",
+              "status": "OK",
+              "code": 200,
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "body": "{\n  \"message\": \"Beta user removed\"\n}",
+              "originalRequest": {
+                "method": "DELETE",
+                "url": {
+                  "raw": "{{base_url}}/api/v1/ota/beta-users/{{beta_user_id}}"
+                }
+              }
+            },
+            {
+              "name": "404 Not Found",
+              "status": "Not Found",
+              "code": 404,
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "body": "{\n  \"error\": \"User not found in beta users list\"\n}",
+              "originalRequest": {
+                "method": "DELETE",
+                "url": {
+                  "raw": "{{base_url}}/api/v1/ota/beta-users/{{beta_user_id}}"
+                }
+              }
+            }
+          ]
+        },
+        {
+          "name": "Create BETA Deployment",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "const res = pm.response.json();",
+                  "if (res.jobId) {",
+                  "    pm.collectionVariables.set('job_id', res.jobId);",
+                  "    console.log('job_id saved:', res.jobId);",
+                  "}",
+                  "pm.test('Status is 201', () => pm.response.to.have.status(201));",
+                  "pm.test('rolloutStage is BETA', () => pm.expect(res.rolloutStage).to.eql('BETA'));",
+                  "pm.test('targetType is THING_LIST', () => pm.expect(res.targetType).to.eql('THING_LIST'));"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "{{admin_token}}",
+                "type": "text"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"packageName\": \"{{package_name}}\",\n  \"version\": \"{{package_version}}\",\n  \"rolloutStage\": \"BETA\",\n  \"targetIds\": [\"{{device_id}}\"]\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{base_url}}/api/v1/ota/deployments",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "ota",
+                "deployments"
+              ]
+            },
+            "description": "Creates a BETA deployment targeting specific enrolled beta devices.\n\n`targetIds` \u2014 array of device UUIDs from the `GET /beta-users` response (`deviceId` field).\n\n`thingName` is resolved fresh from `digilux_device_data` at deployment time \u2014 not from the beta users table.\n\nCreates a single IoT Job targeting all specified devices as a `THING_LIST`. Max rate: 2 devices/min."
+          },
+          "response": [
+            {
+              "name": "201 Created",
+              "status": "Created",
+              "code": 201,
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "body": "{\n  \"jobId\": \"digilux-ota-HomeAssistantUtility-4-5-0-1787939229\",\n  \"iotJobArn\": \"arn:aws:iot:ap-south-1:986906626244:job/digilux-ota-HomeAssistantUtility-4-5-0-1787939229\",\n  \"packageName\": \"HomeAssistantUtility\",\n  \"version\": \"4.5.0\",\n  \"targetType\": \"THING_LIST\",\n  \"targetId\": \"edb39bba-baf1-4700-968c-a42228e53aa0\",\n  \"rolloutStage\": \"BETA\",\n  \"status\": \"QUEUED\"\n}",
+              "originalRequest": {
+                "method": "POST",
+                "url": {
+                  "raw": "{{base_url}}/api/v1/ota/deployments"
+                }
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
       "name": "Full Deployment Flow (Admin)",
-      "description": "End-to-end admin flow: upload package → wait for ACTIVE → deploy → poll until done.\n\nRun these requests in order. Variables are auto-populated by test scripts.\n\n**Auth:** `admin_token`",
+      "description": "End-to-end admin flow: upload package \u2192 wait for ACTIVE \u2192 deploy \u2192 poll until done.\n\nRun these requests in order. Variables are auto-populated by test scripts.\n\n**Auth:** `admin_token`",
       "auth": {
         "type": "apikey",
         "apikey": [
@@ -1282,7 +1593,7 @@
                 "upload-artefact"
               ]
             },
-            "description": "Request a pre-signed S3 upload URL for a new firmware package.\n\n**Required fields:**\n| Field | Description | Example |\n|-------|-------------|---------|\n| `deviceType` | One of the 4 supported device types | `Network_controller_firmware` |\n| `version` | Semantic version string | `1.2.3` |\n| `releaseType` | `PROD` (all devices) or `UAT` (canary group only) | `PROD` |\n\n**Supported `deviceType` values:**\n| deviceType | Derived filename | operationType |\n|---|---|---|\n| `Network_controller_firmware` | `HomeAssistantUtility-{version}.jar` | 1 |\n| `Network_controller_zigbee_firmware` | `ZigbeeFirmware-{version}.tar` | 2 |\n| `Network_controller_Z2M_Firmware` | `Z2MFirmware-{version}.bin` | 3 |\n| `Network_controller_Miscellaneous` | `NetControllerMisc-{version}.py` | 4 |\n| `Network_controller_zigbee_stack_firmware` | `ZigbeeStackFirmware-{version}.bin` | 5 |\n\n**S3 key format:** `Network_controller_firmware/{deviceType}/{version}/{fileName}`\n\n**Response:** `uploadUrl` (PUT to this), `s3Key`, `packageName`, `status=PENDING`\n\n**Next step:** PUT the binary to `uploadUrl` → artifact_processor promotes to `ACTIVE` automatically."
+            "description": "Request a pre-signed S3 upload URL for a new firmware package.\n\n**Required fields:**\n| Field | Description | Example |\n|-------|-------------|---------|\n| `deviceType` | One of the 4 supported device types | `Network_controller_firmware` |\n| `version` | Semantic version string | `1.2.3` |\n| `releaseType` | `PROD` (all devices) or `UAT` (canary group only) | `PROD` |\n\n**Supported `deviceType` values:**\n| deviceType | Derived filename | operationType |\n|---|---|---|\n| `Network_controller_firmware` | `HomeAssistantUtility-{version}.jar` | 1 |\n| `Network_controller_zigbee_firmware` | `ZigbeeFirmware-{version}.tar` | 2 |\n| `Network_controller_Z2M_Firmware` | `Z2MFirmware-{version}.bin` | 3 |\n| `Network_controller_Miscellaneous` | `NetControllerMisc-{version}.py` | 4 |\n| `Network_controller_zigbee_stack_firmware` | `ZigbeeStackFirmware-{version}.bin` | 5 |\n\n**S3 key format:** `Network_controller_firmware/{deviceType}/{version}/{fileName}`\n\n**Response:** `uploadUrl` (PUT to this), `s3Key`, `packageName`, `status=PENDING`\n\n**Next step:** PUT the binary to `uploadUrl` \u2192 artifact_processor promotes to `ACTIVE` automatically."
           },
           "response": []
         },
@@ -1302,7 +1613,7 @@
                 "key": "x-amz-meta-upload-token",
                 "value": "{{upload_token}}",
                 "type": "text",
-                "description": "Required — must match token from Get Upload URL response"
+                "description": "Required \u2014 must match token from Get Upload URL response"
               }
             ],
             "body": {
@@ -1334,7 +1645,7 @@
                   "    console.log('Package status:', pkg.status);",
                   "    pm.test('Package is ACTIVE', () => pm.expect(pkg.status).to.eql('ACTIVE'));",
                   "} else {",
-                  "    console.log('Package not found yet — re-run in a few seconds');",
+                  "    console.log('Package not found yet \u2014 re-run in a few seconds');",
                   "}"
                 ],
                 "type": "text/javascript"
@@ -1363,7 +1674,7 @@
                 "{{package_version}}"
               ]
             },
-            "description": "Poll this endpoint after the S3 upload until `status` becomes `ACTIVE` or `CORRUPTED`. Typically takes 1–5 seconds for artifact_processor to run."
+            "description": "Poll this endpoint after the S3 upload until `status` becomes `ACTIVE` or `CORRUPTED`. Typically takes 1\u20135 seconds for artifact_processor to run."
           },
           "response": []
         },
@@ -1466,7 +1777,7 @@
                   "        pm.test('No failed devices', () => pm.expect(res.iotStatus.numberOfFailedThings).to.eql(0));",
                   "    }",
                   "} else {",
-                  "    console.log('Still in progress — re-run to poll again');",
+                  "    console.log('Still in progress \u2014 re-run to poll again');",
                   "}"
                 ],
                 "type": "text/javascript"
@@ -1495,7 +1806,7 @@
                 "{{job_id}}"
               ]
             },
-            "description": "Re-run every 10–15 seconds until status reaches a terminal state."
+            "description": "Re-run every 10\u201315 seconds until status reaches a terminal state."
           },
           "response": []
         }
@@ -1503,7 +1814,7 @@
     },
     {
       "name": "End User Updates",
-      "description": "User-initiated OTA update flow for the Flutter (homeowner) app.\n\n**Auth:** `user_token` — regular Cognito user, NO admin group required.\n\n**Two available flows:**\n\n1. **Consent Flow** — Creates an IoT Job; device polls AWS IoT for the job and downloads via HTTPS. Best for reliable, trackable updates.\n   - Check → Consent → Poll Status\n\n2. **App-Mediated Flow** — No IoT Job; Lambda returns the download URL to the app AND publishes it to the device over MQTT simultaneously. Lighter weight.\n   - Check → Get Download Link\n\n**Security:** Users can only see and update devices they own (verified via `digilux_device_data` `userId-index` GSI).",
+      "description": "User-initiated OTA update flow for the Flutter (homeowner) app.\n\n**Auth:** `user_token` \u2014 regular Cognito user, NO admin group required.\n\n**Two available flows:**\n\n1. **Consent Flow** \u2014 Creates an IoT Job; device polls AWS IoT for the job and downloads via HTTPS. Best for reliable, trackable updates.\n   - Check \u2192 Consent \u2192 Poll Status\n\n2. **App-Mediated Flow** \u2014 No IoT Job; Lambda returns the download URL to the app AND publishes it to the device over MQTT simultaneously. Lighter weight.\n   - Check \u2192 Get Download Link\n\n**Security:** Users can only see and update devices they own (verified via `digilux_device_data` `userId-index` GSI).",
       "auth": {
         "type": "apikey",
         "apikey": [
@@ -1563,11 +1874,11 @@
                 "available-updates"
               ]
             },
-            "description": "Returns all controller devices owned by the calling user and any available updates for each.\n\n- Ownership determined by `userId` (`sub` claim) in the Cognito JWT\n- Only devices in `digilux_device_data` under this `userId` are returned\n- `otaStatus: NOT_REGISTERED` — device has never run the OTA agent\n- Version comparison uses semver integer tuples — `4.10.0 > 4.2.0`\n- `pendingJobId` non-null means an update is already in progress"
+            "description": "Returns all controller devices owned by the calling user and any available updates for each.\n\n- Ownership determined by `userId` (`sub` claim) in the Cognito JWT\n- Only devices in `digilux_device_data` under this `userId` are returned\n- `otaStatus: NOT_REGISTERED` \u2014 device has never run the OTA agent\n- Version comparison uses semver integer tuples \u2014 `4.10.0 > 4.2.0`\n- `pendingJobId` non-null means an update is already in progress"
           },
           "response": [
             {
-              "name": "200 OK — Update available",
+              "name": "200 OK \u2014 Update available",
               "status": "OK",
               "code": 200,
               "header": [
@@ -1585,7 +1896,7 @@
               }
             },
             {
-              "name": "200 OK — Up to date",
+              "name": "200 OK \u2014 Up to date",
               "status": "OK",
               "code": 200,
               "header": [
@@ -1603,7 +1914,7 @@
               }
             },
             {
-              "name": "200 OK — Device not yet OTA-registered",
+              "name": "200 OK \u2014 Device not yet OTA-registered",
               "status": "OK",
               "code": 200,
               "header": [
@@ -1621,7 +1932,7 @@
               }
             },
             {
-              "name": "200 OK — No devices",
+              "name": "200 OK \u2014 No devices",
               "status": "OK",
               "code": 200,
               "header": [
@@ -1700,11 +2011,11 @@
                 "consent"
               ]
             },
-            "description": "Records the user's explicit consent and triggers the OTA update on their device via an AWS IoT Job.\n\n**Server-side security checks (in order):**\n1. Valid Cognito JWT with `sub` claim\n2. `deviceId` UUID format validation\n3. Device ownership — must be registered under this `userId` in `digilux_device_data`\n4. Package must exist and be `ACTIVE`\n5. Requested version must be strictly newer than the installed version\n6. No update already in progress (`pendingJobId` must be null)\n7. Rate limit — max 1 consent per device per 5 minutes\n\nOn success, an AWS IoT Job is created and the device downloads the binary via HTTPS from S3.\n\n`job_id` and `consent_id` are auto-saved by the test script."
+            "description": "Records the user's explicit consent and triggers the OTA update on their device via an AWS IoT Job.\n\n**Server-side security checks (in order):**\n1. Valid Cognito JWT with `sub` claim\n2. `deviceId` UUID format validation\n3. Device ownership \u2014 must be registered under this `userId` in `digilux_device_data`\n4. Package must exist and be `ACTIVE`\n5. Requested version must be strictly newer than the installed version\n6. No update already in progress (`pendingJobId` must be null)\n7. Rate limit \u2014 max 1 consent per device per 5 minutes\n\nOn success, an AWS IoT Job is created and the device downloads the binary via HTTPS from S3.\n\n`job_id` and `consent_id` are auto-saved by the test script."
           },
           "response": [
             {
-              "name": "202 Accepted — Update queued",
+              "name": "202 Accepted \u2014 Update queued",
               "status": "Accepted",
               "code": 202,
               "header": [
@@ -1722,7 +2033,7 @@
               }
             },
             {
-              "name": "404 Not Found — Device not owned by user",
+              "name": "404 Not Found \u2014 Device not owned by user",
               "status": "Not Found",
               "code": 404,
               "header": [
@@ -1740,7 +2051,7 @@
               }
             },
             {
-              "name": "409 Conflict — Update already in progress",
+              "name": "409 Conflict \u2014 Update already in progress",
               "status": "Conflict",
               "code": 409,
               "header": [
@@ -1758,7 +2069,7 @@
               }
             },
             {
-              "name": "409 Conflict — Version already installed",
+              "name": "409 Conflict \u2014 Version already installed",
               "status": "Conflict",
               "code": 409,
               "header": [
@@ -1776,7 +2087,7 @@
               }
             },
             {
-              "name": "409 Conflict — Version not newer than installed",
+              "name": "409 Conflict \u2014 Version not newer than installed",
               "status": "Conflict",
               "code": 409,
               "header": [
@@ -1794,7 +2105,7 @@
               }
             },
             {
-              "name": "429 Too Many Requests — Rate limited (5 min cooldown)",
+              "name": "429 Too Many Requests \u2014 Rate limited (5 min cooldown)",
               "status": "Too Many Requests",
               "code": 429,
               "header": [
@@ -1828,7 +2139,7 @@
                   "if (terminal.includes(res.status)) {",
                   "    pm.test('Update reached terminal state: ' + res.status, () => pm.expect(terminal).to.include(res.status));",
                   "} else {",
-                  "    console.log('Still in progress — re-run to poll again');",
+                  "    console.log('Still in progress \u2014 re-run to poll again');",
                   "}"
                 ],
                 "type": "text/javascript"
@@ -1859,11 +2170,11 @@
                 "status"
               ]
             },
-            "description": "Returns the current status of a user-initiated (consent) update.\n\n**Security:** The `jobId` must belong to a consent record owned by the calling user. Users cannot query other users' job statuses — 404 is returned if not found or not owned.\n\n**Status values:**\n- `QUEUED` — device not yet acknowledged\n- `IN_PROGRESS` — downloading/installing (check `progress` %)\n- `SUCCEEDED` — installed successfully\n- `FAILED` — failed; device may have rolled back automatically\n- `CANCELLED` — cancelled by admin\n- `REJECTED` — device rejected the job"
+            "description": "Returns the current status of a user-initiated (consent) update.\n\n**Security:** The `jobId` must belong to a consent record owned by the calling user. Users cannot query other users' job statuses \u2014 404 is returned if not found or not owned.\n\n**Status values:**\n- `QUEUED` \u2014 device not yet acknowledged\n- `IN_PROGRESS` \u2014 downloading/installing (check `progress` %)\n- `SUCCEEDED` \u2014 installed successfully\n- `FAILED` \u2014 failed; device may have rolled back automatically\n- `CANCELLED` \u2014 cancelled by admin\n- `REJECTED` \u2014 device rejected the job"
           },
           "response": [
             {
-              "name": "200 OK — SUCCEEDED",
+              "name": "200 OK \u2014 SUCCEEDED",
               "status": "OK",
               "code": 200,
               "header": [
@@ -1881,7 +2192,7 @@
               }
             },
             {
-              "name": "200 OK — IN_PROGRESS",
+              "name": "200 OK \u2014 IN_PROGRESS",
               "status": "OK",
               "code": 200,
               "header": [
@@ -1899,7 +2210,7 @@
               }
             },
             {
-              "name": "200 OK — FAILED (rolled back)",
+              "name": "200 OK \u2014 FAILED (rolled back)",
               "status": "OK",
               "code": 200,
               "header": [
@@ -1908,7 +2219,7 @@
                   "value": "application/json"
                 }
               ],
-              "body": "{\n  \"jobId\": \"digilux-ota-controller-app-4-0-0-1785475706\",\n  \"consentId\": \"a1b2c3d4-e5f6-7890-abcd-ef1234567890\",\n  \"packageName\": \"controller-app\",\n  \"version\": \"4.0.0\",\n  \"status\": \"FAILED\",\n  \"statusMessage\": \"The update failed. Your device may have rolled back to the previous version.\",\n  \"consentedAt\": 1785475706560,\n  \"createdAt\": 1785475706560,\n  \"completedAt\": 1785475820000,\n  \"progress\": 0,\n  \"statusDetail\": \"Install failed — previous version restored\"\n}",
+              "body": "{\n  \"jobId\": \"digilux-ota-controller-app-4-0-0-1785475706\",\n  \"consentId\": \"a1b2c3d4-e5f6-7890-abcd-ef1234567890\",\n  \"packageName\": \"controller-app\",\n  \"version\": \"4.0.0\",\n  \"status\": \"FAILED\",\n  \"statusMessage\": \"The update failed. Your device may have rolled back to the previous version.\",\n  \"consentedAt\": 1785475706560,\n  \"createdAt\": 1785475706560,\n  \"completedAt\": 1785475820000,\n  \"progress\": 0,\n  \"statusDetail\": \"Install failed \u2014 previous version restored\"\n}",
               "originalRequest": {
                 "method": "GET",
                 "url": {
@@ -1917,7 +2228,7 @@
               }
             },
             {
-              "name": "404 Not Found — Not owned by user",
+              "name": "404 Not Found \u2014 Not owned by user",
               "status": "Not Found",
               "code": 404,
               "header": [
@@ -1992,11 +2303,11 @@
                 "download-link"
               ]
             },
-            "description": "Returns a pre-signed S3 download URL for the firmware package AND simultaneously publishes the download payload to the device's OTA MQTT topic (`iot/device/{deviceId}/ota`).\n\nThe device receives the URL over MQTT and begins downloading from S3 immediately. The Flutter app also receives the URL and can pass it directly to the device if needed (e.g., if the device was offline when MQTT was published).\n\n**No IoT Job is created** — lighter weight than the consent flow with no 60-minute job timeout.\n\n**MQTT payload sent to device:**\n```json\n{\n  \"operationType\": 1,\n  \"packageName\": \"controller-app\",\n  \"version\": \"4.0.0\",\n  \"packageType\": \"deb\",\n  \"downloadUrl\": \"<S3 pre-signed URL>\",\n  \"sha256\": \"<hex digest>\",\n  \"signature\": \"<ECDSA P-256 base64>\",\n  \"size\": 12456789,\n  \"expiresAt\": \"2026-08-04T15:00:00Z\",\n  \"initiatedBy\": \"USER_APP\",\n  \"rollback\": true\n}\n```\n\n**Response fields:**\n- `downloadUrl` — pre-signed S3 GET URL (1-hour TTL)\n- `sha256` — artifact SHA-256 hex digest\n- `signature` — ECDSA P-256 signature for authenticity\n- `size` — artifact size in bytes\n- `expiresAt` — ISO-8601 URL expiry time\n- `mqttDelivered` — `true` if device notified; `false` if device offline\n- `message` — human-readable status\n\n**Security checks (same as consent, minus rate limit and IoT Job):**\n1. Valid JWT with `sub` claim\n2. UUID format validation for `deviceId`\n3. Device ownership verification\n4. Package must be `ACTIVE`\n5. Device must be in OTA inventory\n6. Version must be strictly newer than installed\n7. No pending update in progress"
+            "description": "Returns a pre-signed S3 download URL for the firmware package AND simultaneously publishes the download payload to the device's OTA MQTT topic (`iot/device/{deviceId}/ota`).\n\nThe device receives the URL over MQTT and begins downloading from S3 immediately. The Flutter app also receives the URL and can pass it directly to the device if needed (e.g., if the device was offline when MQTT was published).\n\n**No IoT Job is created** \u2014 lighter weight than the consent flow with no 60-minute job timeout.\n\n**MQTT payload sent to device:**\n```json\n{\n  \"operationType\": 1,\n  \"packageName\": \"controller-app\",\n  \"version\": \"4.0.0\",\n  \"packageType\": \"deb\",\n  \"downloadUrl\": \"<S3 pre-signed URL>\",\n  \"sha256\": \"<hex digest>\",\n  \"signature\": \"<ECDSA P-256 base64>\",\n  \"size\": 12456789,\n  \"expiresAt\": \"2026-08-04T15:00:00Z\",\n  \"initiatedBy\": \"USER_APP\",\n  \"rollback\": true\n}\n```\n\n**Response fields:**\n- `downloadUrl` \u2014 pre-signed S3 GET URL (1-hour TTL)\n- `sha256` \u2014 artifact SHA-256 hex digest\n- `signature` \u2014 ECDSA P-256 signature for authenticity\n- `size` \u2014 artifact size in bytes\n- `expiresAt` \u2014 ISO-8601 URL expiry time\n- `mqttDelivered` \u2014 `true` if device notified; `false` if device offline\n- `message` \u2014 human-readable status\n\n**Security checks (same as consent, minus rate limit and IoT Job):**\n1. Valid JWT with `sub` claim\n2. UUID format validation for `deviceId`\n3. Device ownership verification\n4. Package must be `ACTIVE`\n5. Device must be in OTA inventory\n6. Version must be strictly newer than installed\n7. No pending update in progress"
           },
           "response": [
             {
-              "name": "200 OK — MQTT delivered (device online)",
+              "name": "200 OK \u2014 MQTT delivered (device online)",
               "status": "OK",
               "code": 200,
               "header": [
@@ -2014,7 +2325,7 @@
               }
             },
             {
-              "name": "200 OK — MQTT not delivered (device offline)",
+              "name": "200 OK \u2014 MQTT not delivered (device offline)",
               "status": "OK",
               "code": 200,
               "header": [
@@ -2023,7 +2334,7 @@
                   "value": "application/json"
                 }
               ],
-              "body": "{\n  \"downloadUrl\": \"https://digilux-ota-artifacts.s3.ap-south-1.amazonaws.com/packages/controller-app/4.0.0/controller-app-4.0.0.deb?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=...\",\n  \"sha256\": \"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\",\n  \"signature\": \"MEUCIQDxYqf9zNk3...\",\n  \"packageName\": \"controller-app\",\n  \"version\": \"4.0.0\",\n  \"size\": 12456789,\n  \"packageType\": \"deb\",\n  \"expiresAt\": \"2026-08-04T15:00:00Z\",\n  \"mqttDelivered\": false,\n  \"message\": \"Download URL generated. Device may be offline — pass the URL directly to the device when it comes online.\"\n}",
+              "body": "{\n  \"downloadUrl\": \"https://digilux-ota-artifacts.s3.ap-south-1.amazonaws.com/packages/controller-app/4.0.0/controller-app-4.0.0.deb?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=...\",\n  \"sha256\": \"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\",\n  \"signature\": \"MEUCIQDxYqf9zNk3...\",\n  \"packageName\": \"controller-app\",\n  \"version\": \"4.0.0\",\n  \"size\": 12456789,\n  \"packageType\": \"deb\",\n  \"expiresAt\": \"2026-08-04T15:00:00Z\",\n  \"mqttDelivered\": false,\n  \"message\": \"Download URL generated. Device may be offline \u2014 pass the URL directly to the device when it comes online.\"\n}",
               "originalRequest": {
                 "method": "POST",
                 "url": {
@@ -2032,7 +2343,7 @@
               }
             },
             {
-              "name": "404 Not Found — Device not owned by user",
+              "name": "404 Not Found \u2014 Device not owned by user",
               "status": "Not Found",
               "code": 404,
               "header": [
@@ -2050,7 +2361,7 @@
               }
             },
             {
-              "name": "404 Not Found — Package not found or not ACTIVE",
+              "name": "404 Not Found \u2014 Package not found or not ACTIVE",
               "status": "Not Found",
               "code": 404,
               "header": [
@@ -2068,7 +2379,7 @@
               }
             },
             {
-              "name": "409 Conflict — Update already in progress",
+              "name": "409 Conflict \u2014 Update already in progress",
               "status": "Conflict",
               "code": 409,
               "header": [
@@ -2086,7 +2397,7 @@
               }
             },
             {
-              "name": "409 Conflict — Version not newer than installed",
+              "name": "409 Conflict \u2014 Version not newer than installed",
               "status": "Conflict",
               "code": 409,
               "header": [
@@ -2108,7 +2419,7 @@
         },
         {
           "name": "Consent Flow (3 steps)",
-          "description": "IoT Job-based update flow. Run in order — variables auto-populate.\n\nBest for: trackable, reliable updates with built-in retry and status polling.",
+          "description": "IoT Job-based update flow. Run in order \u2014 variables auto-populate.\n\nBest for: trackable, reliable updates with built-in retry and status polling.",
           "item": [
             {
               "name": "1. Check My Updates",
@@ -2252,7 +2563,7 @@
                     "status"
                   ]
                 },
-                "description": "Re-run every 10–15 seconds until status reaches a terminal state."
+                "description": "Re-run every 10\u201315 seconds until status reaches a terminal state."
               },
               "response": []
             }
@@ -2260,7 +2571,7 @@
         },
         {
           "name": "App-Mediated Flow (2 steps)",
-          "description": "MQTT-based update flow. No IoT Job — Lambda publishes the download URL directly to the device over MQTT.\n\nBest for: immediate delivery when the device is online, lower overhead than the consent flow.",
+          "description": "MQTT-based update flow. No IoT Job \u2014 Lambda publishes the download URL directly to the device over MQTT.\n\nBest for: immediate delivery when the device is online, lower overhead than the consent flow.",
           "item": [
             {
               "name": "1. Check My Updates",
@@ -2373,13 +2684,13 @@
       "script": {
         "type": "text/javascript",
         "exec": [
-          "// Warn if tokens are missing — run '0. Get Tokens' first",
+          "// Warn if tokens are missing \u2014 run '0. Get Tokens' first",
           "function isExpired(jwt) {",
           "    try { var p = JSON.parse(atob(jwt.split('.')[1])); return Date.now()/1000 >= p.exp - 60; }",
           "    catch(e) { return true; }",
           "}",
           "var t = pm.collectionVariables.get('admin_token');",
-          "if (!t || isExpired(t)) { console.warn('admin_token missing or expired — run 0. Get Tokens first'); }"
+          "if (!t || isExpired(t)) { console.warn('admin_token missing or expired \u2014 run 0. Get Tokens first'); }"
         ]
       }
     }

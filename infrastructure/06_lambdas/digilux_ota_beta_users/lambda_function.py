@@ -140,23 +140,22 @@ def _add_beta_user(body: dict, caller: str) -> dict:
     if not device_items:
         return _response(404, {"error": f"No device registered for {email}. User must complete onboarding first."})
 
-    device     = device_items[0]
-    device_id  = device.get("deviceId")
-    thing_name = device.get("thingName") or device_id
+    device    = device_items[0]
+    device_id = device.get("deviceId")
 
     if not device_id:
         return _response(404, {"error": f"Device record for {email} is missing deviceId"})
 
-    log.info(f"Device resolved: userId={user_id} → deviceId={device_id}, thingName={thing_name}")
+    log.info(f"Device resolved: userId={user_id} → deviceId={device_id}")
 
-    # Step 3: Store in beta users table — userId as PK, email NOT stored
+    # Step 3: Store in beta users table — userId as PK, email and thingName NOT stored
+    # thingName is always looked up fresh from device_data at deployment time
     now  = datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
     item = {
-        "userId":    user_id,
-        "deviceId":  device_id,
-        "thingName": thing_name,
-        "addedAt":   now,
-        "addedBy":   caller,
+        "userId":   user_id,
+        "deviceId": device_id,
+        "addedAt":  now,
+        "addedBy":  caller,
     }
     dynamo.Table(BETA_USERS_TABLE).put_item(Item=item)
     log.info(f"Beta user added: {email} (userId={user_id}, deviceId={device_id}) by {caller}")
