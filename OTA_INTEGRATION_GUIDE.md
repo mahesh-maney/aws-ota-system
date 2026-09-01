@@ -555,24 +555,15 @@ GET /api/v1/controllers/{deviceId}/updates/available
 ```json
 {
   "deviceId": "edb39bba-baf1-4700-968c-a42228e53aa0",
-  "thingName": "digilux-94ba062a250c",
-  "model": "DGX-1000",
-  "hwRevision": "1.0",
-  "pendingJobId": null,
-  "installedVersions": {
-    "controller-app": "3.0.0"
+  "thingName": "edb39bba-baf1-4700-968c-a42228e53aa0",
+  "globalInstalledVersion": "3.0.0",
+  "package": {
+    "name": "controller-app",
+    "installedVersion": "3.0.0"
   },
-  "availableUpdates": [
-    {
-      "packageName": "controller-app",
-      "deviceType": "Network_controller_firmware",
-      "currentVersion": "3.0.0",
-      "availableVersion": "4.0.0",
-      "artifactSize": 2097810,
-      "releaseNotes": "Zigbee 3.0 support"
-    }
-  ],
-  "updateCount": 1
+  "pendingJobId": null,
+  "availableVersion": "4.0.0",
+  "fileName": "controller-app-4.0.0.jar"
 }
 ```
 
@@ -1319,7 +1310,7 @@ The controller publishes `REJECTED` when it detects a problem **before** install
 {
   "jobId":      "digilux-ota-controller-app-4-0-0-...",
   "deviceId":   "edb39bba-baf1-4700-968c-a42228e53aa0",
-  "thingName":  "digilux-94ba062a250c",
+  "thingName":  "edb39bba-baf1-4700-968c-a42228e53aa0",
   "status":     "REJECTED",
   "statusDetails": {
     "errorCode": 10003
@@ -1361,20 +1352,19 @@ The controller publishes `REJECTED` when it detects a problem **before** install
 
 ## 7. Device Inventory & Status
 
-OTA fields (`installedVersions`, `pendingJobId`, `thingName`) are stored as attributes on the `digilux_device_data` table — the same table used for device ownership. This eliminates a separate inventory table and reduces DynamoDB reads.
+OTA fields (`globalInstalledVersion`, `package`, `pendingJobId`, `thingName`) are stored as attributes on the `digilux_device_data` table — the same table used for device ownership. This eliminates a separate inventory table and reduces DynamoDB reads.
 
 | Field | Description |
 |---|---|
 | `deviceId` | UUID — primary key used in all API calls |
-| `thingName` | IoT Thing name (MAC-based, e.g. `digilux-94ba062a250c`) |
-| `model` | Hardware model (e.g. `DGX-1000`) |
-| `hwRevision` | Hardware revision (for compatibility filtering) |
-| `installedVersions` | `{ "controller-app": "4.0.0", ... }` |
+| `thingName` | IoT Thing name (equals `deviceId`) |
+| `globalInstalledVersion` | Flat version string (e.g. `"4.0.0"`) set by OTA agent on registration |
+| `package` | `{ "name": "controller-app", "installedVersion": "4.0.0" }` — package-type-specific version info |
 | `pendingJobId` | Active job ID, `null` if idle |
 | `lastSeen` | Timestamp of last agent registration |
 
 The inventory is updated by:
-- **Device startup:** OTA agent publishes installed versions → `digilux_ota_device_register` Lambda
+- **Device startup:** OTA agent publishes `{ deviceId, globalInstalledVersion, package: { name, installedVersion } }` to `iot/device/{deviceId}/ota/register` → `digilux_ota_device_register` Lambda
 - **Job completion:** Status SUCCEEDED → `digilux_ota_status_handler` Lambda
 
 ---
@@ -1575,9 +1565,9 @@ DEVICE_ID="edb39bba-baf1-4700-968c-a42228e53aa0"
 aws dynamodb update-item \
   --table-name digilux_device_data \
   --key "{\"deviceId\":{\"S\":\"${DEVICE_ID}\"},\"macAddress\":{\"S\":\"irjof5RLuQcVv2tvEVdSilZbm1Wj7J4AGWw69ZJ1e0r1AN7fM4W1NQ==\"}}" \
-  --update-expression "SET pendingJobId = :null, installedVersions.#pkg = :v, lastUpdatedAt = :ts" \
-  --expression-attribute-names '{"#pkg":"controller-app"}' \
-  --expression-attribute-values "{\":null\":{\"NULL\":true},\":v\":{\"S\":\"2.0.0\"},\":ts\":{\"N\":\"$(date +%s)000\"}}" \
+  --update-expression "SET pendingJobId = :null, globalInstalledVersion = :v, #pkg = :pkgobj, lastUpdatedAt = :ts" \
+  --expression-attribute-names '{"#pkg":"package"}' \
+  --expression-attribute-values "{\":null\":{\"NULL\":true},\":v\":{\"S\":\"2.0.0\"},\":pkgobj\":{\"M\":{\"name\":{\"S\":\"controller-app\"},\"installedVersion\":{\"S\":\"2.0.0\"}}},\":ts\":{\"N\":\"$(date +%s)000\"}}" \
   --region ap-south-1
 ```
 
@@ -1605,7 +1595,7 @@ This resets the device to `controller-app@2.0.0` with no pending job — allowin
 #### TC-A03 Compatibility Check
 | # | Action | Expected |
 |---|---|---|
-| 1 | `GET /controllers/<test-device-id>/updates/available` | `200` with `installedVersions`, `availableUpdates` |
+| 1 | `GET /controllers/<test-device-id>/updates/available` | `200` with `globalInstalledVersion`, `package`, `availableVersion` |
 | 2 | `GET /controllers/<unknown-uuid>/updates/available` | `404 — Device not found` |
 
 #### TC-A04 Deployment Lifecycle
@@ -1719,3 +1709,4 @@ Results are printed to stdout and saved to `infrastructure/e2e_test_results.txt`
 | `2.3` | 2026-08-25 | Digilux Engineering | Non-admin package visibility: `GET /ota/packages` no longer requires `ota-admin` group — any authenticated user can list packages (read-only); admin UI Packages page and nav link now accessible to all users; action buttons (Publish/Withdraw/Recall/Promote/Restore/Delete) remain admin-only; non-admin badge changed from "Upload only" to "Read only" |
 | `2.2` | 2026-08-24 | Digilux Engineering | Package delete endpoint: `DELETE /api/v1/ota/packages/{packageName}/{version}` with 6 validations (block ACTIVE, require reason, check active deployments, 7-day cooling-off for SUPERSEDED with force override, S3 artifact deletion, soft delete for RECALLED); role-based admin UI: non-admin users restricted to upload-only (no Packages/Deployments nav, no admin routes); admin detected from `cognito:groups` JWT claim; Delete modal on PackagesPage with reason input, version type-to-confirm, cooling-off force checkbox; `GET /ota/packages` status filter fixed — omitting or sending empty `status=` now returns all statuses (was incorrectly defaulting to ACTIVE) |
 | `2.1` | 2026-08-24 | Digilux Engineering | New S3 key structure `Network_controller_firmware/{deviceType}/{version}/{fileName}` — unified firmware prefix for all device types; `artifact_processor` backward-compatible (detects old vs new key format automatically); new device type `Network_controller_zigbee_stack_firmware` (`packageName=ZigbeeStackFirmware`, `.bin`, `operationType=5`); `job_create` Lambda fixed to read device inventory from `digilux_device_data` (was erroneously reading from retired `digilux_device_inventory`) — fixes "already installed" guard and `pendingJobId` tracking; device type table updated with `operationType` integers; e2e test suite fixed (T03/T11/T12 were using stale `controller-app` package name); 70/70 PASS |
+| `2.7` | 2026-09-01 | Digilux Engineering | Redesigned MQTT registration payload: removed `model`, `hwRevision`, `installedVersions` map — replaced with flat `globalInstalledVersion` string + `package: { name, installedVersion }` object; `digilux_ota_device_register` updated accordingly; `digilux_ota_user_check_updates` reads `globalInstalledVersion`+`package.name` from `device_data` and returns a flat per-device response (`deviceId`, `otaStatus`, `package`, `installedVersion`, `availableVersion`, `fileName`); `digilux_ota_user_consent` version guard fixed to read `globalInstalledVersion` instead of stale `installedVersions` map — older-than-installed check now works correctly; Section 7 device inventory table updated; 51/51 user e2e PASS |

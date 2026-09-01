@@ -79,7 +79,7 @@ Flutter App (homeowner)
         │
         ├── GET  /ota/device/available-updates ► digilux_ota_user_check_updates
         │        ↑ checks device ownership via digilux_device_data
-        │        ↑ compares installedVersions vs latest ACTIVE package
+        │        ↑ compares globalInstalledVersion vs latest ACTIVE package
         │
         ├── POST /ota/my/updates/consent ► digilux_ota_user_consent
         │        ↑ verifies ownership, package status, version, rate limit
@@ -322,30 +322,23 @@ After receiving `uploadUrl`, PUT the binary to it (no auth header, `Content-Type
 
 ### GET /api/v1/controllers/{deviceId}/updates/available
 
-Returns installed versions and available updates for a device.
+Returns installed version and available update for a device (admin-only).
 
-`deviceId` is the UUID from the device inventory, not the MAC-based IoT thing name.
+`deviceId` is the UUID from `digilux_device_data`.
 
 **Response 200:**
 ```json
 {
   "deviceId": "edb39bba-baf1-4700-968c-a42228e53aa0",
-  "thingName": "digilux-94ba062a250c",
-  "model": "DGX-1000",
-  "hwRevision": "1.0",
+  "thingName": "edb39bba-baf1-4700-968c-a42228e53aa0",
+  "globalInstalledVersion": "3.0.0",
+  "package": {
+    "name": "controller-app",
+    "installedVersion": "3.0.0"
+  },
   "pendingJobId": null,
-  "installedVersions": { "controller-app": "3.0.0" },
-  "availableUpdates": [
-    {
-      "packageName": "controller-app",
-      "packageType": "CONTROLLER_APP",
-      "currentVersion": "3.0.0",
-      "availableVersion": "4.0.0",
-      "artifactSize": 2097810,
-      "releaseNotes": "Zigbee 3.0 support"
-    }
-  ],
-  "updateCount": 1
+  "availableVersion": "4.0.0",
+  "fileName": "controller-app-4.0.0.jar"
 }
 ```
 
@@ -735,20 +728,19 @@ The IoT Job is stored in AWS IoT. When the device comes back online:
 
 ## Device Inventory
 
-OTA fields (`installedVersions`, `pendingJobId`, `thingName`) are stored as attributes on `digilux_device_data` — the same table used for device ownership. No separate inventory table.
+OTA fields (`globalInstalledVersion`, `package`, `pendingJobId`, `thingName`) are stored as attributes on `digilux_device_data` — the same table used for device ownership. No separate inventory table.
 
 | Field | Description |
 |---|---|
 | `deviceId` | UUID — primary key for all API calls |
-| `thingName` | IoT Thing name (MAC-based, e.g. `digilux-94ba062a250c`) |
-| `model` | Hardware model (e.g. `DGX-1000`) |
-| `hwRevision` | Hardware revision |
-| `installedVersions` | `{ "controller-app": "4.0.0" }` |
+| `thingName` | IoT Thing name (equals `deviceId`) |
+| `globalInstalledVersion` | Flat version string (e.g. `"4.0.0"`) set by OTA agent on registration |
+| `package` | `{ "name": "controller-app", "installedVersion": "4.0.0" }` — package-type-specific version |
 | `pendingJobId` | Active job ID; `null` if idle |
 | `lastSeen` | Last agent registration timestamp |
 
 **Inventory is updated by:**
-- Device startup: OTA agent publishes installed versions → `digilux_ota_device_register` Lambda
+- Device startup: OTA agent publishes `{ deviceId, globalInstalledVersion, package: { name, installedVersion } }` to `iot/device/{deviceId}/ota/register` → `digilux_ota_device_register` Lambda
 - Job completion: SUCCEEDED → `digilux_ota_status_handler` Lambda
 
 **A device appears in inventory only after the OTA agent has run at least once.**
@@ -764,7 +756,7 @@ OTA fields (`installedVersions`, `pendingJobId`, `thingName`) are stored as attr
 | **Device ownership** | `digilux_device_data` is the ownership oracle — `userId` from JWT must match device record on every user request |
 | **Artifact integrity** | SHA256 hash verified on device before install |
 | **Artifact authenticity** | ECDSA P-256 signature verified using public key at `/etc/digilux/ota-agent.pub` |
-| **Transport** | Binary download via **CloudFront signed URL** (tiered expiry: 1hr ≤50MB / 6hr ≤200MB / 24hr ≤500MB / 48hr >500MB) |
+| **Transport** | Binary download via **S3 pre-signed URL** (tiered expiry: 1hr ≤50MB / 6hr ≤200MB / 24hr ≤500MB / 48hr >500MB) |
 | **Signing key** | Private key in Secrets Manager (`digilux-ota-signing-key`) — never on device |
 | **Mandatory updates** | Device cannot decline — `"mandatory": true` in IoT job document |
 | **S3** | Versioned, AES-256 SSE, public access fully blocked |
@@ -876,9 +868,9 @@ DEVICE_ID="edb39bba-baf1-4700-968c-a42228e53aa0"
 MAC="irjof5RLuQcVv2tvEVdSilZbm1Wj7J4AGWw69ZJ1e0r1AN7fM4W1NQ=="
 aws dynamodb update-item --table-name digilux_device_data \
   --key "{\"deviceId\":{\"S\":\"${DEVICE_ID}\"},\"macAddress\":{\"S\":\"${MAC}\"}}" \
-  --update-expression "SET pendingJobId = :null, installedVersions.#pkg = :v, lastUpdatedAt = :ts" \
-  --expression-attribute-names '{"#pkg":"controller-app"}' \
-  --expression-attribute-values "{\":null\":{\"NULL\":true},\":v\":{\"S\":\"2.0.0\"},\":ts\":{\"N\":\"$(date +%s)000\"}}" \
+  --update-expression "SET pendingJobId = :null, globalInstalledVersion = :v, #pkg = :pkgobj, lastUpdatedAt = :ts" \
+  --expression-attribute-names '{"#pkg":"package"}' \
+  --expression-attribute-values "{\":null\":{\"NULL\":true},\":v\":{\"S\":\"2.0.0\"},\":pkgobj\":{\"M\":{\"name\":{\"S\":\"controller-app\"},\"installedVersion\":{\"S\":\"2.0.0\"}}},\":ts\":{\"N\":\"$(date +%s)000\"}}" \
   --region ap-south-1
 
 # Run tests
