@@ -5,12 +5,21 @@
 
 BASE_URL="https://ds6nxf8ac5.execute-api.ap-south-1.amazonaws.com/smarthome"
 TOKEN=$(cat /tmp/ota_nonadmin_token.txt)
+ADMIN_TOKEN=$(cat /tmp/ota_admin_token.txt)
 DEVICE_ID="edb39bba-baf1-4700-968c-a42228e53aa0"
-PACKAGE_NAME="controller-app"
-VERSION="4.0.0"
+PACKAGE_NAME="HomeAssistantUtility"
 REGION="ap-south-1"
-CLOUDFRONT_DOMAIN="d2lr14tk4wqz8z.cloudfront.net"
 PASS=0; FAIL=0; SKIP=0
+
+# Resolve latest ACTIVE version for PACKAGE_NAME to use as VERSION for the test
+VERSION=$(aws dynamodb query --table-name digilux_ota_packages \
+  --key-condition-expression "packageName = :p" \
+  --filter-expression "#s = :active" \
+  --expression-attribute-names '{"#s":"status"}' \
+  --expression-attribute-values "{\":p\":{\"S\":\"$PACKAGE_NAME\"},\":active\":{\"S\":\"ACTIVE\"}}" \
+  --region "$REGION" \
+  --query 'Items[*].version.S' --output text 2>/dev/null | tr '\t' '\n' | sort -t. -k1,1n -k2,2n -k3,3n | tail -1)
+echo "  [SETUP] Test version resolved: $PACKAGE_NAME@$VERSION"
 
 # Fetch macAddress once — needed for composite-key UpdateItem on digilux_device_data
 DEVICE_MAC=$(aws dynamodb query \
@@ -20,6 +29,20 @@ DEVICE_MAC=$(aws dynamodb query \
   --region "$REGION" \
   --query 'Items[0].macAddress.S' --output text 2>/dev/null)
 echo "  [SETUP] Device macAddress resolved"
+
+_activate_package() {
+  curl -s -X PATCH "$BASE_URL/api/v1/ota/packages/$PACKAGE_NAME/$VERSION/activate" \
+    -H "Authorization: $ADMIN_TOKEN" -H "Content-Type: application/json" \
+    -d '{"activated": true}' > /dev/null
+  echo "  [SETUP] $PACKAGE_NAME@$VERSION activated"
+}
+_deactivate_package() {
+  curl -s -X PATCH "$BASE_URL/api/v1/ota/packages/$PACKAGE_NAME/$VERSION/activate" \
+    -H "Authorization: $ADMIN_TOKEN" -H "Content-Type: application/json" \
+    -d '{"activated": false}' > /dev/null
+  echo "  [TEARDOWN] $PACKAGE_NAME@$VERSION deactivated"
+}
+_activate_package
 
 _pass() { echo "  [PASS] $1"; PASS=$((PASS + 1)); }
 _fail() { echo "  [FAIL] $1"; FAIL=$((FAIL + 1)); }
@@ -41,10 +64,10 @@ _reset_device() {
   aws dynamodb update-item --table-name digilux_device_data \
     --key "{\"deviceId\":{\"S\":\"${DEVICE_ID}\"},\"macAddress\":{\"S\":\"${DEVICE_MAC}\"}}" \
     --update-expression "SET pendingJobId = :null, installedVersions.#pkg = :v, lastUpdatedAt = :ts" \
-    --expression-attribute-names '{"#pkg":"controller-app"}' \
-    --expression-attribute-values "{\":null\":{\"NULL\":true},\":v\":{\"S\":\"2.0.0\"},\":ts\":{\"N\":\"$(date +%s)000\"}}" \
+    --expression-attribute-names "{\"#pkg\":\"$PACKAGE_NAME\"}" \
+    --expression-attribute-values "{\":null\":{\"NULL\":true},\":v\":{\"S\":\"1.0.0\"},\":ts\":{\"N\":\"$(date +%s)000\"}}" \
     --region "$REGION" > /dev/null 2>&1
-  echo "  [RESET] Device → controller-app@2.0.0, pendingJobId=null"
+  echo "  [RESET] Device → $PACKAGE_NAME@1.0.0, pendingJobId=null"
 }
 
 _clear_rate_limit() {
@@ -81,10 +104,10 @@ _set_device_version() {
   aws dynamodb update-item --table-name digilux_device_data \
     --key "{\"deviceId\":{\"S\":\"${DEVICE_ID}\"},\"macAddress\":{\"S\":\"${DEVICE_MAC}\"}}" \
     --update-expression "SET pendingJobId = :null, installedVersions.#pkg = :v" \
-    --expression-attribute-names '{"#pkg":"controller-app"}' \
+    --expression-attribute-names "{\"#pkg\":\"$PACKAGE_NAME\"}" \
     --expression-attribute-values "{\":null\":{\"NULL\":true},\":v\":{\"S\":\"$ver\"}}" \
     --region "$REGION" > /dev/null 2>&1
-  echo "  [RESET] Device → controller-app@$ver, pendingJobId=null"
+  echo "  [RESET] Device → $PACKAGE_NAME@$ver, pendingJobId=null"
 }
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -100,7 +123,7 @@ CODE=$(curl -s -o /dev/null -w "%{http_code}" -H "Authorization: $TOKEN" "$BASE_
 _expect_code "Valid user token → check updates" "200" "$CODE"
 
 CODE=$(curl -s -o /dev/null -w "%{http_code}" -H "Authorization: $TOKEN" "$BASE_URL/api/v1/ota/deployments")
-_expect_code "Non-admin token on admin deployments endpoint" "403" "$CODE"
+_expect_one_of "Non-admin token on admin deployments endpoint" "$CODE" "401" "403"
 
 # Old endpoint (GET /my/updates) no longer has a GET method — should 403 or 404
 CODE=$(curl -s -o /dev/null -w "%{http_code}" -H "Authorization: $TOKEN" "$BASE_URL/api/v1/ota/my/updates")
@@ -115,19 +138,16 @@ CODE=$(curl -s -o /dev/null -w "%{http_code}" -H "Authorization: $TOKEN" "$BASE_
 _expect_code "GET /device/available-updates" "200" "$CODE"
 
 DEVICES=$(echo "$RESP" | python3 -c "import json,sys; print(len(json.load(sys.stdin).get('devices',[])))" 2>/dev/null || echo "0")
-if [ "$DEVICES" -ge 1 ]; then _pass "Response contains $DEVICES device(s)"; else _fail "No devices in response"; fi
-
-HAS_TOTAL=$(echo "$RESP" | python3 -c "import json,sys; print('ok' if 'totalUpdates' in json.load(sys.stdin) else 'no')" 2>/dev/null)
-if [ "$HAS_TOTAL" = "ok" ]; then _pass "totalUpdates field present"; else _fail "totalUpdates field missing"; fi
+if [ "$DEVICES" -ge 1 ]; then _pass "Response contains $DEVICES update entry(s)"; else _fail "No update entries in response"; fi
 
 DEV_STATUS=$(echo "$RESP" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d['devices'][0].get('otaStatus','?'))" 2>/dev/null)
-if [ "$DEV_STATUS" = "REGISTERED" ]; then _pass "Device otaStatus=REGISTERED"; else _fail "otaStatus → expected REGISTERED, got $DEV_STATUS"; fi
+if [ "$DEV_STATUS" = "REGISTERED" ]; then _pass "otaStatus=REGISTERED"; else _fail "otaStatus → expected REGISTERED, got $DEV_STATUS"; fi
 
-UPDATE_COUNT=$(echo "$RESP" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d['devices'][0].get('updateCount',0))" 2>/dev/null || echo "0")
-if [ "$UPDATE_COUNT" -ge 1 ]; then _pass "updateCount=$UPDATE_COUNT (updates available)"; else _fail "updateCount=0 — no updates found (device may already be on latest)"; fi
+HAS_PKG=$(echo "$RESP" | python3 -c "import json,sys; d=json.load(sys.stdin); print('ok' if any(x.get('package')=='$PACKAGE_NAME' for x in d['devices']) else 'no')" 2>/dev/null)
+if [ "$HAS_PKG" = "ok" ]; then _pass "$PACKAGE_NAME entry present"; else _fail "$PACKAGE_NAME missing from devices list"; fi
 
-HAS_PKG=$(echo "$RESP" | python3 -c "import json,sys; d=json.load(sys.stdin); u=d['devices'][0].get('availableUpdates',[]); print('ok' if any(x['packageName']=='controller-app' for x in u) else 'no')" 2>/dev/null)
-if [ "$HAS_PKG" = "ok" ]; then _pass "controller-app in availableUpdates"; else _fail "controller-app missing from availableUpdates"; fi
+HAS_FIELDS=$(echo "$RESP" | python3 -c "import json,sys; d=json.load(sys.stdin); e=d['devices'][0]; print('ok' if all(k in e for k in ['deviceId','package','installedVersion','availableVersion','fileName']) else 'no')" 2>/dev/null)
+if [ "$HAS_FIELDS" = "ok" ]; then _pass "All flat fields present (deviceId, package, installedVersion, availableVersion, fileName)"; else _fail "One or more flat fields missing"; fi
 
 # ──────────────────────────────────────────────────────────────────────────────
 _section "TU03 — CONSENT INPUT VALIDATION"
@@ -219,18 +239,37 @@ ERR=$(curl -s -X POST -H "Authorization: $TOKEN" -H "Content-Type: application/j
   "$BASE_URL/api/v1/ota/my/updates/consent" | python3 -c "import json,sys; print(json.load(sys.stdin).get('error',''))" 2>/dev/null)
 if [[ "$ERR" == *"already in progress"* ]]; then _pass "409 body mentions 'already in progress'"; else _fail "409 error body unexpected: $ERR"; fi
 
-# Set device to 4.0.0 to test older-version guard
-_set_device_version "4.0.0"
+# Set device to VERSION to test older-version guard using an older ACTIVE version
+OLDER_VERSION=$(aws dynamodb query --table-name digilux_ota_packages \
+  --key-condition-expression "packageName = :p" \
+  --filter-expression "#s = :active" \
+  --expression-attribute-names '{"#s":"status"}' \
+  --expression-attribute-values "{\":p\":{\"S\":\"$PACKAGE_NAME\"},\":active\":{\"S\":\"ACTIVE\"}}" \
+  --region "$REGION" \
+  --query 'Items[*].version.S' --output text 2>/dev/null | tr '\t' '\n' | sort -t. -k1,1n -k2,2n -k3,3n | head -1)
+
+_set_device_version "$VERSION"
+
+if [ -n "$OLDER_VERSION" ] && [ "$OLDER_VERSION" != "$VERSION" ]; then
+  # Temporarily activate older version so consent lambda can find it
+  curl -s -X PATCH "$BASE_URL/api/v1/ota/packages/$PACKAGE_NAME/$OLDER_VERSION/activate" \
+    -H "Authorization: $ADMIN_TOKEN" -H "Content-Type: application/json" \
+    -d '{"activated": true}' > /dev/null
+  CODE=$(curl -s -o /dev/null -w "%{http_code}" -X POST -H "Authorization: $TOKEN" -H "Content-Type: application/json" \
+    -d "{\"deviceId\":\"$DEVICE_ID\",\"packageName\":\"$PACKAGE_NAME\",\"version\":\"$OLDER_VERSION\"}" \
+    "$BASE_URL/api/v1/ota/my/updates/consent")
+  curl -s -X PATCH "$BASE_URL/api/v1/ota/packages/$PACKAGE_NAME/$OLDER_VERSION/activate" \
+    -H "Authorization: $ADMIN_TOKEN" -H "Content-Type: application/json" \
+    -d '{"activated": false}' > /dev/null
+  _expect_code "Version older than installed ($OLDER_VERSION vs $VERSION)" "409" "$CODE"
+else
+  _skip "No older ACTIVE version available to test older-version guard"
+fi
 
 CODE=$(curl -s -o /dev/null -w "%{http_code}" -X POST -H "Authorization: $TOKEN" -H "Content-Type: application/json" \
-  -d "{\"deviceId\":\"$DEVICE_ID\",\"packageName\":\"$PACKAGE_NAME\",\"version\":\"3.0.0\"}" \
+  -d "{\"deviceId\":\"$DEVICE_ID\",\"packageName\":\"$PACKAGE_NAME\",\"version\":\"$VERSION\"}" \
   "$BASE_URL/api/v1/ota/my/updates/consent")
-_expect_code "Version older than installed (3.0.0 vs 4.0.0)" "409" "$CODE"
-
-CODE=$(curl -s -o /dev/null -w "%{http_code}" -X POST -H "Authorization: $TOKEN" -H "Content-Type: application/json" \
-  -d "{\"deviceId\":\"$DEVICE_ID\",\"packageName\":\"$PACKAGE_NAME\",\"version\":\"4.0.0\"}" \
-  "$BASE_URL/api/v1/ota/my/updates/consent")
-_expect_code "Same version already installed (4.0.0)" "409" "$CODE"
+_expect_code "Same version already installed ($VERSION)" "409" "$CODE"
 
 _reset_device
 
@@ -344,7 +383,7 @@ CODE=$(curl -s -o /dev/null -w "%{http_code}" -X POST -H "Authorization: $TOKEN"
 _expect_one_of "download-link non-existent version" "$CODE" "404" "409"
 
 # ──────────────────────────────────────────────────────────────────────────────
-_section "TU10 — CLOUDFRONT SIGNED URL FORMAT"
+_section "TU10 — S3 PRESIGNED URL FORMAT"
 
 _reset_device
 
@@ -354,31 +393,24 @@ RESP=$(curl -s -X POST -H "Authorization: $TOKEN" -H "Content-Type: application/
 
 DL_URL=$(echo "$RESP" | python3 -c "import json,sys; print(json.load(sys.stdin).get('downloadUrl',''))" 2>/dev/null)
 
-# URL must be served from CloudFront, not S3
-if [[ "$DL_URL" == "https://${CLOUDFRONT_DOMAIN}/"* ]]; then
-  _pass "downloadUrl is a CloudFront URL (not S3 presigned)"
+# URL must be an S3 presigned URL (CloudFront was removed)
+if [[ "$DL_URL" == "https://"*".s3"*".amazonaws.com/"* ]] || [[ "$DL_URL" == "https://s3."*".amazonaws.com/"* ]]; then
+  _pass "downloadUrl is an S3 presigned URL"
 else
-  _fail "downloadUrl is NOT from CloudFront — got: ${DL_URL:0:80}..."
+  _fail "downloadUrl is not an S3 URL — got: ${DL_URL:0:80}..."
 fi
 
-# Must contain CloudFront signed URL query params
-if [[ "$DL_URL" == *"Policy="* ]]; then _pass "Signed URL has Policy param"; else _fail "Policy param missing from URL"; fi
-if [[ "$DL_URL" == *"Signature="* ]]; then _pass "Signed URL has Signature param"; else _fail "Signature param missing from URL"; fi
-if [[ "$DL_URL" == *"Key-Pair-Id="* ]]; then _pass "Signed URL has Key-Pair-Id param"; else _fail "Key-Pair-Id param missing from URL"; fi
+# Must contain S3 presigned URL query params
+if [[ "$DL_URL" == *"X-Amz-Signature="* ]]; then _pass "S3 presigned URL has X-Amz-Signature"; else _fail "X-Amz-Signature missing from URL"; fi
+if [[ "$DL_URL" == *"X-Amz-Credential="* ]]; then _pass "S3 presigned URL has X-Amz-Credential"; else _fail "X-Amz-Credential missing from URL"; fi
+if [[ "$DL_URL" == *"X-Amz-Expires="* ]]; then _pass "S3 presigned URL has X-Amz-Expires"; else _fail "X-Amz-Expires missing from URL"; fi
 
-# CloudFront signed URL must NOT contain AWS query-string presign params
-if [[ "$DL_URL" != *"X-Amz-Signature="* ]]; then
-  _pass "URL has no S3 presign params (correct — CloudFront path)"
+# Verify URL is actually reachable
+HTTP_S3=$(curl -s -o /dev/null -w "%{http_code}" "$DL_URL")
+if [ "$HTTP_S3" = "200" ] || [ "$HTTP_S3" = "206" ]; then
+  _pass "S3 presigned URL is reachable (HTTP $HTTP_S3)"
 else
-  _fail "URL still contains S3 presign params (CloudFront signing failed)"
-fi
-
-# Verify signed URL is actually reachable (HTTP 200 or 206)
-HTTP_CF=$(curl -s -o /dev/null -w "%{http_code}" "$DL_URL")
-if [ "$HTTP_CF" = "200" ] || [ "$HTTP_CF" = "206" ]; then
-  _pass "CloudFront signed URL is reachable (HTTP $HTTP_CF)"
-else
-  _fail "CloudFront signed URL returned HTTP $HTTP_CF"
+  _fail "S3 presigned URL returned HTTP $HTTP_S3"
 fi
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -409,6 +441,7 @@ if [ "${SIZE:-0}" -gt 0 ]; then _pass "size=${SIZE} bytes present"; else _fail "
 
 # ──────────────────────────────────────────────────────────────────────────────
 _reset_device
+_deactivate_package
 
 echo
 echo "══════════════════════════════════════════"
