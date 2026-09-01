@@ -216,10 +216,12 @@ def lambda_handler(event, context):
                 continue
 
             # ── OTA fields come directly from device_data item ────────────────
-            installed_versions = dev.get("installedVersions") or {}
+            installed_version = dev.get("globalInstalledVersion", "")
+            pkg_info          = dev.get("package") or {}
+            pkg_name          = pkg_info.get("name", "")
 
-            if not installed_versions:
-                log.info(f"Device {device_id} has no installedVersions (OTA agent not yet started)")
+            if not installed_version or not pkg_name:
+                log.info(f"Device {device_id} has no globalInstalledVersion/package (OTA agent not yet started)")
                 result_devices.append({
                     "deviceId":  device_id,
                     "otaStatus": "NOT_REGISTERED",
@@ -234,54 +236,50 @@ def lambda_handler(event, context):
                 "deviceId": device_id, "thingName": thing_name, "includeBeta": include_beta,
             }))
 
-            # ── Compare each installed package with latest available version ──
-            for pkg_name, installed_ver in installed_versions.items():
-                latest_pkg = _get_latest_available_version(pkg_name, include_beta)
-                if not latest_pkg:
-                    log.debug(f"No available package found for {pkg_name}")
-                    continue
-
+            # ── Compare installed package with latest available version ───────
+            latest_pkg = _get_latest_available_version(pkg_name, include_beta)
+            if not latest_pkg:
+                log.debug(f"No available package found for {pkg_name}")
+            else:
                 latest_ver = latest_pkg.get("version", "")
-                if not _is_newer(latest_ver, installed_ver):
-                    log.debug(f"{pkg_name}: installed={installed_ver}, latest={latest_ver} — up to date")
-                    continue
+                if not _is_newer(latest_ver, installed_version):
+                    log.debug(f"{pkg_name}: installed={installed_version}, latest={latest_ver} — up to date")
+                else:
+                    # ── Entitlement check — gate on subscription tier ─────────
+                    firmware_category = latest_pkg.get("firmwareCategory") or None
+                    tier_override     = latest_pkg.get("tierOverride")     or None
+                    entitlement       = _invoke_entitlement_check(thing_name, firmware_category, tier_override)
 
-                # ── Entitlement check — gate on subscription tier ─────────────
-                firmware_category = latest_pkg.get("firmwareCategory") or None
-                tier_override     = latest_pkg.get("tierOverride")     or None
-                entitlement       = _invoke_entitlement_check(thing_name, firmware_category, tier_override)
-
-                if not entitlement.get("eligible", True):
-                    log.info(json.dumps({
-                        "msg":              "update_blocked_by_entitlement",
-                        "userId":           user_id,
-                        "deviceId":         device_id,
-                        "packageName":      pkg_name,
-                        "availableVersion": latest_ver,
-                        "firmwareCategory": firmware_category,
-                        "reason":           entitlement.get("reason"),
-                        "subscriptionTier": entitlement.get("subscriptionTier"),
-                        "minimumTier":      entitlement.get("minimumTier"),
-                    }))
-                    continue
-
-                result_devices.append({
-                    "deviceId":         device_id,
-                    "otaStatus":        "REGISTERED",
-                    "package":          pkg_name,
-                    "installedVersion": installed_ver,
-                    "availableVersion": latest_ver,
-                    "fileName":         latest_pkg.get("fileName", ""),
-                })
-                log.info(json.dumps({
-                    "msg":              "update_available",
-                    "userId":           user_id,
-                    "deviceId":         device_id,
-                    "packageName":      pkg_name,
-                    "installedVersion": installed_ver,
-                    "availableVersion": latest_ver,
-                    "fileName":         latest_pkg.get("fileName", ""),
-                }))
+                    if not entitlement.get("eligible", True):
+                        log.info(json.dumps({
+                            "msg":              "update_blocked_by_entitlement",
+                            "userId":           user_id,
+                            "deviceId":         device_id,
+                            "packageName":      pkg_name,
+                            "availableVersion": latest_ver,
+                            "firmwareCategory": firmware_category,
+                            "reason":           entitlement.get("reason"),
+                            "subscriptionTier": entitlement.get("subscriptionTier"),
+                            "minimumTier":      entitlement.get("minimumTier"),
+                        }))
+                    else:
+                        result_devices.append({
+                            "deviceId":         device_id,
+                            "otaStatus":        "REGISTERED",
+                            "package":          pkg_name,
+                            "installedVersion": installed_version,
+                            "availableVersion": latest_ver,
+                            "fileName":         latest_pkg.get("fileName", ""),
+                        })
+                        log.info(json.dumps({
+                            "msg":              "update_available",
+                            "userId":           user_id,
+                            "deviceId":         device_id,
+                            "packageName":      pkg_name,
+                            "installedVersion": installed_version,
+                            "availableVersion": latest_ver,
+                            "fileName":         latest_pkg.get("fileName", ""),
+                        }))
 
         _audit("USER_CHECK_UPDATES", user_id, {"userId": user_id}, "SUCCESS",
                devicesFound=len(result_devices))

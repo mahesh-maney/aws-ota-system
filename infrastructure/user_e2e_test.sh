@@ -63,9 +63,9 @@ _expect_one_of() {
 _reset_device() {
   aws dynamodb update-item --table-name digilux_device_data \
     --key "{\"deviceId\":{\"S\":\"${DEVICE_ID}\"},\"macAddress\":{\"S\":\"${DEVICE_MAC}\"}}" \
-    --update-expression "SET pendingJobId = :null, installedVersions.#pkg = :v, lastUpdatedAt = :ts" \
-    --expression-attribute-names "{\"#pkg\":\"$PACKAGE_NAME\"}" \
-    --expression-attribute-values "{\":null\":{\"NULL\":true},\":v\":{\"S\":\"1.0.0\"},\":ts\":{\"N\":\"$(date +%s)000\"}}" \
+    --update-expression "SET pendingJobId = :null, globalInstalledVersion = :v, #pkg = :pkgobj, lastUpdatedAt = :ts" \
+    --expression-attribute-names '{"#pkg":"package"}' \
+    --expression-attribute-values "{\":null\":{\"NULL\":true},\":v\":{\"S\":\"1.0.0\"},\":pkgobj\":{\"M\":{\"name\":{\"S\":\"$PACKAGE_NAME\"},\"installedVersion\":{\"S\":\"1.0.0\"}}},\":ts\":{\"N\":\"$(date +%s)000\"}}" \
     --region "$REGION" > /dev/null 2>&1
   echo "  [RESET] Device → $PACKAGE_NAME@1.0.0, pendingJobId=null"
 }
@@ -103,9 +103,9 @@ _set_device_version() {
   local ver="$1"
   aws dynamodb update-item --table-name digilux_device_data \
     --key "{\"deviceId\":{\"S\":\"${DEVICE_ID}\"},\"macAddress\":{\"S\":\"${DEVICE_MAC}\"}}" \
-    --update-expression "SET pendingJobId = :null, installedVersions.#pkg = :v" \
-    --expression-attribute-names "{\"#pkg\":\"$PACKAGE_NAME\"}" \
-    --expression-attribute-values "{\":null\":{\"NULL\":true},\":v\":{\"S\":\"$ver\"}}" \
+    --update-expression "SET pendingJobId = :null, globalInstalledVersion = :v, #pkg = :pkgobj" \
+    --expression-attribute-names '{"#pkg":"package"}' \
+    --expression-attribute-values "{\":null\":{\"NULL\":true},\":v\":{\"S\":\"$ver\"},\":pkgobj\":{\"M\":{\"name\":{\"S\":\"$PACKAGE_NAME\"},\"installedVersion\":{\"S\":\"$ver\"}}}}" \
     --region "$REGION" > /dev/null 2>&1
   echo "  [RESET] Device → $PACKAGE_NAME@$ver, pendingJobId=null"
 }

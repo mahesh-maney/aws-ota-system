@@ -5,14 +5,17 @@ Updates OTA fields on the existing digilux_device_data item for this device.
 Topic: iot/device/+/ota/register
 Message: {
   "deviceId": "uuid",
-  "thingName": "digilux-{mac}",
-  "model": "DGX-1000",
-  "hwRevision": "1.2",
-  "installedVersions": {
-    "controller-app": "1.0.0",
-    "philips-hue-driver": "2.0.0"
+  "globalInstalledVersion": "1.0.0",
+  "package": {
+    "name": "controller-app",
+    "installedVersion": "1.0.0"
   }
 }
+package.installedVersion carries package-type-specific version info:
+  Network controller : .jar
+  Z2M                : .tar
+  Zigbee             : .bin
+  Custom/misc        : .db / .yml / .yaml / .cert / .prop
 """
 import datetime
 import json
@@ -50,10 +53,9 @@ def _audit(event: str, actor: str, resource: dict, result: str, **extra) -> None
 def lambda_handler(event, context):
     log.debug(json.dumps({"msg": "register_event_raw", "payload": event}))
     try:
-        device_id  = event.get("deviceId")
-        model      = event.get("model", "unknown")
-        hw_rev     = event.get("hwRevision", "unknown")
-        installed  = event.get("installedVersions", {})
+        device_id         = event.get("deviceId")
+        installed_version = event.get("globalInstalledVersion", "")
+        package           = event.get("package", {})
 
         if not device_id:
             log.warning(f"Register event missing deviceId — skipping. event={event}")
@@ -64,10 +66,11 @@ def lambda_handler(event, context):
         thing_name = device_id
 
         log.info(json.dumps({
-            "msg": "device_register_received",
-            "deviceId": device_id, "thingName": thing_name,
-            "model": model, "hwRevision": hw_rev,
-            "installedVersions": installed,
+            "msg":              "device_register_received",
+            "deviceId":         device_id,
+            "thingName":        thing_name,
+            "installedVersion": installed_version,
+            "package":          package,
         }))
 
         now_ms     = int(time.time() * 1000)
@@ -82,52 +85,58 @@ def lambda_handler(event, context):
             log.warning(f"Device {device_id} not found in {DEVICE_DATA_TABLE} — OTA register skipped")
             return
 
-        mac_address   = existing["macAddress"]
-        prev_versions = existing.get("installedVersions", {})
-        changed       = {k: v for k, v in installed.items() if prev_versions.get(k) != v}
-        first_time    = "thingName" not in existing
+        mac_address      = existing["macAddress"]
+        prev_version     = existing.get("installedVersion", "")
+        version_changed  = prev_version != installed_version
+        first_time       = "thingName" not in existing
 
         data_table.update_item(
             Key={"deviceId": device_id, "macAddress": mac_address},
             UpdateExpression=(
-                "SET thingName = :tn, model = :m, hwRevision = :hw, "
-                "installedVersions = :iv, lastSeen = :ts, lastUpdatedAt = :ts, "
+                "SET thingName = :tn, globalInstalledVersion = :iv, #pkg = :pkg, "
+                "lastSeen = :ts, lastUpdatedAt = :ts, "
                 "pendingJobId = if_not_exists(pendingJobId, :null)"
             ),
+            ExpressionAttributeNames={"#pkg": "package"},
             ExpressionAttributeValues={
-                ":tn": thing_name, ":m": model, ":hw": hw_rev,
-                ":iv": installed,  ":ts": now_ms, ":null": None,
+                ":tn":  thing_name,
+                ":iv":  installed_version,  # stored as globalInstalledVersion
+                ":pkg": package,
+                ":ts":  now_ms,
+                ":null": None,
             },
         )
 
         if first_time:
             log.info(json.dumps({
-                "msg": "new_device_ota_registered",
-                "deviceId": device_id, "thingName": thing_name,
-                "model": model, "hwRevision": hw_rev,
-                "installedVersions": installed,
+                "msg":              "new_device_ota_registered",
+                "deviceId":         device_id,
+                "thingName":        thing_name,
+                "installedVersion": installed_version,
+                "package":          package,
             }))
             assigned_group = _assign_to_thing_group(thing_name)
             _audit("DEVICE_FIRST_REGISTRATION", f"device:{device_id}",
                    {"deviceId": device_id, "thingName": thing_name},
                    "SUCCESS",
-                   model=model, hwRevision=hw_rev,
-                   installedVersions=installed,
+                   installedVersion=installed_version,
+                   package=package,
                    assignedGroup=assigned_group)
         else:
             log.info(json.dumps({
-                "msg": "device_reconnected",
-                "deviceId": device_id, "thingName": thing_name,
-                "model": model, "hwRevision": hw_rev,
-                "installedVersions": installed,
-                "versionChangesDetected": changed,
+                "msg":              "device_reconnected",
+                "deviceId":         device_id,
+                "thingName":        thing_name,
+                "installedVersion": installed_version,
+                "package":          package,
+                "versionChanged":   version_changed,
             }))
             _audit("DEVICE_RECONNECTED", f"device:{device_id}",
                    {"deviceId": device_id, "thingName": thing_name},
                    "SUCCESS",
-                   model=model, hwRevision=hw_rev,
-                   installedVersions=installed,
-                   versionChangesDetected=changed)
+                   installedVersion=installed_version,
+                   package=package,
+                   versionChanged=version_changed)
 
     except Exception as e:
         log.exception(f"ERROR in device_register handler: {e}")

@@ -752,7 +752,7 @@
                 "available"
               ]
             },
-            "description": "Returns the installed versions and available updates for a specific device. Admin-only \u2014 no ownership check.\n\n- `deviceId` is the UUID from `digilux_device_inventory` (not the MAC-based IoT thing name)\n- `availableUpdates` is empty if the device is on the latest compatible version\n- `pendingJobId` is non-null if an active deployment is in progress\n- Version comparison uses semver integer tuples \u2014 `4.10.0 > 4.2.0`\n- `compatibleModels: []` (empty) in a package means it applies to all models\n\n**404** is returned if the OTA agent has never run on this device."
+            "description": "Returns the installed version and available updates for a specific device. Admin-only \u2014 no ownership check.\n\n- `deviceId` is the UUID from `digilux_device_data`\n- `globalInstalledVersion` \u2014 flat version string set by the OTA agent on registration\n- `package` \u2014 object with `name` (package identifier) and `installedVersion` (package-type-specific version)\n- `pendingJobId` is non-null if an active deployment is in progress\n- Version comparison uses semver integer tuples \u2014 `4.10.0 > 4.2.0`\n\n**404** is returned if the OTA agent has never run on this device."
           },
           "response": [
             {
@@ -765,7 +765,7 @@
                   "value": "application/json"
                 }
               ],
-              "body": "{\n  \"deviceId\": \"edb39bba-baf1-4700-968c-a42228e53aa0\",\n  \"thingName\": \"digilux-94ba062a250c\",\n  \"model\": \"DGX-1000\",\n  \"hwRevision\": \"1.0\",\n  \"pendingJobId\": null,\n  \"installedVersions\": {\n    \"controller-app\": \"3.0.0\"\n  },\n  \"availableUpdates\": [\n    {\n      \"packageName\": \"controller-app\",\n      \"packageType\": \"CONTROLLER_APP\",\n      \"currentVersion\": \"3.0.0\",\n      \"availableVersion\": \"4.0.0\",\n      \"artifactSize\": 2097810,\n      \"releaseNotes\": \"Zigbee 3.0 support\"\n    }\n  ],\n  \"updateCount\": 1\n}",
+              "body": "{\n  \"deviceId\": \"edb39bba-baf1-4700-968c-a42228e53aa0\",\n  \"thingName\": \"edb39bba-baf1-4700-968c-a42228e53aa0\",\n  \"globalInstalledVersion\": \"3.0.0\",\n  \"package\": {\n    \"name\": \"controller-app\",\n    \"installedVersion\": \"3.0.0\"\n  },\n  \"pendingJobId\": null,\n  \"availableVersion\": \"4.0.0\",\n  \"fileName\": \"controller-app-4.0.0.jar\"\n}",
               "originalRequest": {
                 "method": "GET",
                 "url": {
@@ -783,7 +783,7 @@
                   "value": "application/json"
                 }
               ],
-              "body": "{\n  \"deviceId\": \"edb39bba-baf1-4700-968c-a42228e53aa0\",\n  \"thingName\": \"digilux-94ba062a250c\",\n  \"model\": \"DGX-1000\",\n  \"hwRevision\": \"1.0\",\n  \"pendingJobId\": null,\n  \"installedVersions\": {\n    \"controller-app\": \"4.0.0\"\n  },\n  \"availableUpdates\": [],\n  \"updateCount\": 0\n}",
+              "body": "{\n  \"deviceId\": \"edb39bba-baf1-4700-968c-a42228e53aa0\",\n  \"thingName\": \"edb39bba-baf1-4700-968c-a42228e53aa0\",\n  \"globalInstalledVersion\": \"4.0.0\",\n  \"package\": {\n    \"name\": \"controller-app\",\n    \"installedVersion\": \"4.0.0\"\n  },\n  \"pendingJobId\": null,\n  \"availableVersion\": null\n}",
               "originalRequest": {
                 "method": "GET",
                 "url": {
@@ -1846,7 +1846,7 @@
                   "pm.test('Status is 200', () => pm.response.to.have.status(200));",
                   "const res = pm.response.json();",
                   "pm.test('devices array present', () => pm.expect(res.devices).to.be.an('array'));",
-                  "console.log('Devices:', res.devices.length, '| Total updates:', res.totalUpdates);"
+                  "console.log('Devices with updates:', res.devices.filter(d => d.availableVersion).length, '| Total devices:', res.devices.length);"
                 ],
                 "type": "text/javascript"
               }
@@ -2430,7 +2430,7 @@
                     "exec": [
                       "pm.test('Status is 200', () => pm.response.to.have.status(200));",
                       "const res = pm.response.json();",
-                      "console.log('Devices:', res.devices.length, '| Total updates:', res.totalUpdates);"
+                      "console.log('Devices with updates:', res.devices.filter(d => d.availableVersion).length, '| Total devices:', res.devices.length);"
                     ],
                     "type": "text/javascript"
                   }
@@ -2582,7 +2582,7 @@
                     "exec": [
                       "pm.test('Status is 200', () => pm.response.to.have.status(200));",
                       "const res = pm.response.json();",
-                      "console.log('Devices:', res.devices.length, '| Total updates:', res.totalUpdates);"
+                      "console.log('Devices with updates:', res.devices.filter(d => d.availableVersion).length, '| Total devices:', res.devices.length);"
                     ],
                     "type": "text/javascript"
                   }
