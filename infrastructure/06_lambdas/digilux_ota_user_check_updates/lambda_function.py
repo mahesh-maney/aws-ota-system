@@ -204,11 +204,10 @@ def lambda_handler(event, context):
 
         if not device_items:
             _audit("USER_CHECK_UPDATES", user_id, {"userId": user_id}, "SUCCESS",
-                   devicesFound=0, totalUpdates=0)
-            return _resp(200, {"devices": [], "totalUpdates": 0})
+                   devicesFound=0)
+            return _resp(200, {"devices": []})
 
         result_devices = []
-        total_updates  = 0
 
         for dev in device_items:
             device_id = dev.get("deviceId")
@@ -218,17 +217,12 @@ def lambda_handler(event, context):
 
             # ── OTA fields come directly from device_data item ────────────────
             installed_versions = dev.get("installedVersions") or {}
-            pending_job_id     = dev.get("pendingJobId")
 
             if not installed_versions:
                 log.info(f"Device {device_id} has no installedVersions (OTA agent not yet started)")
                 result_devices.append({
-                    "deviceId":          device_id,
-                    "otaStatus":         "NOT_REGISTERED",
-                    "message":           "OTA agent has not started on this device yet.",
-                    "installedVersions": {},
-                    "availableUpdates":  [],
-                    "pendingJobId":      None,
+                    "deviceId":  device_id,
+                    "otaStatus": "NOT_REGISTERED",
                 })
                 continue
 
@@ -239,8 +233,6 @@ def lambda_handler(event, context):
                 "msg": "device_beta_status",
                 "deviceId": device_id, "thingName": thing_name, "includeBeta": include_beta,
             }))
-
-            available_updates = []
 
             # ── Compare each installed package with latest available version ──
             for pkg_name, installed_ver in installed_versions.items():
@@ -273,51 +265,33 @@ def lambda_handler(event, context):
                     }))
                     continue
 
-                # Newer version available and entitled
-                artifact_size = latest_pkg.get("artifactSize", 0)
-                if isinstance(artifact_size, Decimal):
-                    artifact_size = int(artifact_size)
-
-                available_updates.append({
-                    "packageName":      pkg_name,
-                    "deviceType":       latest_pkg.get("deviceType", ""),
-                    "firmwareCategory": firmware_category,
-                    "releaseType":      latest_pkg.get("releaseType", "PROD"),
-                    "currentVersion":   installed_ver,
+                result_devices.append({
+                    "deviceId":         device_id,
+                    "otaStatus":        "REGISTERED",
+                    "package":          pkg_name,
+                    "installedVersion": installed_ver,
                     "availableVersion": latest_ver,
-                    "releaseNotes":     latest_pkg.get("releaseNotes", ""),
-                    "artifactSize":     artifact_size,
+                    "fileName":         latest_pkg.get("fileName", ""),
                 })
                 log.info(json.dumps({
-                    "msg": "update_available",
-                    "userId": user_id, "deviceId": device_id,
-                    "packageName": pkg_name,
-                    "currentVersion": installed_ver, "availableVersion": latest_ver,
-                    "firmwareCategory": firmware_category,
-                    "entitlementReason": entitlement.get("reason"),
+                    "msg":              "update_available",
+                    "userId":           user_id,
+                    "deviceId":         device_id,
+                    "packageName":      pkg_name,
+                    "installedVersion": installed_ver,
+                    "availableVersion": latest_ver,
+                    "fileName":         latest_pkg.get("fileName", ""),
                 }))
 
-            total_updates += len(available_updates)
-            result_devices.append({
-                "deviceId":          device_id,
-                "otaStatus":         "REGISTERED",
-                "model":             dev.get("model", ""),
-                "hwRevision":        dev.get("hwRevision", ""),
-                "installedVersions": dict(installed_versions),
-                "pendingJobId":      pending_job_id,
-                "availableUpdates":  available_updates,
-                "updateCount":       len(available_updates),
-            })
-
         _audit("USER_CHECK_UPDATES", user_id, {"userId": user_id}, "SUCCESS",
-               devicesFound=len(result_devices), totalUpdates=total_updates)
+               devicesFound=len(result_devices))
 
         log.info(json.dumps({
             "msg": "check_updates_complete",
-            "userId": user_id, "devices": len(result_devices), "totalUpdates": total_updates,
+            "userId": user_id, "updates": len(result_devices),
         }))
 
-        return _resp(200, {"devices": result_devices, "totalUpdates": total_updates})
+        return _resp(200, {"devices": result_devices})
 
     except ClientError as e:
         code = e.response["Error"]["Code"]

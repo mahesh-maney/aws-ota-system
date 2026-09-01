@@ -183,7 +183,7 @@ USER_TOKEN=$(aws cognito-idp initiate-auth \
 
 # Check available updates for the user's devices
 curl -s "https://ds6nxf8ac5.execute-api.ap-south-1.amazonaws.com/smarthome/api/v1/ota/device/available-updates" \
-  -H "Authorization: $USER_TOKEN" | jq '.devices[].availableUpdates'
+  -H "Authorization: $USER_TOKEN" | jq '.devices[]'
 
 # Give consent (triggers download + install on the device)
 JOB=$(curl -s -X POST \
@@ -485,26 +485,16 @@ Returns all controller devices owned by the calling user and any available updat
     {
       "deviceId": "edb39bba-baf1-4700-968c-a42228e53aa0",
       "otaStatus": "REGISTERED",
-      "model": "DGX-1000",
-      "hwRevision": "1.0",
-      "installedVersions": { "controller-app": "3.0.0" },
-      "pendingJobId": null,
-      "availableUpdates": [
-        {
-          "packageName": "controller-app",
-          "packageType": "CONTROLLER_APP",
-          "currentVersion": "3.0.0",
-          "availableVersion": "4.0.0",
-          "releaseNotes": "Zigbee 3.0 support",
-          "artifactSize": 2097810
-        }
-      ],
-      "updateCount": 1
+      "package": "controller-app",
+      "installedVersion": "2.0.0",
+      "availableVersion": "5.0.0",
+      "fileName": "HomeAssistantUtility-5.0.0.jar"
     }
-  ],
-  "totalUpdates": 1
+  ]
 }
 ```
+
+One entry per `(device, package)` where an update is available. Devices already up to date are omitted.
 
 ---
 

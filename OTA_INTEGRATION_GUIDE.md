@@ -909,28 +909,16 @@ Returns all controller devices owned by the calling user and any available updat
     {
       "deviceId": "edb39bba-baf1-4700-968c-a42228e53aa0",
       "otaStatus": "REGISTERED",
-      "model": "DGX-1000",
-      "hwRevision": "1.0",
-      "installedVersions": { "controller-app": "3.0.0" },
-      "pendingJobId": null,
-      "availableUpdates": [
-        {
-          "packageName": "controller-app",
-          "deviceType": "Network_controller_firmware",
-          "currentVersion": "3.0.0",
-          "availableVersion": "4.0.0",
-          "releaseNotes": "Zigbee 3.0 support",
-          "artifactSize": 2097810
-        }
-      ],
-      "updateCount": 1
+      "package": "controller-app",
+      "installedVersion": "2.0.0",
+      "availableVersion": "5.0.0",
+      "fileName": "HomeAssistantUtility-5.0.0.jar"
     }
-  ],
-  "totalUpdates": 1
+  ]
 }
 ```
 
-> `otaStatus: NOT_REGISTERED` — OTA agent has never started on this device.
+One entry per `(device, package)` where an update is available. Devices with no updates are omitted. `otaStatus: NOT_REGISTERED` — OTA agent has never started on this device.
 
 > Only packages with `status=ACTIVE` **and** `activated=true` appear in user update checks. UAT packages only appear for devices in the `DGX-Canary` IoT Thing Group. The device will not appear until it has connected at least once.
 
@@ -1133,8 +1121,8 @@ An alternative to the consent flow. The Lambda returns an **S3 pre-signed downlo
 
 ```
 1. GET /api/v1/ota/device/available-updates  (user token)
-   → receive list of devices with availableUpdates
-   → Flutter shows "Update available: controller-app 4.0.0"
+   → receive flat list of (device, package) entries with updates
+   → Flutter shows "Update available: controller-app 5.0.0"
 
 2. User taps "Update Now" in Flutter app
 
@@ -1157,8 +1145,8 @@ An alternative to the consent flow. The Lambda returns an **S3 pre-signed downlo
 
 ```
 1. GET /api/v1/ota/device/available-updates  (user token)
-   → receive list of devices with availableUpdates
-   → Flutter shows "Update available: controller-app 4.0.0"
+   → receive flat list of (device, package) entries with updates
+   → Flutter shows "Update available: controller-app 5.0.0"
 
 2. User taps "Update Now" in Flutter app
 
@@ -1189,7 +1177,7 @@ USER_TOKEN="<user-cognito-id-token>"
 
 # Step 1 — check available updates for user's devices
 curl -s -X GET "$BASE_URL/api/v1/ota/device/available-updates" \
-  -H "Authorization: $USER_TOKEN" | jq '.devices[].availableUpdates'
+  -H "Authorization: $USER_TOKEN" | jq '.devices[]'
 
 # Step 2 — get download link (Lambda also pushes URL to device via MQTT)
 RESP=$(curl -s -X POST "$BASE_URL/api/v1/ota/my/updates/download-link" \
@@ -1644,8 +1632,8 @@ This resets the device to `controller-app@2.0.0` with no pending job — allowin
 | # | Action | Expected |
 |---|---|---|
 | 1 | `GET /ota/device/available-updates` with a valid non-admin token | `200` with `devices` array |
-| 2 | Device at `2.0.0`; ACTIVE package at `4.0.0` | `availableUpdates` contains `controller-app 4.0.0` |
-| 3 | No packages published yet | `availableUpdates: []` for that device |
+| 2 | Device at `2.0.0`; ACTIVE package at `5.0.0` | `devices` contains flat entry with `package`, `installedVersion`, `availableVersion`, `fileName` |
+| 3 | Device already on latest version | `devices: []` (no entries for up-to-date devices) |
 
 #### TC-U02 Give Update Consent
 | # | Action | Expected |

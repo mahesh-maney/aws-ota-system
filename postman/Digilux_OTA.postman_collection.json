@@ -1887,16 +1887,16 @@
                   "value": "application/json"
                 }
               ],
-              "body": "{\n  \"devices\": [\n    {\n      \"deviceId\": \"edb39bba-baf1-4700-968c-a42228e53aa0\",\n      \"otaStatus\": \"REGISTERED\",\n      \"model\": \"DGX-1000\",\n      \"hwRevision\": \"1.0\",\n      \"installedVersions\": {\n        \"controller-app\": \"3.0.0\"\n      },\n      \"pendingJobId\": null,\n      \"availableUpdates\": [\n        {\n          \"packageName\": \"controller-app\",\n          \"packageType\": \"CONTROLLER_APP\",\n          \"currentVersion\": \"3.0.0\",\n          \"availableVersion\": \"4.0.0\",\n          \"releaseNotes\": \"Zigbee 3.0 support, improved stability\",\n          \"artifactSize\": 2097810\n        }\n      ],\n      \"updateCount\": 1\n    }\n  ],\n  \"totalUpdates\": 1\n}",
+              "body": "{\n  \"devices\": [\n    {\n      \"deviceId\": \"edb39bba-baf1-4700-968c-a42228e53aa0\",\n      \"otaStatus\": \"REGISTERED\",\n      \"package\": \"controller-app\",\n      \"installedVersion\": \"2.0.0\",\n      \"availableVersion\": \"5.0.0\",\n      \"fileName\": \"HomeAssistantUtility-5.0.0.jar\"\n    }\n  ]\n}",
               "originalRequest": {
                 "method": "GET",
                 "url": {
-                  "raw": "{{base_url}}/api/v1/ota/my/updates"
+                  "raw": "{{base_url}}/api/v1/ota/device/available-updates"
                 }
               }
             },
             {
-              "name": "200 OK \u2014 Up to date",
+              "name": "200 OK \u2014 Up to date (no updates)",
               "status": "OK",
               "code": 200,
               "header": [
@@ -1905,11 +1905,11 @@
                   "value": "application/json"
                 }
               ],
-              "body": "{\n  \"devices\": [\n    {\n      \"deviceId\": \"edb39bba-baf1-4700-968c-a42228e53aa0\",\n      \"otaStatus\": \"REGISTERED\",\n      \"model\": \"DGX-1000\",\n      \"hwRevision\": \"1.0\",\n      \"installedVersions\": {\n        \"controller-app\": \"4.0.0\"\n      },\n      \"pendingJobId\": null,\n      \"availableUpdates\": [],\n      \"updateCount\": 0\n    }\n  ],\n  \"totalUpdates\": 0\n}",
+              "body": "{\n  \"devices\": []\n}",
               "originalRequest": {
                 "method": "GET",
                 "url": {
-                  "raw": "{{base_url}}/api/v1/ota/my/updates"
+                  "raw": "{{base_url}}/api/v1/ota/device/available-updates"
                 }
               }
             },
@@ -1923,11 +1923,11 @@
                   "value": "application/json"
                 }
               ],
-              "body": "{\n  \"devices\": [\n    {\n      \"deviceId\": \"edb39bba-baf1-4700-968c-a42228e53aa0\",\n      \"otaStatus\": \"NOT_REGISTERED\",\n      \"message\": \"OTA agent has not started on this device yet.\",\n      \"installedVersions\": {},\n      \"availableUpdates\": [],\n      \"pendingJobId\": null\n    }\n  ],\n  \"totalUpdates\": 0\n}",
+              "body": "{\n  \"devices\": [\n    {\n      \"deviceId\": \"edb39bba-baf1-4700-968c-a42228e53aa0\",\n      \"otaStatus\": \"NOT_REGISTERED\"\n    }\n  ]\n}",
               "originalRequest": {
                 "method": "GET",
                 "url": {
-                  "raw": "{{base_url}}/api/v1/ota/my/updates"
+                  "raw": "{{base_url}}/api/v1/ota/device/available-updates"
                 }
               }
             },
@@ -1941,11 +1941,11 @@
                   "value": "application/json"
                 }
               ],
-              "body": "{\n  \"devices\": [],\n  \"totalUpdates\": 0\n}",
+              "body": "{\n  \"devices\": []\n}",
               "originalRequest": {
                 "method": "GET",
                 "url": {
-                  "raw": "{{base_url}}/api/v1/ota/my/updates"
+                  "raw": "{{base_url}}/api/v1/ota/device/available-updates"
                 }
               }
             }
