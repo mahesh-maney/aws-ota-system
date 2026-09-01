@@ -225,7 +225,7 @@ def _get_device_item(device_id: str) -> dict | None:
     """
     Query digilux_device_data by deviceId (hash key). Returns the first item or None.
     The item carries userId (for ownership check), macAddress (for UpdateItem),
-    and OTA fields (installedVersions, pendingJobId, thingName).
+    and OTA fields (globalInstalledVersion, package, pendingJobId, thingName).
     """
     tbl  = dynamo.Table(DEVICE_DATA_TABLE)
     resp = tbl.query(KeyConditionExpression=Key("deviceId").eq(device_id))
@@ -413,7 +413,7 @@ def lambda_handler(event, context):
             })
 
         # ── 8. Version check — must be strictly newer than installed ──────────
-        installed_ver = (dev.get("installedVersions") or {}).get(package_name)
+        installed_ver = dev.get("globalInstalledVersion") or ""
         if installed_ver and not _is_newer(version, installed_ver):
             log.info(json.dumps({
                 "msg":              "version_not_newer",
