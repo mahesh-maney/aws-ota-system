@@ -102,6 +102,9 @@ assert_code "$code" "400" "Missing releaseType → 400"
 code=$(http_code POST "/api/v1/ota/packages/upload-artefact" '{"deviceType":"INVALID_DEVICE","version":"1.0.0","releaseType":"PROD"}')
 assert_code "$code" "400" "Invalid deviceType → 400"
 
+code=$(http_code POST "/api/v1/ota/packages/upload-artefact" '{"deviceType":"Network_controller_firmware","version":"1.0.0","releaseType":"PROD","checksum":"abc","fileName":"firmware.bin"}')
+assert_code "$code" "400" "Non-.tar fileName override → 400"
+
 # ─────────────────────────────────────────────────────────────────────────────
 _section "T03 — INPUT VALIDATION: deployments"
 # ─────────────────────────────────────────────────────────────────────────────
@@ -135,10 +138,33 @@ _section "T05 — PACKAGE UPLOAD FLOW"
 # Use a unique version to avoid collision
 TEST_VERSION="5.0.$(date +%s)-$RANDOM"
 
-# Generate test artifact and compute its SHA256 checksum upfront
-echo "test content for OTA E2E validation $(date)" | gzip > /tmp/test_artifact.bin
-TEST_CHECKSUM=$(sha256sum /tmp/test_artifact.bin | awk '{print $1}')
-echo "  → test artifact SHA256: ${TEST_CHECKSUM:0:16}..."
+# Generate a valid .tar containing manifest.json (required by artifact_processor)
+python3 - <<'PYEOF'
+import tarfile, json, io
+
+manifest = {
+    "packageName":      "HomeAssistantUtility",
+    "version":          "e2e-test",
+    "releaseNotes":     "E2E test package",
+    "files":            [{"name": "dummy.bin", "type": "bin", "sha256": "abc123"}],
+    "minGlobalVersion": "1.0.0",
+    "createdAt":        "2026-09-09T00:00:00Z"
+}
+manifest_bytes = json.dumps(manifest).encode()
+dummy_bytes    = b"e2e test binary content for OTA validation"
+
+buf = io.BytesIO()
+with tarfile.open(fileobj=buf, mode="w:") as tf:
+    for name, data in [("manifest.json", manifest_bytes), ("dummy.bin", dummy_bytes)]:
+        info      = tarfile.TarInfo(name=name)
+        info.size = len(data)
+        tf.addfile(info, io.BytesIO(data))
+
+with open("/tmp/test_artifact.tar", "wb") as f:
+    f.write(buf.getvalue())
+PYEOF
+TEST_CHECKSUM=$(sha256sum /tmp/test_artifact.tar | awk '{print $1}')
+echo "  → test artifact (tar + manifest.json) SHA256: ${TEST_CHECKSUM:0:16}..."
 
 UPLOAD_RESP=$(call POST "/api/v1/ota/packages/upload-artefact" \
   "{\"deviceType\":\"Network_controller_firmware\",\"version\":\"${TEST_VERSION}\",\"releaseType\":\"PROD\",\"checksum\":\"${TEST_CHECKSUM}\",\"releaseNotes\":\"E2E test package\"}")
@@ -165,43 +191,46 @@ S3_KEY=$(echo "$UPLOAD_RESP" | python3 -c "import json,sys; print(json.load(sys.
 UPLOAD_TOKEN=$(echo "$UPLOAD_RESP" | python3 -c "import json,sys; print(json.load(sys.stdin).get('uploadToken',''))")
 echo "  → packageName: $TEST_PKG_NAME  s3Key: $S3_KEY"
 
-# PUT binary to S3 — must include x-amz-meta-upload-token (baked into presigned URL signature)
+# PUT tar to S3 — must include x-amz-meta-upload-token (baked into presigned URL signature)
 HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" -X PUT "$UPLOAD_URL" \
   -H "Content-Type: application/octet-stream" \
   -H "x-amz-meta-upload-token: ${UPLOAD_TOKEN}" \
-  --data-binary @/tmp/test_artifact.bin)
-assert_code "$HTTP_CODE" "200" "Binary PUT to S3 pre-signed URL → 200"
+  --data-binary @/tmp/test_artifact.tar)
+assert_code "$HTTP_CODE" "200" "Tar PUT to S3 pre-signed URL → 200"
 
-# Wait for artifact processor (S3 event → Lambda → ACTIVE)
-echo "  → Waiting for artifact_processor (up to 15s)..."
-for i in $(seq 1 15); do
+# Wait for artifact_processor (S3 event → validate + encrypt + promote → ACTIVE)
+# Allow up to 30s — processor now downloads, validates, AES-encrypts, uploads .enc+.sig
+echo "  → Waiting for artifact_processor to encrypt and promote (up to 30s)..."
+STATUS="PENDING"
+for i in $(seq 1 30); do
   sleep 1
   STATUS=$(aws dynamodb get-item \
     --table-name digilux_ota_packages \
     --key "{\"packageName\":{\"S\":\"${TEST_PKG_NAME}\"},\"version\":{\"S\":\"${TEST_VERSION}\"}}" \
     --region "$REGION" \
     --query 'Item.status.S' --output text 2>/dev/null)
-  [ "$STATUS" = "ACTIVE" ] && break
+  [ "$STATUS" = "ACTIVE" ] || [ "$STATUS" = "CORRUPTED" ] && break
 done
 [ "$STATUS" = "ACTIVE" ] \
-  && _pass "Package auto-promoted to ACTIVE in ${i}s (S3 event → artifact_processor)" \
-  || _fail "Package not ACTIVE after 15s — status=$STATUS"
+  && _pass "Package auto-promoted to ACTIVE in ${i}s (validated + encrypted + signed)" \
+  || _fail "Package not ACTIVE after 30s — status=$STATUS"
 
-# Verify SHA256 and signature were written
-SHA256=$(aws dynamodb get-item \
+# Verify sha256, signature, encS3Key, aesKeyEnc, aesIv all written by artifact_processor
+PKG_ITEM=$(aws dynamodb get-item \
   --table-name digilux_ota_packages \
   --key "{\"packageName\":{\"S\":\"${TEST_PKG_NAME}\"},\"version\":{\"S\":\"${TEST_VERSION}\"}}" \
-  --region "$REGION" --query 'Item.sha256.S' --output text 2>/dev/null)
-SIG=$(aws dynamodb get-item \
-  --table-name digilux_ota_packages \
-  --key "{\"packageName\":{\"S\":\"${TEST_PKG_NAME}\"},\"version\":{\"S\":\"${TEST_VERSION}\"}}" \
-  --region "$REGION" --query 'Item.signature.S' --output text 2>/dev/null)
-[ -n "$SHA256" ] && [ "$SHA256" != "None" ] \
-  && _pass "SHA256 written by artifact_processor: ${SHA256:0:16}..." \
-  || _fail "SHA256 missing after ACTIVE promotion"
-[ -n "$SIG" ] && [ "$SIG" != "None" ] \
-  && _pass "ECDSA signature written by artifact_processor" \
-  || _fail "Signature missing after ACTIVE promotion"
+  --region "$REGION" --output json 2>/dev/null)
+SHA256=$(echo    "$PKG_ITEM" | python3 -c "import json,sys; print(json.load(sys.stdin).get('Item',{}).get('sha256',{}).get('S',''))" 2>/dev/null)
+SIG=$(echo       "$PKG_ITEM" | python3 -c "import json,sys; print(json.load(sys.stdin).get('Item',{}).get('signature',{}).get('S',''))" 2>/dev/null)
+ENC_KEY=$(echo   "$PKG_ITEM" | python3 -c "import json,sys; print(json.load(sys.stdin).get('Item',{}).get('encS3Key',{}).get('S',''))" 2>/dev/null)
+AES_ENC=$(echo   "$PKG_ITEM" | python3 -c "import json,sys; print(json.load(sys.stdin).get('Item',{}).get('aesKeyEnc',{}).get('S',''))" 2>/dev/null)
+AES_IV=$(echo    "$PKG_ITEM" | python3 -c "import json,sys; print(json.load(sys.stdin).get('Item',{}).get('aesIv',{}).get('S',''))" 2>/dev/null)
+
+[ -n "$SHA256"  ] && [ "$SHA256"  != "None" ] && _pass "SHA256 written by artifact_processor: ${SHA256:0:16}..."  || _fail "SHA256 missing after ACTIVE promotion"
+[ -n "$SIG"     ] && [ "$SIG"     != "None" ] && _pass "ECDSA signature written by artifact_processor"           || _fail "Signature missing after ACTIVE promotion"
+[ -n "$ENC_KEY" ] && [ "$ENC_KEY" != "None" ] && _pass "encS3Key written (encrypted artifact in S3): ${ENC_KEY}" || _fail "encS3Key missing — artifact was not encrypted"
+[ -n "$AES_ENC" ] && [ "$AES_ENC" != "None" ] && _pass "aesKeyEnc written (double-encrypted AES key in DynamoDB)" || _fail "aesKeyEnc missing — AES key not stored"
+[ -n "$AES_IV"  ] && [ "$AES_IV"  != "None" ] && _pass "aesIv written (GCM nonce stored)"                       || _fail "aesIv missing"
 
 # Duplicate upload of same ACTIVE version → 409
 code=$(http_code POST "/api/v1/ota/packages/upload-artefact" \
@@ -510,6 +539,14 @@ SECRET=$(aws secretsmanager describe-secret \
 [ "$SECRET" = "digilux-ota-signing-key" ] \
   && _pass "ECDSA signing key present in Secrets Manager" \
   || _fail "ECDSA signing key missing from Secrets Manager"
+
+# Verify master encryption key in Secrets Manager
+MASTER_SECRET=$(aws secretsmanager describe-secret \
+  --secret-id digilux-ota-master-encryption-key --region "$REGION" \
+  --query 'Name' --output text 2>/dev/null)
+[ "$MASTER_SECRET" = "digilux-ota-master-encryption-key" ] \
+  && _pass "Master AES encryption key present in Secrets Manager" \
+  || _fail "Master AES encryption key missing from Secrets Manager"
 
 # ─────────────────────────────────────────────────────────────────────────────
 _section "T16 — LAMBDA HEALTH"
