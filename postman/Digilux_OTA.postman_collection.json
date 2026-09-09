@@ -1,7 +1,7 @@
 {
   "info": {
     "name": "Digilux OTA API v1.8",
-    "description": "REST API collection for the Digilux Over-The-Air (OTA) update system.\n\n**Base URL:** `https://iot.digilux.co.in/smarthome`\n\n---\n\n## Auth Tokens\n\n**Admin token** (for Packages, Deployments, Device folders):\n```\naws cognito-idp initiate-auth \\\n  --auth-flow USER_PASSWORD_AUTH \\\n  --client-id q7189jitfkk4ttesepkgls491 \\\n  --auth-parameters USERNAME=mahesh.maney@gmail.com,PASSWORD=Admin@1234 \\\n  --region ap-south-1 \\\n  --query 'AuthenticationResult.IdToken' \\\n  --output text\n```\nPaste into the `admin_token` collection variable.\n\n**User token** (for End User Updates folder):\n```\naws cognito-idp initiate-auth \\\n  --auth-flow USER_PASSWORD_AUTH \\\n  --client-id q7189jitfkk4ttesepkgls491 \\\n  --auth-parameters USERNAME=demotesthw5@yopmail.com,PASSWORD=DigiluxOTA@Test1 \\\n  --region ap-south-1 \\\n  --query 'AuthenticationResult.IdToken' \\\n  --output text\n```\nPaste into the `user_token` collection variable.\n\n---\n\n## Folder Structure\n\n| Folder | Auth | Description |\n|--------|------|-------------|\n| Packages | `admin_token` | Upload & manage firmware packages |\n| Device (Admin) | `admin_token` | Admin device update check |\n| Deployments | `admin_token` | Create & manage fleet deployments |\n| Full Deployment Flow | `admin_token` | End-to-end admin upload \u2192 deploy sequence |\n| End User Updates | `user_token` | User-initiated update flow (Flutter app) |\n\n---\n\n## Collection Variables\n\n| Variable | Description |\n|----------|-------------|\n| `base_url` | API base URL |\n| `admin_token` | Cognito ID token \u2014 admin group user |\n| `user_token` | Cognito ID token \u2014 regular user (owns test device) |\n| `device_id` | Test device UUID |\n| `job_id` | Auto-populated by Create Deployment / Give Consent |\n| `consent_id` | Auto-populated by Give Consent |\n| `upload_url` | Auto-populated by Get Upload URL (SINGLE mode) |\n| `upload_id` | Auto-populated by Get Upload URL (MULTIPART mode) |\n| `upload_type` | `SINGLE` or `MULTIPART` \u2014 set by Get Upload URL |\n| `package_name` | Package name for requests |\n| `package_version` | Package version for requests |",
+    "description": "Digilux OTA API \u2014 v2.7 (secure artifact delivery: AES-256-GCM + ECDSA)",
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json",
     "_postman_id": "digilux-ota-v1-4"
   },
@@ -137,7 +137,7 @@
                 }
               }
             },
-            "description": "Fetches an admin token from the dedicated OTA admin Cognito pool and saves it to {{admin_token}}.\n\nRun this once before using any admin endpoint. The token is valid for 24 hours."
+            "description": "Get a Cognito ID token from the **OTA admin pool** (`ap-south-1_jUErEu7CL`).\n\nUse this token for **admin routes only**:\n- `POST /packages/upload-artefact`\n- `GET /packages`\n- `POST /deployments`\n- `GET /deployments`\n- `POST /deployments/{jobId}/abort`\n- `GET /beta-users`, `POST /beta-users`, `DELETE /beta-users/{userId}`\n\n**Do NOT use this token for end-user routes** \u2014 they use a different authorizer and will return `HTTP 401`.\n\nClient ID: `2qmig1uh220ttntbl0gfvcde4f`"
           },
           "event": [
             {
@@ -184,7 +184,7 @@
                 }
               }
             },
-            "description": "Fetches a user token from the main Digilux app Cognito pool and saves it to {{user_token}}.\n\nRun this once before using any End User endpoint. The token is valid for 24 hours."
+            "description": "Get a Cognito ID token from the **app pool** (`ap-south-1_h1o8s7257`).\n\nUse this token for **all end-user routes**:\n- `GET /device/available-updates`\n- `POST /my/updates/consent`\n- `POST /my/updates/download-link`\n- `GET /my/updates/{jobId}/status`\n\n**Do NOT use the admin pool token for these routes** \u2014 the authorizer (`cognito_authorizer_v2`) only accepts app pool tokens and returns `HTTP 401` for any other token.\n\nClient ID: `q7189jitfkk4ttesepkgls491`"
           },
           "event": [
             {
@@ -358,7 +358,7 @@
             ],
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"deviceType\": \"{{device_type}}\",\n  \"version\": \"{{package_version}}\",\n  \"releaseType\": \"{{release_type}}\",\n  \"checksum\": \"{{checksum}}\",\n  \"totalSize\": 0,\n  \"fileName\": \"\",\n  \"releaseNotes\": \"\"\n}",
+              "raw": "{\n  \"deviceType\": \"{{device_type}}\",\n  \"version\": \"{{package_version}}\",\n  \"releaseType\": \"{{release_type}}\",\n  \"checksum\": \"{{checksum}}\",\n  \"totalSize\": 0,\n  \"releaseNotes\": \"\"\n}",
               "options": {
                 "raw": {
                   "language": "json"
@@ -378,7 +378,7 @@
                 "upload-artefact"
               ]
             },
-            "description": "Initiates a firmware upload. Returns either a single presigned S3 URL (SINGLE mode) or per-chunk presigned URLs (MULTIPART mode).\n\n**Upload mode is selected automatically based on `totalSize`:**\n- `totalSize` not provided or \u2264 10MB \u2192 **SINGLE**: use `uploadUrl` to PUT binary directly\n- `totalSize` > 10MB \u2192 **MULTIPART**: PUT each `chunkUrls[n].url` with its chunk, then call `POST /upload-artefact/complete`\n\n**Required fields:** `deviceType`, `version`, `releaseType`, `checksum`\n\n**Optional fields:** `totalSize` (bytes), `fileName`, `releaseNotes`\n\nAfter upload, poll `GET /packages/{{package_name}}/{{package_version}}` until `status=ACTIVE`."
+            "description": "Initiates a firmware upload. Returns a presigned S3 URL.\n\n**Artifact requirement:** Only `.tar` archives are accepted. The tar must contain a `manifest.json` at the root with fields: `packageName`, `version`, `files`, `minGlobalVersion`, `createdAt`.\n\nAll `deviceType` values now produce a `.tar` filename. Passing a `fileName` that does not end in `.tar` returns `HTTP 400`.\n\n**Upload mode is selected automatically based on `totalSize`:**\n- `totalSize` not provided or \u2264 10 MB \u2192 **SINGLE**: use `uploadUrl` to PUT the tar directly\n- `totalSize` > 10 MB \u2192 **MULTIPART**: PUT each `chunkUrls[n].url`, then call `POST /upload-artefact/complete`\n\n**After upload**, the `artifact_processor` lambda:\n1. Validates the tar and `manifest.json`\n2. Computes SHA256 and verifies it against `checksum`\n3. Signs the artifact with ECDSA\n4. Encrypts the entire tar with AES-256-GCM (unique key per artifact)\n5. Uploads `payload.enc` + `signature.sig` to S3\n6. Double-encrypts the AES key and stores it in DynamoDB\n7. Deletes the raw tar \u2014 only the encrypted copy remains\n8. Promotes status `PENDING` \u2192 `ACTIVE`\n\nPoll `GET /packages/{packageName}/{version}` until `status = ACTIVE` (usually 3\u201310s)."
           },
           "response": [
             {
@@ -486,7 +486,7 @@
                 "{{upload_url}}"
               ]
             },
-            "description": "Step 2 of the upload flow. PUT the binary artifact directly to S3 using the pre-signed URL from the previous step.\n\n- **No Authorization header** \u2014 the pre-signed URL handles authentication\n- Set `Content-Type: application/octet-stream`\n- Select your binary file in Body > file tab\n- S3 returns HTTP 200 with an empty body on success\n\nAfter this completes, poll `List Packages` (with `packageName` filter) to confirm `status` moves to `ACTIVE`. The artifact processor Lambda runs SHA-256 + ECDSA signing automatically."
+            "description": "Step 2 of the upload flow. PUT the `.tar` archive to S3 using the pre-signed URL from the previous step.\n\n- **No Authorization header** \u2014 the pre-signed URL handles authentication\n- Set `Content-Type: application/octet-stream`\n- Select your `.tar` file in Body > file tab\n- S3 returns HTTP 200 with an empty body on success\n\nAfter this completes, the `artifact_processor` lambda fires automatically (S3 event). It validates the tar, encrypts it with AES-256-GCM, signs it with ECDSA, and promotes the package to `ACTIVE`. Poll package status until `ACTIVE`."
           },
           "response": [
             {
@@ -1593,7 +1593,7 @@
                 "upload-artefact"
               ]
             },
-            "description": "Request a pre-signed S3 upload URL for a new firmware package.\n\n**Required fields:**\n| Field | Description | Example |\n|-------|-------------|---------|\n| `deviceType` | One of the 4 supported device types | `Network_controller_firmware` |\n| `version` | Semantic version string | `1.2.3` |\n| `releaseType` | `PROD` (all devices) or `UAT` (canary group only) | `PROD` |\n\n**Supported `deviceType` values:**\n| deviceType | Derived filename | operationType |\n|---|---|---|\n| `Network_controller_firmware` | `HomeAssistantUtility-{version}.jar` | 1 |\n| `Network_controller_zigbee_firmware` | `ZigbeeFirmware-{version}.tar` | 2 |\n| `Network_controller_Z2M_Firmware` | `Z2MFirmware-{version}.bin` | 3 |\n| `Network_controller_Miscellaneous` | `NetControllerMisc-{version}.py` | 4 |\n| `Network_controller_zigbee_stack_firmware` | `ZigbeeStackFirmware-{version}.bin` | 5 |\n\n**S3 key format:** `Network_controller_firmware/{deviceType}/{version}/{fileName}`\n\n**Response:** `uploadUrl` (PUT to this), `s3Key`, `packageName`, `status=PENDING`\n\n**Next step:** PUT the binary to `uploadUrl` \u2192 artifact_processor promotes to `ACTIVE` automatically."
+            "description": "Request a presigned S3 upload URL. The artifact **must be a `.tar` archive** containing `manifest.json` at the root. Saves `upload_url` and `upload_token` to environment variables for the next step."
           },
           "response": []
         },
@@ -1628,7 +1628,7 @@
                 "{{upload_url}}"
               ]
             },
-            "description": "PUT binary to the pre-signed S3 URL. No Authorization header needed."
+            "description": "PUT the `.tar` archive to the pre-signed S3 URL. No Authorization header needed.\n\nAfter upload, `artifact_processor` fires automatically: validates tar + manifest.json, encrypts with AES-256-GCM, signs with ECDSA, stores encrypted artifact in S3, deletes raw tar, promotes status to ACTIVE."
           },
           "response": []
         },
@@ -2303,7 +2303,7 @@
                 "download-link"
               ]
             },
-            "description": "Returns a pre-signed S3 download URL for the firmware package AND simultaneously publishes the download payload to the device's OTA MQTT topic (`iot/device/{deviceId}/ota`).\n\nThe device receives the URL over MQTT and begins downloading from S3 immediately. The Flutter app also receives the URL and can pass it directly to the device if needed (e.g., if the device was offline when MQTT was published).\n\n**No IoT Job is created** \u2014 lighter weight than the consent flow with no 60-minute job timeout.\n\n**MQTT payload sent to device:**\n```json\n{\n  \"operationType\": 1,\n  \"packageName\": \"controller-app\",\n  \"version\": \"4.0.0\",\n  \"packageType\": \"deb\",\n  \"downloadUrl\": \"<S3 pre-signed URL>\",\n  \"sha256\": \"<hex digest>\",\n  \"signature\": \"<ECDSA P-256 base64>\",\n  \"size\": 12456789,\n  \"expiresAt\": \"2026-08-04T15:00:00Z\",\n  \"initiatedBy\": \"USER_APP\",\n  \"rollback\": true\n}\n```\n\n**Response fields:**\n- `downloadUrl` \u2014 pre-signed S3 GET URL (1-hour TTL)\n- `sha256` \u2014 artifact SHA-256 hex digest\n- `signature` \u2014 ECDSA P-256 signature for authenticity\n- `size` \u2014 artifact size in bytes\n- `expiresAt` \u2014 ISO-8601 URL expiry time\n- `mqttDelivered` \u2014 `true` if device notified; `false` if device offline\n- `message` \u2014 human-readable status\n\n**Security checks (same as consent, minus rate limit and IoT Job):**\n1. Valid JWT with `sub` claim\n2. UUID format validation for `deviceId`\n3. Device ownership verification\n4. Package must be `ACTIVE`\n5. Device must be in OTA inventory\n6. Version must be strictly newer than installed\n7. No pending update in progress"
+            "description": "Returns download URLs for the encrypted firmware artifact AND simultaneously publishes the full download payload (including the AES decryption key) to the device's OTA MQTT topic `iot/device/{deviceId}/ota`.\n\nThe device receives the payload over MQTT and must:\n1. Download `downloadUrl` \u2192 `payload.enc`\n2. Download `signatureUrl` \u2192 `signature.sig`\n3. Verify the ECDSA signature using the embedded public key\n4. Decrypt `payload.enc` using `aesKey` + `aesIv` (AES-256-GCM)\n5. Verify SHA256 of the decrypted tar\n6. Untar and apply\n\n**No IoT Job is created** \u2014 lighter weight than the consent flow.\n\n**MQTT payload sent to device:**\n```json\n{\n  \"operationType\": 1,\n  \"packageName\":  \"controller-app\",\n  \"version\":      \"2.5.0\",\n  \"downloadUrl\":  \"<presigned S3 URL to payload.enc>\",\n  \"signatureUrl\": \"<presigned S3 URL to signature.sig>\",\n  \"sha256\":       \"<hex SHA256 of original tar>\",\n  \"signature\":    \"<base64 ECDSA P-256 signature>\",\n  \"encrypted\":    true,\n  \"aesKey\":       \"<base64 AES-256 key \u2014 unique per artifact>\",\n  \"aesIv\":        \"<base64 96-bit GCM nonce>\",\n  \"size\":         4096000,\n  \"expiresAt\":    \"2026-09-09T11:00:00Z\",\n  \"initiatedBy\":  \"USER_APP\",\n  \"rollback\":     true\n}\n```\n\n**Response fields:**\n- `downloadUrl` \u2014 pre-signed S3 GET URL to `payload.enc` (encrypted tar)\n- `signatureUrl` \u2014 pre-signed S3 GET URL to `signature.sig`\n- `sha256` \u2014 SHA256 hex digest of the **original** (pre-encryption) tar\n- `signature` \u2014 ECDSA P-256 base64 signature\n- `encrypted` \u2014 always `true` for artifacts processed after v2.7\n- `aesKey` \u2014 base64 AES-256 decryption key (unique per artifact, delivered over TLS)\n- `aesIv` \u2014 base64 96-bit GCM nonce\n- `size` \u2014 artifact size in bytes\n- `expiresAt` \u2014 ISO-8601 URL expiry time\n- `mqttDelivered` \u2014 `true` if device notified; `false` if device offline\n\n**Auth:** App pool token (`ap-south-1_h1o8s7257`) required. Admin pool tokens are rejected with 401."
           },
           "response": [
             {
@@ -2316,7 +2316,7 @@
                   "value": "application/json"
                 }
               ],
-              "body": "{\n  \"downloadUrl\": \"https://digilux-ota-artifacts.s3.ap-south-1.amazonaws.com/packages/controller-app/4.0.0/controller-app-4.0.0.deb?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=...\",\n  \"sha256\": \"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\",\n  \"signature\": \"MEUCIQDxYqf9zNk3...\",\n  \"packageName\": \"controller-app\",\n  \"version\": \"4.0.0\",\n  \"size\": 12456789,\n  \"packageType\": \"deb\",\n  \"expiresAt\": \"2026-08-04T15:00:00Z\",\n  \"mqttDelivered\": true,\n  \"message\": \"Download URL sent to device via MQTT. Device will begin download shortly.\"\n}",
+              "body": "{\n  \"downloadUrl\": \"https://digilux-ota-artifacts.s3.ap-south-1.amazonaws.com/.../payload.enc?X-Amz-Signature=...\",\n  \"signatureUrl\": \"https://digilux-ota-artifacts.s3.ap-south-1.amazonaws.com/.../signature.sig?X-Amz-Signature=...\",\n  \"sha256\": \"84c6e3e96b2f75ee1f453c95bf123456789abcdef0123456789abcdef01234567\",\n  \"signature\": \"MEUCIQDxYqf9zNk3...\",\n  \"encrypted\": true,\n  \"aesKey\": \"base64-encoded-32-byte-aes-key==\",\n  \"aesIv\": \"base64-encoded-12-byte-iv==\",\n  \"packageName\": \"controller-app\",\n  \"version\": \"2.5.0\",\n  \"size\": 4096000,\n  \"packageType\": \"\",\n  \"expiresAt\": \"2026-09-09T11:00:00Z\",\n  \"mqttDelivered\": true,\n  \"message\": \"Download URL sent to device via MQTT. Device will begin download shortly.\"\n}",
               "originalRequest": {
                 "method": "POST",
                 "url": {
@@ -2334,7 +2334,7 @@
                   "value": "application/json"
                 }
               ],
-              "body": "{\n  \"downloadUrl\": \"https://digilux-ota-artifacts.s3.ap-south-1.amazonaws.com/packages/controller-app/4.0.0/controller-app-4.0.0.deb?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=...\",\n  \"sha256\": \"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\",\n  \"signature\": \"MEUCIQDxYqf9zNk3...\",\n  \"packageName\": \"controller-app\",\n  \"version\": \"4.0.0\",\n  \"size\": 12456789,\n  \"packageType\": \"deb\",\n  \"expiresAt\": \"2026-08-04T15:00:00Z\",\n  \"mqttDelivered\": false,\n  \"message\": \"Download URL generated. Device may be offline \u2014 pass the URL directly to the device when it comes online.\"\n}",
+              "body": "{\n  \"downloadUrl\": \"https://digilux-ota-artifacts.s3.ap-south-1.amazonaws.com/.../payload.enc?X-Amz-Signature=...\",\n  \"signatureUrl\": \"https://digilux-ota-artifacts.s3.ap-south-1.amazonaws.com/.../signature.sig?X-Amz-Signature=...\",\n  \"sha256\": \"84c6e3e96b2f75ee1f453c95bf123456789abcdef0123456789abcdef01234567\",\n  \"signature\": \"MEUCIQDxYqf9zNk3...\",\n  \"encrypted\": true,\n  \"aesKey\": \"base64-encoded-32-byte-aes-key==\",\n  \"aesIv\": \"base64-encoded-12-byte-iv==\",\n  \"packageName\": \"controller-app\",\n  \"version\": \"2.5.0\",\n  \"size\": 4096000,\n  \"packageType\": \"\",\n  \"expiresAt\": \"2026-09-09T11:00:00Z\",\n  \"mqttDelivered\": false,\n  \"message\": \"Download URL generated. Device may be offline \\u2014 pass the URL directly to the device when it comes online.\"\n}",
               "originalRequest": {
                 "method": "POST",
                 "url": {

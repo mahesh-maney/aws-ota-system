@@ -1,7 +1,7 @@
 # Digilux OTA (Over-The-Air) Update System — Integration Guide
 
-**Version:** 2.6
-**Date:** 2026-08-28
+**Version:** 2.7
+**Date:** 2026-09-09
 **Audience:** Integration / QA Team
 **Base URL:** `https://iot.digilux.co.in/smarthome` (custom domain)
 **Alternate URL:** `https://ds6nxf8ac5.execute-api.ap-south-1.amazonaws.com/smarthome`
@@ -23,11 +23,13 @@ Each upload is tied to a `deviceType` which determines the package name and file
 
 | `deviceType` | Derived `packageName` | File extension | `operationType` |
 |---|---|---|---|
-| `Network_controller_firmware` | `HomeAssistantUtility` | `.jar` | `1` |
+| `Network_controller_firmware` | `HomeAssistantUtility` | `.tar` | `1` |
 | `Network_controller_zigbee_firmware` | `ZigbeeFirmware` | `.tar` | `2` |
-| `Network_controller_Z2M_Firmware` | `Z2MFirmware` | `.bin` | `3` |
-| `Network_controller_Miscellaneous` | `NetControllerMisc` | `.py` | `4` |
-| `Network_controller_zigbee_stack_firmware` | `ZigbeeStackFirmware` | `.bin` | `5` |
+| `Network_controller_Z2M_Firmware` | `Z2MFirmware` | `.tar` | `3` |
+| `Network_controller_Miscellaneous` | `NetControllerMisc` | `.tar` | `4` |
+| `Network_controller_zigbee_stack_firmware` | `ZigbeeStackFirmware` | `.tar` | `5` |
+
+> **All artifact types use `.tar` (v2.7+).** Every upload must be a `.tar` archive containing at minimum a `manifest.json` file. The server rejects any other format.
 
 ### Release Types
 
@@ -95,7 +97,8 @@ Admin (API)                  AWS Cloud                        Controller Device
     │──────────────────────────>│ S3                                 │
     │                            │──> S3 Event                        │
     │                            │──> artifact_processor Lambda       │
-    │                            │    (SHA256 + ECDSA sign)           │
+    │                            │    (validate manifest, SHA256,     │
+    │                            │     ECDSA sign, AES-256-GCM enc)   │
     │                            │    Package: PENDING → ACTIVE       │
     │                            │                                    │
     │  PATCH /packages/.../activate │                                 │
@@ -225,6 +228,19 @@ Upload mode is selected automatically based on `totalSize`:
 - **SINGLE** — `totalSize` not provided or ≤ 10 MB. Returns a single presigned S3 PUT URL.
 - **MULTIPART** — `totalSize` > 10 MB. Returns per-chunk presigned URLs. Chunks are PUT in parallel then completed via a second API call.
 
+> **Artifact format requirement (v2.7+):** All uploads must be `.tar` archives. The `.tar` must contain a `manifest.json` file at the root with at minimum: `packageName`, `version`, and `files` fields. The `artifact_processor` Lambda validates the tar structure and quarantines any upload that fails this check.
+>
+> Example `manifest.json`:
+> ```json
+> {
+>   "packageName": "HomeAssistantUtility",
+>   "version":     "1.2.3",
+>   "files":       ["HomeAssistantUtility-1.2.3.jar"],
+>   "minGlobalVersion": "1.0.0",
+>   "createdAt":   "2026-09-09T10:00:00Z"
+> }
+> ```
+
 **Request body:**
 
 ```json
@@ -234,19 +250,18 @@ Upload mode is selected automatically based on `totalSize`:
   "releaseType":  "PROD",
   "checksum":     "a1b2c3d4e5f6...",
   "totalSize":    209715200,
-  "fileName":     "",
   "releaseNotes": "Bug fixes and performance improvements"
 }
 ```
 
 | Field | Required | Description |
 |---|---|---|
-| `deviceType` | Yes | One of the 4 supported device types (see table in Section 1) |
+| `deviceType` | Yes | One of the 5 supported device types (see table in Section 1) |
 | `version` | Yes | Semantic version string (e.g. `1.2.3`) |
-| `releaseType` | Yes | `PROD` (all devices) or `UAT` (canary group only) |
-| `checksum` | Yes | SHA256 hex of the binary — verified by artifact_processor on upload |
+| `releaseType` | Yes | `PROD`, `BETA`, `UAT`, or `CUSTOM` |
+| `checksum` | Yes | SHA256 hex of the `.tar` binary — verified by artifact_processor on upload |
 | `totalSize` | No | File size in bytes — triggers MULTIPART mode if > 10 MB |
-| `fileName` | No | Override the auto-derived filename |
+| `releaseNotes` | No | Free-text description shown to users |
 | `releaseNotes` | No | Free-text description shown to users |
 
 **Response `200` — SINGLE mode** (`totalSize` ≤ 10 MB or not provided):
@@ -255,8 +270,8 @@ Upload mode is selected automatically based on `totalSize`:
   "uploadType":   "SINGLE",
   "uploadUrl":    "https://digilux-ota-artifacts.s3.ap-south-1.amazonaws.com/...?X-Amz-Signature=...",
   "uploadToken":  "550e8400-e29b-41d4-a716-446655440000",
-  "s3Key":        "Network_controller_firmware/HomeAssistantUtility/1.2.3/HomeAssistantUtility-1.2.3.jar",
-  "fileName":     "HomeAssistantUtility-1.2.3.jar",
+  "s3Key":        "Network_controller_firmware/Network_controller_firmware/1.2.3/HomeAssistantUtility-1.2.3.tar",
+  "fileName":     "HomeAssistantUtility-1.2.3.tar",
   "packageName":  "HomeAssistantUtility",
   "version":      "1.2.3",
   "status":       "PENDING",
@@ -339,7 +354,7 @@ POST /api/v1/ota/packages/upload-artefact/complete
 }
 ```
 
-S3 assembles the complete object → `artifact_processor` fires via S3 event → verifies checksum → promotes to `ACTIVE`.
+S3 assembles the complete object → `artifact_processor` fires via S3 event → verifies checksum + manifest → signs + encrypts → promotes to `ACTIVE`.
 
 ---
 
@@ -361,20 +376,24 @@ Poll this after any upload (SINGLE or MULTIPART) until `status` resolves.
   "uploadType":   "MULTIPART",
   "deviceType":   "Network_controller_firmware",
   "releaseType":  "PROD",
-  "fileName":     "HomeAssistantUtility-1.2.3.jar",
+  "fileName":     "HomeAssistantUtility-1.2.3.tar",
   "sha256":       "c320c4692e...",
   "artifactSize": 209715200,
+  "encS3Key":     "Network_controller_firmware/Network_controller_firmware/1.2.3/HomeAssistantUtility-1.2.3.tar.enc",
+  "sigS3Key":     "Network_controller_firmware/Network_controller_firmware/1.2.3/HomeAssistantUtility-1.2.3.tar.sig",
   "releaseNotes": "Bug fixes",
   "createdBy":    "admin@digilux.com",
   "createdAt":    1723556789000
 }
 ```
 
+> `encS3Key` and `sigS3Key` are set after `artifact_processor` completes encryption and signing (v2.7+). The raw `.tar` is deleted from S3 after encryption — only the `.enc` file is stored. The AES key is stored encrypted in DynamoDB and delivered to the controller at download time via the `/download-link` API.
+
 | `status` | Meaning |
 |----------|---------|
 | `PENDING` | Upload in progress or artifact_processor still running |
-| `ACTIVE` | Verified, ready for deployment |
-| `CORRUPTED` | Checksum mismatch or token validation failed — re-upload required |
+| `ACTIVE` | Verified, signed, encrypted and ready for deployment |
+| `CORRUPTED` | Checksum mismatch, manifest invalid, or token validation failed — re-upload required |
 
 ---
 
@@ -563,7 +582,7 @@ GET /api/v1/controllers/{deviceId}/updates/available
   },
   "pendingJobId": null,
   "availableVersion": "4.0.0",
-  "fileName": "controller-app-4.0.0.jar"
+  "fileName": "controller-app-4.0.0.tar"
 }
 ```
 
@@ -903,7 +922,7 @@ Returns all controller devices owned by the calling user and any available updat
       "package": "controller-app",
       "installedVersion": "2.0.0",
       "availableVersion": "5.0.0",
-      "fileName": "HomeAssistantUtility-5.0.0.jar"
+      "fileName": "HomeAssistantUtility-5.0.0.tar"
     }
   ]
 }
@@ -1026,18 +1045,34 @@ An alternative to the consent flow. The Lambda returns an **S3 pre-signed downlo
 **Response `200`:**
 ```json
 {
-  "downloadUrl":   "https://digilux-ota-artifacts.s3.amazonaws.com/Network_controller_firmware/HomeAssistantUtility/4.0.0/HomeAssistantUtility-4.0.0.jar?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=...&X-Amz-Expires=3600&X-Amz-Signature=...",
-  "sha256":        "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-  "signature":     "MEUCIQDx...",
-  "packageName":   "controller-app",
-  "version":       "4.0.0",
-  "size":          12456789,
-  "deviceType": "Network_controller_firmware",
-  "expiresAt":     "2026-08-04T15:00:00Z",
-  "mqttDelivered": true,
-  "message":       "Download URL sent to device via MQTT. Device will begin download shortly."
+  "downloadUrl":    "https://digilux-ota-artifacts.s3.amazonaws.com/.../HomeAssistantUtility-4.0.0.tar.enc?X-Amz-Signature=...",
+  "signatureUrl":   "https://digilux-ota-artifacts.s3.amazonaws.com/.../HomeAssistantUtility-4.0.0.tar.sig?X-Amz-Signature=...",
+  "sha256":         "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "signature":      "MEUCIQDx...",
+  "encrypted":      true,
+  "aesKey":         "base64-encoded-per-artifact-aes-key",
+  "aesIv":          "base64-encoded-96-bit-iv",
+  "packageName":    "controller-app",
+  "version":        "4.0.0",
+  "size":           12456789,
+  "deviceType":     "Network_controller_firmware",
+  "expiresAt":      "2026-09-09T15:00:00Z",
+  "mqttDelivered":  true,
+  "message":        "Download URL sent to device via MQTT. Device will begin download shortly."
 }
 ```
+
+> **Encryption fields (v2.7+):** When `encrypted: true`, the `downloadUrl` points to the AES-256-GCM encrypted `.tar.enc` file. The controller must:
+> 1. Download the `.enc` file
+> 2. Download `signatureUrl` (the ECDSA `.sig` file)
+> 3. Verify the ECDSA signature over the raw (pre-encryption) tar using the public key at `/etc/digilux/ota-agent.pub`
+> 4. Decrypt using `aesKey` + `aesIv` (both base64-encoded)
+> 5. Verify SHA256 of the decrypted tar matches `sha256`
+> 6. Extract and install
+>
+> The `aesKey` is a **per-artifact** AES-256 key generated at upload time. It is stored double-encrypted in DynamoDB and decrypted in-memory in Lambda only at delivery time — it is **never stored in plaintext at rest**.
+>
+> See `docs/CONTROLLER_OTA_GUIDE.md` for the full controller-side integration script.
 
 **`mqttDelivered`** — `true` if the device was notified via MQTT; `false` if the MQTT publish failed (e.g., device offline). In the `false` case the URL is still returned to the app — Flutter can retry or display a "device offline" message.
 
@@ -1047,12 +1082,15 @@ An alternative to the consent flow. The Lambda returns an **S3 pre-signed downlo
   "operationType": 1,
   "packageName":   "controller-app",
   "version":       "4.0.0",
-  "packageType":   "deb",
-  "downloadUrl":   "<presigned-url>",
-  "sha256":        "<hex>",
-  "signature":     "<base64>",
+  "downloadUrl":   "<presigned-url-to-.tar.enc>",
+  "signatureUrl":  "<presigned-url-to-.tar.sig>",
+  "sha256":        "<hex-of-original-tar>",
+  "signature":     "<base64-ecdsa-signature>",
+  "encrypted":     true,
+  "aesKey":        "<base64-aes-256-key>",
+  "aesIv":         "<base64-96-bit-iv>",
   "size":          12456789,
-  "expiresAt":     "2026-08-04T15:00:00Z",
+  "expiresAt":     "2026-09-09T15:00:00Z",
   "initiatedBy":   "USER_APP",
   "userId":        "<sub>",
   "rollback":      true
@@ -1088,13 +1126,18 @@ An alternative to the consent flow. The Lambda returns an **S3 pre-signed downlo
 
 ```
 1. POST /api/v1/ota/packages/upload-artefact        (admin token)
-   → receive { uploadUrl, s3Key, status: "PENDING" }
+   → body must include deviceType, version, releaseType, checksum (SHA256 of the .tar)
+   → receive { uploadUrl, s3Key, uploadToken, status: "PENDING" }
 
-2. PUT <uploadUrl>  (binary, Content-Type: application/octet-stream)
+2. PUT <uploadUrl>  (.tar archive, Content-Type: application/octet-stream)
+                    (headers: x-amz-meta-upload-token: <uploadToken>)
+   → .tar must contain manifest.json at root
    → HTTP 200 from S3
 
-3. Poll GET /api/v1/ota/packages?packageName=<name>  (admin token)
-   → wait for status: "ACTIVE"  (typically < 5 seconds)
+3. Poll GET /api/v1/ota/packages/{packageName}/{version}  (admin token)
+   → artifact_processor validates manifest, verifies checksum, signs + encrypts,
+     then stores encS3Key + sigS3Key in DynamoDB and deletes raw .tar
+   → wait for status: "ACTIVE"  (typically < 30 seconds)
 
 4. GET /api/v1/controllers/{deviceId}/updates/available  (admin token)
    → confirm availableUpdates contains the new version
@@ -1121,8 +1164,10 @@ An alternative to the consent flow. The Lambda returns an **S3 pre-signed downlo
    → body: { deviceId, packageName, version }
    → receive { consentId, jobId, status: "QUEUED" }
    → device receives IoT notification over MQTT
-   → device downloads binary via HTTPS from S3
-   → device verifies SHA256 + ECDSA signature
+   → device downloads encrypted .tar.enc via HTTPS from S3
+   → device verifies ECDSA signature
+   → device decrypts using AES-256-GCM (key delivered in job document)
+   → device verifies SHA256 of decrypted tar
    → device installs and reports status
 
 4. Poll GET /api/v1/ota/my/updates/{jobId}/status  (user token)
@@ -1143,14 +1188,17 @@ An alternative to the consent flow. The Lambda returns an **S3 pre-signed downlo
 
 3. POST /api/v1/ota/my/updates/download-link  (user token)
    → body: { deviceId, packageName, version }
-   → Lambda generates pre-signed S3 URL
-   → Lambda publishes { downloadUrl, sha256, signature, ... } to iot/device/{deviceId}/ota
-   → Response: { downloadUrl, sha256, signature, size, expiresAt, mqttDelivered }
+   → Lambda generates pre-signed S3 URLs (downloadUrl for .tar.enc, signatureUrl for .tar.sig)
+   → Lambda decrypts the per-artifact AES key (in-memory only) and includes it in the response
+   → Lambda publishes { downloadUrl, signatureUrl, aesKey, aesIv, sha256, ... } to iot/device/{deviceId}/ota
+   → Response: { downloadUrl, signatureUrl, sha256, signature, encrypted, aesKey, aesIv, size, expiresAt, mqttDelivered }
 
 4a. If mqttDelivered = true:
     → Device already received download command over MQTT
-    → Device downloads binary from S3 over HTTPS
-    → Device verifies SHA256 + ECDSA signature
+    → Device downloads encrypted .tar.enc from S3 over HTTPS
+    → Device verifies ECDSA signature (signatureUrl)
+    → Device decrypts using AES-256-GCM (aesKey + aesIv from MQTT payload)
+    → Device verifies SHA256 of decrypted tar
     → Device installs and reports status via MQTT status topic
     → Flutter can display "Update in progress" using downloadUrl as a reference
 
@@ -1176,7 +1224,7 @@ RESP=$(curl -s -X POST "$BASE_URL/api/v1/ota/my/updates/download-link" \
   -H "Content-Type: application/json" \
   -d '{"deviceId":"<device-uuid>","packageName":"controller-app","version":"4.0.0"}')
 
-echo $RESP | jq '{downloadUrl: .downloadUrl, mqttDelivered: .mqttDelivered, expiresAt: .expiresAt}'
+echo $RESP | jq '{downloadUrl: .downloadUrl, signatureUrl: .signatureUrl, encrypted: .encrypted, aesKey: .aesKey, aesIv: .aesIv, mqttDelivered: .mqttDelivered, expiresAt: .expiresAt}'
 ```
 
 **Key differences from consent flow:**
@@ -1372,10 +1420,15 @@ The inventory is updated by:
 ## 8. Package Lifecycle
 
 ```
-POST /upload-artefact     S3 Upload         S3 Event → Lambda           Deploy
-   PENDING    ──────────────>   PENDING   ──────────────>   ACTIVE   ──────>  In IoT Job
-                                           (SHA256 + ECDSA
-                                            computed & stored)
+POST /upload-artefact     S3 Upload (.tar)  S3 Event → artifact_processor       Deploy
+   PENDING    ──────────────>   PENDING   ──────────────────────────>   ACTIVE   ──────>  In IoT Job
+                                           1. Verify upload token
+                                           2. Verify SHA256 checksum
+                                           3. Validate tar + manifest.json
+                                           4. ECDSA P-256 sign → upload .tar.sig
+                                           5. AES-256-GCM encrypt → upload .tar.enc
+                                           6. Double-encrypt AES key → store in DynamoDB
+                                           7. Delete raw .tar from S3
 ```
 
 A package in `PENDING` state **cannot be deployed** — the API returns `400`. Always wait for `ACTIVE` before creating a deployment.
@@ -1390,22 +1443,25 @@ All new artifacts (from 2026-08-24 onwards) are stored under a unified firmware 
 s3://digilux-ota-artifacts/Network_controller_firmware/{deviceType}/{version}/{fileName}
 ```
 
-**Example:**
+**Example (v2.7+):**
 ```
 digilux-ota-artifacts/
   Network_controller_firmware/
     Network_controller_zigbee_firmware/
       4.6.1/
-        ZigbeeFirmware-4.6.1.tar
+        ZigbeeFirmware-4.6.1.tar.enc   ← encrypted artifact (what controllers download)
+        ZigbeeFirmware-4.6.1.tar.sig   ← ECDSA signature (detached, over original .tar)
     Network_controller_firmware/
       5.0.1/
-        HomeAssistantUtility-5.0.1.jar
+        HomeAssistantUtility-5.0.1.tar.enc
+        HomeAssistantUtility-5.0.1.tar.sig
     Network_controller_zigbee_stack_firmware/
       1.0.0/
-        ZigbeeStackFirmware-1.0.0.bin
+        ZigbeeStackFirmware-1.0.0.tar.enc
+        ZigbeeStackFirmware-1.0.0.tar.sig
 ```
 
-The `{fileName}` is auto-derived as `{packageName}-{version}{ext}` unless overridden with `fileName` in the upload request.
+The raw `.tar` is deleted after `artifact_processor` completes encryption. Only `.enc` and `.sig` files remain in S3. The `{fileName}` stored in DynamoDB is still the original `.tar` name; the S3 keys for the encrypted files are stored in `encS3Key` and `sigS3Key`.
 
 > **Legacy keys** (pre-2026-08-24) used the old structure `{deviceType}/{packageName}/{version}/{fileName}` and are left in place — `artifact_processor` handles both formats transparently.
 
@@ -1417,12 +1473,14 @@ See **Section 12** for S3 bucket security settings and artifact lifecycle policy
 
 | Control | Detail |
 |---|---|
-| **Auth** | All API endpoints require Cognito admin group membership |
-| **Artifact integrity** | SHA256 hash verified on device before install |
-| **Artifact authenticity** | ECDSA P-256 signature verified on device using public key stored at `/etc/digilux/ota-agent.pub` |
+| **Auth** | Admin endpoints require `ota-admin` Cognito group token (OTA admin pool). User endpoints require any valid app pool token. Cross-pool tokens are rejected by API Gateway with `HTTP 401`. |
+| **Artifact integrity** | SHA256 hash of the original `.tar` is verified by `artifact_processor` on upload and again by the controller after decryption |
+| **Artifact authenticity** | ECDSA P-256 signature (over the original `.tar`) verified on device using public key at `/etc/digilux/ota-agent.pub`; private key stored only in AWS Secrets Manager (`digilux-ota-signing-key`) |
+| **Artifact confidentiality** | Every `.tar` is encrypted with a unique AES-256-GCM key at upload time; the raw `.tar` is deleted from S3; the AES key is stored double-encrypted in DynamoDB and decrypted in-memory in Lambda only at delivery time — it is never stored in plaintext at rest |
+| **Key delivery** | Per-artifact AES key delivered to the controller over TLS via the authenticated `/download-link` API or IoT Job document — never embedded in S3 or IoT topics in plaintext |
 | **Transport** | Pre-signed S3 URLs (HTTPS only), expire in 1 hour |
-| **Signing key** | Private key stored in AWS Secrets Manager (`digilux-ota-signing-key`), never on device |
-| **Tamper detection** | If MITM attack replaces the download URL or binary, the controller's ECDSA signature check will fail; the controller reports `REJECTED` with `errorCode: 10003` (`SIGNATURE_VERIFICATION_FAILED`); the backend emits a `SECURITY_ALERT` audit event visible in CloudWatch Logs |
+| **Reverse-engineering protection** | Even if S3 URLs are intercepted, the downloaded `.enc` file is unreadable without the AES key; the AES key is only issued to authenticated device owners |
+| **Tamper detection** | If a MITM attack replaces the binary, the ECDSA signature check fails; the controller reports `REJECTED` with `errorCode: 10003` (`SIGNATURE_VERIFICATION_FAILED`); the backend emits a `SECURITY_ALERT` audit event visible in CloudWatch Logs |
 
 ---
 
