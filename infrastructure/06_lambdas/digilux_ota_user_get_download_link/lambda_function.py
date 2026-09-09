@@ -88,6 +88,7 @@ _TIER4_SEC     = int(os.environ.get("PRESIGN_EXPIRY_TIER4_SEC",    "172800"))
 CLOUDFRONT_DOMAIN             = os.environ.get("CLOUDFRONT_DOMAIN", "")
 CLOUDFRONT_KEY_PAIR_ID        = os.environ.get("CLOUDFRONT_KEY_PAIR_ID", "")
 CLOUDFRONT_PRIVATE_KEY_SECRET = os.environ.get("CLOUDFRONT_PRIVATE_KEY_SECRET", "digilux-ota-cloudfront-key")
+MASTER_ENC_SECRET             = os.environ.get("MASTER_ENC_SECRET", "digilux-ota-master-encryption-key")
 
 _cf_private_key_cache = None
 
@@ -116,6 +117,7 @@ _VERSION_RE = re.compile(r"^[a-zA-Z0-9.\-_]{1,32}$")
 dynamo   = boto3.resource("dynamodb", region_name=REGION)
 s3       = boto3.client("s3",         region_name=REGION)
 iot_data = boto3.client("iot-data",   region_name=REGION)
+sm       = boto3.client("secretsmanager", region_name=REGION)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -194,6 +196,19 @@ def _cloudfront_signed_url(s3_key: str, expiry_sec: int) -> str | None:
         f"&Signature={_cf_b64(signature)}"
         f"&Key-Pair-Id={CLOUDFRONT_KEY_PAIR_ID}"
     )
+
+
+def _decrypt_aes_key(aes_key_enc_b64: str, master_iv_b64: str) -> str:
+    """Unwrap the per-artifact AES key using the master key from Secrets Manager.
+    Returns the plaintext AES key as a base64 string for delivery to the controller."""
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+    secret     = sm.get_secret_value(SecretId=MASTER_ENC_SECRET)
+    master_key = base64.b64decode(json.loads(secret["SecretString"])["key"])
+    master_iv  = base64.b64decode(master_iv_b64)
+    enc_key    = base64.b64decode(aes_key_enc_b64)
+    aesgcm     = AESGCM(master_key)
+    aes_key    = aesgcm.decrypt(master_iv, enc_key, None)
+    return base64.b64encode(aes_key).decode()
 
 
 def _get_artifact_url(pkg: dict, expiry_sec: int) -> str:
@@ -340,7 +355,7 @@ def lambda_handler(event, context):
                 "pendingJobId": pending_job_id,
             })
 
-        # ── 10. Generate pre-signed S3 GET URL ───────────────────────────────
+        # ── 10. Generate pre-signed S3 GET URL(s) + decrypt AES key ─────────
         artifact_size = pkg.get("artifactSize", 0)
         if isinstance(artifact_size, Decimal):
             artifact_size = int(artifact_size)
@@ -348,7 +363,35 @@ def lambda_handler(event, context):
         expiry_sec = _presign_expiry(artifact_size)
         log.info(f"Presign expiry for {package_name}@{version} ({artifact_size} bytes): {expiry_sec}s")
 
-        presigned_url = _get_artifact_url(pkg, expiry_sec)
+        # If artifact has been encrypted by artifact_processor, serve .enc file
+        enc_s3_key = pkg.get("encS3Key")
+        if enc_s3_key:
+            presigned_url = s3.generate_presigned_url(
+                "get_object",
+                Params={"Bucket": pkg["s3Bucket"], "Key": enc_s3_key},
+                ExpiresIn=expiry_sec,
+            )
+        else:
+            presigned_url = _get_artifact_url(pkg, expiry_sec)
+
+        # Signature file URL (for controller to verify before decrypting)
+        sig_s3_key    = pkg.get("sigS3Key")
+        signature_url = None
+        if sig_s3_key:
+            signature_url = s3.generate_presigned_url(
+                "get_object",
+                Params={"Bucket": pkg["s3Bucket"], "Key": sig_s3_key},
+                ExpiresIn=expiry_sec,
+            )
+
+        # Decrypt per-artifact AES key for delivery to controller (over TLS)
+        aes_key_b64 = None
+        aes_iv_b64  = None
+        if enc_s3_key and pkg.get("aesKeyEnc") and pkg.get("masterIv"):
+            aes_key_b64 = _decrypt_aes_key(pkg["aesKeyEnc"], pkg["masterIv"])
+            aes_iv_b64  = pkg.get("aesIv")
+            log.info(f"AES key decrypted for delivery to controller ({package_name}@{version})")
+
         expires_at = (
             datetime.datetime.utcnow() + datetime.timedelta(seconds=expiry_sec)
         ).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -363,17 +406,21 @@ def lambda_handler(event, context):
 
         mqtt_payload = {
             "operationType": operation_type,
-            "packageName":  package_name,
-            "version":      version,
-            "packageType":  pkg.get("packageType", ""),
-            "downloadUrl":  presigned_url,
-            "sha256":       pkg.get("sha256", ""),
-            "signature":    pkg.get("signature", ""),
-            "size":         artifact_size,
-            "expiresAt":    expires_at,
-            "initiatedBy":  "USER_APP",
-            "userId":       user_id,
-            "rollback":     True,
+            "packageName":   package_name,
+            "version":       version,
+            "packageType":   pkg.get("packageType", ""),
+            "downloadUrl":   presigned_url,
+            "sha256":        pkg.get("sha256", ""),
+            "signature":     pkg.get("signature", ""),
+            "signatureUrl":  signature_url,
+            "encrypted":     enc_s3_key is not None,
+            "aesKey":        aes_key_b64,
+            "aesIv":         aes_iv_b64,
+            "size":          artifact_size,
+            "expiresAt":     expires_at,
+            "initiatedBy":   "USER_APP",
+            "userId":        user_id,
+            "rollback":      True,
         }
 
         # ── 12. Publish to device MQTT OTA topic ──────────────────────────────
@@ -430,8 +477,12 @@ def lambda_handler(event, context):
 
         return _resp(200, {
             "downloadUrl":   presigned_url,
+            "signatureUrl":  signature_url,
             "sha256":        pkg.get("sha256", ""),
             "signature":     pkg.get("signature", ""),
+            "encrypted":     enc_s3_key is not None,
+            "aesKey":        aes_key_b64,
+            "aesIv":         aes_iv_b64,
             "packageName":   package_name,
             "version":       version,
             "size":          artifact_size,

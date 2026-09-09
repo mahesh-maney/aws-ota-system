@@ -59,7 +59,7 @@ MULTIPART_THRESHOLD  = 10 * 1024 * 1024   # use multipart when totalSize > 10 MB
 DEVICE_TYPE_MAP = {
     "Network_controller_firmware": {
         "baseName": "HomeAssistantUtility",
-        "ext":      ".jar",
+        "ext":      ".tar",
     },
     "Network_controller_zigbee_firmware": {
         "baseName": "ZigbeeFirmware",
@@ -67,15 +67,15 @@ DEVICE_TYPE_MAP = {
     },
     "Network_controller_Z2M_Firmware": {
         "baseName": "Z2MFirmware",
-        "ext":      ".bin",
+        "ext":      ".tar",
     },
     "Network_controller_Miscellaneous": {
         "baseName": "NetControllerMisc",
-        "ext":      ".py",
+        "ext":      ".tar",
     },
     "Network_controller_zigbee_stack_firmware": {
         "baseName": "ZigbeeStackFirmware",
-        "ext":      ".bin",
+        "ext":      ".tar",
     },
 }
 
@@ -145,6 +145,15 @@ def lambda_handler(event, context):
         # fileName: use caller-provided name if given, otherwise auto-derive
         file_name    = file_name_override or f"{package_name}-{version}{type_cfg['ext']}"
         s3_key       = f"Network_controller_firmware/{device_type}/{version}/{file_name}"
+
+        # ── Enforce .tar — all artifacts must be tar archives ─────────────────
+        if not file_name.endswith(".tar"):
+            return _response(400, {
+                "error": (
+                    "Only .tar archives are accepted. "
+                    "Bundle all files (including manifest.json) into a .tar before uploading."
+                )
+            })
 
         log.info(json.dumps({
             "msg":             "upload_url_request",

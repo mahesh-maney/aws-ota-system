@@ -65,12 +65,18 @@ def lambda_handler(event, context):
         # Device-sent thingName is ignored to enforce consistency across all devices.
         thing_name = device_id
 
+        ota_status  = event.get("otaStatus")   # "SUCCESS" | "FAILED" | None
+        ota_error   = event.get("otaError", "")
+        ota_version = event.get("otaVersion", "")
+        is_ota_report = ota_status in ("SUCCESS", "FAILED")
+
         log.info(json.dumps({
             "msg":              "device_register_received",
             "deviceId":         device_id,
             "thingName":        thing_name,
             "installedVersion": installed_version,
             "package":          package,
+            "otaStatus":        ota_status,
         }))
 
         now_ms     = int(time.time() * 1000)
@@ -85,27 +91,64 @@ def lambda_handler(event, context):
             log.warning(f"Device {device_id} not found in {DEVICE_DATA_TABLE} — OTA register skipped")
             return
 
-        mac_address      = existing["macAddress"]
-        prev_version     = existing.get("installedVersion", "")
-        version_changed  = prev_version != installed_version
-        first_time       = "thingName" not in existing
+        mac_address     = existing["macAddress"]
+        prev_version    = existing.get("globalInstalledVersion", "")
+        version_changed = prev_version != installed_version
+        first_time      = "thingName" not in existing
 
-        data_table.update_item(
-            Key={"deviceId": device_id, "macAddress": mac_address},
-            UpdateExpression=(
-                "SET thingName = :tn, globalInstalledVersion = :iv, #pkg = :pkg, "
-                "lastSeen = :ts, lastUpdatedAt = :ts, "
-                "pendingJobId = if_not_exists(pendingJobId, :null)"
-            ),
-            ExpressionAttributeNames={"#pkg": "package"},
-            ExpressionAttributeValues={
-                ":tn":  thing_name,
-                ":iv":  installed_version,  # stored as globalInstalledVersion
-                ":pkg": package,
-                ":ts":  now_ms,
-                ":null": None,
-            },
-        )
+        if is_ota_report:
+            # OTA completion report — always clear pendingJobId regardless of outcome
+            data_table.update_item(
+                Key={"deviceId": device_id, "macAddress": mac_address},
+                UpdateExpression=(
+                    "SET thingName = :tn, globalInstalledVersion = :iv, #pkg = :pkg, "
+                    "lastSeen = :ts, lastUpdatedAt = :ts, "
+                    "pendingJobId = :null, "
+                    "lastOtaStatus = :otaSt, lastOtaVersion = :otaVer, lastOtaAt = :ts"
+                ),
+                ExpressionAttributeNames={"#pkg": "package"},
+                ExpressionAttributeValues={
+                    ":tn":    thing_name,
+                    ":iv":    installed_version,
+                    ":pkg":   package,
+                    ":ts":    now_ms,
+                    ":null":  None,
+                    ":otaSt": ota_status,
+                    ":otaVer": ota_version,
+                },
+            )
+            log.info(json.dumps({
+                "msg":        "ota_completion_reported",
+                "deviceId":   device_id,
+                "otaStatus":  ota_status,
+                "otaVersion": ota_version,
+                "otaError":   ota_error,
+                "newVersion": installed_version,
+            }))
+            _audit(f"OTA_UPDATE_{ota_status}", f"device:{device_id}",
+                   {"deviceId": device_id},
+                   ota_status,
+                   otaVersion=ota_version,
+                   installedVersion=installed_version,
+                   error=ota_error)
+        else:
+            # Normal reconnect — preserve existing pendingJobId
+            data_table.update_item(
+                Key={"deviceId": device_id, "macAddress": mac_address},
+                UpdateExpression=(
+                    "SET thingName = :tn, globalInstalledVersion = :iv, #pkg = :pkg, "
+                    "lastSeen = :ts, lastUpdatedAt = :ts, "
+                    "pendingJobId = if_not_exists(pendingJobId, :null)"
+                ),
+                ExpressionAttributeNames={"#pkg": "package"},
+                ExpressionAttributeValues={
+                    ":tn":   thing_name,
+                    ":iv":   installed_version,
+                    ":pkg":  package,
+                    ":ts":   now_ms,
+                    ":null": None,
+                },
+            )
 
         if first_time:
             log.info(json.dumps({
@@ -122,7 +165,7 @@ def lambda_handler(event, context):
                    installedVersion=installed_version,
                    package=package,
                    assignedGroup=assigned_group)
-        else:
+        elif not is_ota_report:
             log.info(json.dumps({
                 "msg":              "device_reconnected",
                 "deviceId":         device_id,
