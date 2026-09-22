@@ -32,6 +32,7 @@ import json
 import logging
 import os
 import time
+import uuid
 
 import boto3
 from botocore.exceptions import ClientError
@@ -42,7 +43,8 @@ log.setLevel(logging.INFO)
 REGION         = os.environ["REGION"]
 PACKAGES_TABLE = os.environ.get("PACKAGES_TABLE",  "digilux_ota_packages")
 ARTIFACT_BUCKET= os.environ.get("ARTIFACT_BUCKET", "digilux-ota-artifacts")
-SIGNING_SECRET = os.environ.get("SIGNING_SECRET",  "digilux-ota-signing-key")
+SIGNING_SECRET    = os.environ.get("SIGNING_SECRET",    "digilux-ota-signing-key")
+MASTER_ENC_SECRET = os.environ.get("MASTER_ENC_SECRET", "digilux-ota-master-encryption-key")
 
 dynamo = boto3.resource("dynamodb", region_name=REGION)
 s3     = boto3.client("s3", region_name=REGION)
@@ -200,10 +202,11 @@ def _process_artifact(bucket: str, s3_key: str, obj_size: int) -> None:
 
         log.info(f"Upload token verified for {pkg_name}@{version}")
 
-    # ── 2. Compute SHA256 ─────────────────────────────────────────────────────
-    log.info(f"Computing SHA256 for s3://{bucket}/{s3_key} ({obj_size} bytes)...")
-    t0     = time.monotonic()
-    sha256 = _compute_sha256(bucket, s3_key)
+    # ── 2. Download artifact + compute SHA256 ────────────────────────────────
+    log.info(f"Downloading artifact s3://{bucket}/{s3_key} ({obj_size} bytes)...")
+    t0        = time.monotonic()
+    raw_bytes = _download_artifact(bucket, s3_key)
+    sha256    = hashlib.sha256(raw_bytes).hexdigest()
     elapsed_ms = int((time.monotonic() - t0) * 1000)
     log.info(json.dumps({
         "msg": "sha256_computed",
@@ -231,14 +234,44 @@ def _process_artifact(bucket: str, s3_key: str, obj_size: int) -> None:
     signature = _sign(sha256)
     log.info(f"ECDSA signature generated, length={len(signature)} chars")
 
-    # ── 5. Promote PENDING → ACTIVE ───────────────────────────────────────────
+    # ── 5. Validate tar structure + manifest.json ─────────────────────────────
+    log.info(f"Validating tar structure for {pkg_name}@{version}")
+    manifest = _validate_tar_manifest(raw_bytes, pkg_name, version, bucket, s3_key)
+    if manifest is None:
+        return  # _quarantine already called inside
+
+    # ── 6. AES-256-GCM encrypt entire tar ────────────────────────────────────
+    log.info(f"Encrypting artifact for {pkg_name}@{version}")
+    aes_key_bytes, aes_iv_bytes, encrypted_bytes = _encrypt_artifact(raw_bytes)
+
+    # ── 7. Upload encrypted artifact + signature file to S3 ──────────────────
+    enc_key = _enc_s3_key(s3_key)
+    sig_key = _sig_s3_key(s3_key)
+    s3.put_object(Bucket=bucket, Key=enc_key, Body=encrypted_bytes,
+                  ContentType="application/octet-stream")
+    s3.put_object(Bucket=bucket, Key=sig_key, Body=signature.encode(),
+                  ContentType="text/plain")
+    log.info(f"Uploaded encrypted artifact → s3://{bucket}/{enc_key}")
+    log.info(f"Uploaded signature file     → s3://{bucket}/{sig_key}")
+
+    # ── 8. Double-encrypt AES key with master key (defense in depth) ─────────
+    aes_key_enc_b64, master_iv_b64 = _double_encrypt_aes_key(aes_key_bytes)
+    aes_iv_b64 = base64.b64encode(aes_iv_bytes).decode()
+
+    # ── 9. Delete raw tar from S3 (only encrypted copy remains) ──────────────
+    s3.delete_object(Bucket=bucket, Key=s3_key)
+    log.info(f"Deleted raw tar s3://{bucket}/{s3_key}")
+
+    # ── 10. Promote PENDING → ACTIVE ──────────────────────────────────────────
     now_ms = int(time.time() * 1000)
     log.info(f"Promoting {pkg_name}@{version} PENDING → ACTIVE")
     table.update_item(
         Key={"packageName": pkg_name, "version": version},
         UpdateExpression=(
             "SET #st = :active, sha256 = :h, signature = :sig, "
-            "artifactSize = :sz, processedAt = :ts "
+            "artifactSize = :sz, processedAt = :ts, "
+            "encS3Key = :encKey, sigS3Key = :sigKey, "
+            "aesKeyEnc = :keyEnc, aesIv = :iv, masterIv = :miv "
             "REMOVE uploadToken, expectedChecksum"
         ),
         ExpressionAttributeNames={"#st": "status"},
@@ -248,6 +281,11 @@ def _process_artifact(bucket: str, s3_key: str, obj_size: int) -> None:
             ":sig":    signature,
             ":sz":     obj_size,
             ":ts":     now_ms,
+            ":encKey": enc_key,
+            ":sigKey": sig_key,
+            ":keyEnc": aes_key_enc_b64,
+            ":iv":     aes_iv_b64,
+            ":miv":    master_iv_b64,
         },
         ConditionExpression="attribute_exists(packageName)",
     )
@@ -255,15 +293,16 @@ def _process_artifact(bucket: str, s3_key: str, obj_size: int) -> None:
     _audit("PACKAGE_REGISTERED_ACTIVE", "s3-event-processor",
            {"packageName": pkg_name, "version": version},
            "SUCCESS",
-           s3Key=s3_key, sizeBytes=obj_size, sha256=sha256,
+           s3Key=enc_key, sizeBytes=obj_size, sha256=sha256,
            sigLength=len(signature),
            tokenVerified=stored_token is not None,
-           checksumVerified=expected_checksum is not None)
+           checksumVerified=expected_checksum is not None,
+           encrypted=True)
 
     log.info(json.dumps({
         "msg": "package_activated",
         "packageName": pkg_name, "version": version,
-        "sizeBytes": obj_size, "sha256": sha256,
+        "sizeBytes": obj_size, "sha256": sha256, "encrypted": True,
     }))
 
     # ── 6. Supersede previous ACTIVE versions for same packageName + releaseType ──
@@ -332,6 +371,83 @@ def _supersede_previous_versions(table, pkg_name: str, current_version: str,
             "packageName": pkg_name, "releaseType": release_type,
             "newVersion": current_version, "superseded": superseded,
         }))
+
+
+def _download_artifact(bucket: str, s3_key: str) -> bytes:
+    """Download the full S3 object into memory."""
+    obj = s3.get_object(Bucket=bucket, Key=s3_key)
+    return obj["Body"].read()
+
+
+def _enc_s3_key(s3_key: str) -> str:
+    # Use UUID so the S3 key leaks no package name, version, or device type
+    return f"enc/{uuid.uuid4()}.enc"
+
+
+def _sig_s3_key(s3_key: str) -> str:
+    return f"sig/{uuid.uuid4()}.sig"
+
+
+def _validate_tar_manifest(raw_bytes: bytes, pkg_name: str, version: str,
+                            bucket: str, s3_key: str) -> dict | None:
+    """Confirm raw_bytes is a valid tar containing manifest.json with required fields."""
+    import io
+    import tarfile
+    try:
+        with tarfile.open(fileobj=io.BytesIO(raw_bytes), mode="r:*") as tf:
+            names = tf.getnames()
+            if "manifest.json" not in names:
+                _quarantine(bucket, s3_key, pkg_name, version,
+                            "INVALID_TAR_STRUCTURE",
+                            "manifest.json not found inside tar archive")
+                return None
+            f        = tf.extractfile("manifest.json")
+            manifest = json.loads(f.read().decode("utf-8"))
+            for field in ("packageName", "version", "files"):
+                if field not in manifest:
+                    _quarantine(bucket, s3_key, pkg_name, version,
+                                "INVALID_MANIFEST",
+                                f"Required field '{field}' missing from manifest.json")
+                    return None
+            log.info(json.dumps({
+                "msg":             "manifest_validated",
+                "packageName":     pkg_name,
+                "version":         version,
+                "manifestPackage": manifest.get("packageName"),
+                "manifestVersion": manifest.get("version"),
+                "fileCount":       len(manifest.get("files", [])),
+            }))
+            return manifest
+    except tarfile.TarError as e:
+        _quarantine(bucket, s3_key, pkg_name, version,
+                    "INVALID_TAR", f"Not a valid tar archive: {e}")
+        return None
+    except (json.JSONDecodeError, UnicodeDecodeError) as e:
+        _quarantine(bucket, s3_key, pkg_name, version,
+                    "INVALID_MANIFEST_JSON", f"manifest.json parse error: {e}")
+        return None
+
+
+def _encrypt_artifact(raw_bytes: bytes) -> tuple:
+    """AES-256-GCM encrypt raw_bytes. Returns (key_bytes, iv_bytes, ciphertext)."""
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+    aes_key  = os.urandom(32)   # 256-bit key, unique per artifact
+    aes_iv   = os.urandom(12)   # 96-bit GCM nonce
+    aesgcm   = AESGCM(aes_key)
+    encrypted = aesgcm.encrypt(aes_iv, raw_bytes, None)
+    return aes_key, aes_iv, encrypted
+
+
+def _double_encrypt_aes_key(aes_key: bytes) -> tuple:
+    """Wrap aes_key with the master AES key from Secrets Manager.
+    Returns (enc_b64, master_iv_b64) — both base64-encoded."""
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+    secret     = sm.get_secret_value(SecretId=MASTER_ENC_SECRET)
+    master_key = base64.b64decode(json.loads(secret["SecretString"])["key"])
+    master_iv  = os.urandom(12)
+    aesgcm     = AESGCM(master_key)
+    enc        = aesgcm.encrypt(master_iv, aes_key, None)
+    return base64.b64encode(enc).decode(), base64.b64encode(master_iv).decode()
 
 
 def _compute_sha256(bucket: str, key: str) -> str:
