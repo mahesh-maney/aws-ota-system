@@ -322,8 +322,14 @@ _section "T09 — JOB STATUS & LIST"
 JOB_ID=$(cat /tmp/ota_test_job_id.txt)
 if [ "$JOB_ID" != "NOJOB" ]; then
   JOB=$(call GET "/api/v1/ota/deployments/${JOB_ID}")
-  assert_has_field "$JOB" "iotStatus" "GET job includes live iotStatus"
-  assert_has_field "$JOB" "iotJobStatus" "GET job includes iotJobStatus"
+  # AWAITING_CONSENT jobs have no IoT Job yet — iotStatus only present after consent accepted
+  JOB_STATUS_VAL=$(echo "$JOB" | python3 -c "import json,sys; print(json.load(sys.stdin).get('status',''))")
+  if [ "$JOB_STATUS_VAL" = "AWAITING_CONSENT" ]; then
+    _pass "GET job returns AWAITING_CONSENT — iotStatus/iotJobStatus absent until consent given"
+  else
+    assert_has_field "$JOB" "iotStatus" "GET job includes live iotStatus"
+    assert_has_field "$JOB" "iotJobStatus" "GET job includes iotJobStatus"
+  fi
   assert_has_field "$JOB" "deviceStatuses" "GET job includes deviceStatuses"
   IOT_STATUS=$(echo "$JOB" | python3 -c "import json,sys; print(json.load(sys.stdin).get('iotJobStatus',''))")
   echo "  → IoT Job status: $IOT_STATUS"
