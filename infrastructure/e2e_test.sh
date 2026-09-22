@@ -187,21 +187,68 @@ done
   && _pass "Package auto-promoted to ACTIVE in ${i}s (S3 event → artifact_processor)" \
   || _fail "Package not ACTIVE after 15s — status=$STATUS"
 
-# Verify SHA256 and signature were written
-SHA256=$(aws dynamodb get-item \
+# Fetch full package record once — reuse for all assertions
+PKG_ITEM=$(aws dynamodb get-item \
   --table-name digilux_ota_packages \
   --key "{\"packageName\":{\"S\":\"${TEST_PKG_NAME}\"},\"version\":{\"S\":\"${TEST_VERSION}\"}}" \
-  --region "$REGION" --query 'Item.sha256.S' --output text 2>/dev/null)
-SIG=$(aws dynamodb get-item \
-  --table-name digilux_ota_packages \
-  --key "{\"packageName\":{\"S\":\"${TEST_PKG_NAME}\"},\"version\":{\"S\":\"${TEST_VERSION}\"}}" \
-  --region "$REGION" --query 'Item.signature.S' --output text 2>/dev/null)
+  --region "$REGION" --output json 2>/dev/null)
+
+SHA256=$(echo "$PKG_ITEM"   | python3 -c "import json,sys; print(json.load(sys.stdin).get('Item',{}).get('sha256',{}).get('S',''))" 2>/dev/null)
+SIG=$(echo "$PKG_ITEM"      | python3 -c "import json,sys; print(json.load(sys.stdin).get('Item',{}).get('signature',{}).get('S',''))" 2>/dev/null)
+ENC_KEY=$(echo "$PKG_ITEM"  | python3 -c "import json,sys; print(json.load(sys.stdin).get('Item',{}).get('encS3Key',{}).get('S',''))" 2>/dev/null)
+SIG_KEY=$(echo "$PKG_ITEM"  | python3 -c "import json,sys; print(json.load(sys.stdin).get('Item',{}).get('sigS3Key',{}).get('S',''))" 2>/dev/null)
+
+# (+) sha256 and ECDSA signature written
 [ -n "$SHA256" ] && [ "$SHA256" != "None" ] \
   && _pass "SHA256 written by artifact_processor: ${SHA256:0:16}..." \
   || _fail "SHA256 missing after ACTIVE promotion"
 [ -n "$SIG" ] && [ "$SIG" != "None" ] \
   && _pass "ECDSA signature written by artifact_processor" \
   || _fail "Signature missing after ACTIVE promotion"
+
+# (+) encS3Key stored and follows opaque UUID format enc/<uuid>.enc
+[ -n "$ENC_KEY" ] && [ "$ENC_KEY" != "None" ] \
+  && _pass "encS3Key written by artifact_processor: $ENC_KEY" \
+  || _fail "encS3Key missing after ACTIVE promotion"
+
+echo "$ENC_KEY" | python3 -c "
+import sys, re
+key = sys.stdin.read().strip()
+pat = r'^enc/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.enc$'
+sys.exit(0 if re.match(pat, key) else 1)
+" 2>/dev/null \
+  && _pass "encS3Key is opaque UUID format (enc/<uuid>.enc)" \
+  || _fail "encS3Key is NOT in UUID format — URL masking may be broken: $ENC_KEY"
+
+# (+) sigS3Key stored and follows opaque UUID format sig/<uuid>.sig
+[ -n "$SIG_KEY" ] && [ "$SIG_KEY" != "None" ] \
+  && _pass "sigS3Key written by artifact_processor: $SIG_KEY" \
+  || _fail "sigS3Key missing after ACTIVE promotion"
+
+echo "$SIG_KEY" | python3 -c "
+import sys, re
+key = sys.stdin.read().strip()
+pat = r'^sig/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.sig$'
+sys.exit(0 if re.match(pat, key) else 1)
+" 2>/dev/null \
+  && _pass "sigS3Key is opaque UUID format (sig/<uuid>.sig)" \
+  || _fail "sigS3Key is NOT in UUID format: $SIG_KEY"
+
+# (-) encS3Key must NOT leak package name, version, or device type
+echo "$ENC_KEY" | python3 -c "
+import sys
+key = sys.stdin.read().strip().lower()
+leaks = ['homeassistantutility', 'network_controller', '${TEST_PKG_NAME}'.lower(), '${TEST_VERSION}'.lower()]
+found = [l for l in leaks if l in key]
+sys.exit(1 if found else 0)
+" 2>/dev/null \
+  && _pass "encS3Key leaks no package name / version / device type" \
+  || _fail "encS3Key leaks sensitive info in path: $ENC_KEY"
+
+# (-) encS3Key and sigS3Key must be different UUIDs (each artifact gets its own key)
+[ "$ENC_KEY" != "$SIG_KEY" ] \
+  && _pass "encS3Key and sigS3Key are distinct UUIDs" \
+  || _fail "encS3Key and sigS3Key are identical — UUID generation may be broken"
 
 # Duplicate upload of same ACTIVE version → 409
 code=$(http_code POST "/api/v1/ota/packages/upload-artefact" \
@@ -525,6 +572,146 @@ for FUNC in digilux_ota_upload_url digilux_ota_artifact_processor digilux_ota_jo
     && _pass "Lambda $FUNC: State=$STATE Runtime=$RUNTIME" \
     || _fail "Lambda $FUNC not Active — State=$STATE"
 done
+
+# ─────────────────────────────────────────────────────────────────────────────
+_section "T17 — URL MASKING & CLOUDFRONT DISABLED"
+# ─────────────────────────────────────────────────────────────────────────────
+
+# (+) CloudFront env vars must be absent on digilux_ota_user_consent
+CF_DOMAIN=$(aws lambda get-function-configuration \
+  --function-name digilux_ota_user_consent --region "$REGION" \
+  --query 'Environment.Variables.CLOUDFRONT_DOMAIN' --output text 2>/dev/null)
+[ -z "$CF_DOMAIN" ] || [ "$CF_DOMAIN" = "None" ] \
+  && _pass "user_consent: CLOUDFRONT_DOMAIN is not set (CloudFront disabled)" \
+  || _fail "user_consent: CLOUDFRONT_DOMAIN is still set to '$CF_DOMAIN' — CloudFront NOT disabled"
+
+CF_KP=$(aws lambda get-function-configuration \
+  --function-name digilux_ota_user_consent --region "$REGION" \
+  --query 'Environment.Variables.CLOUDFRONT_KEY_PAIR_ID' --output text 2>/dev/null)
+[ -z "$CF_KP" ] || [ "$CF_KP" = "None" ] \
+  && _pass "user_consent: CLOUDFRONT_KEY_PAIR_ID is not set" \
+  || _fail "user_consent: CLOUDFRONT_KEY_PAIR_ID is still set to '$CF_KP'"
+
+CF_SECRET=$(aws lambda get-function-configuration \
+  --function-name digilux_ota_user_consent --region "$REGION" \
+  --query 'Environment.Variables.CLOUDFRONT_PRIVATE_KEY_SECRET' --output text 2>/dev/null)
+[ -z "$CF_SECRET" ] || [ "$CF_SECRET" = "None" ] \
+  && _pass "user_consent: CLOUDFRONT_PRIVATE_KEY_SECRET is not set" \
+  || _fail "user_consent: CLOUDFRONT_PRIVATE_KEY_SECRET is still set"
+
+# (+) digilux_ota_user_get_download_link also has no CloudFront env vars
+DL_CF=$(aws lambda get-function-configuration \
+  --function-name digilux_ota_user_get_download_link --region "$REGION" \
+  --query 'Environment.Variables.CLOUDFRONT_DOMAIN' --output text 2>/dev/null)
+[ -z "$DL_CF" ] || [ "$DL_CF" = "None" ] \
+  && _pass "user_get_download_link: CLOUDFRONT_DOMAIN is not set" \
+  || _fail "user_get_download_link: CLOUDFRONT_DOMAIN is set to '$DL_CF'"
+
+# (+) encS3Key in S3 — object actually exists under enc/ prefix (not old path)
+TEST_VERSION=$(grep TEST_VERSION /tmp/ota_test_version.txt | cut -d= -f2)
+TEST_PKG_NAME=$(grep TEST_PKG_NAME /tmp/ota_test_version.txt | cut -d= -f2)
+ENC_KEY_S3=$(aws dynamodb get-item \
+  --table-name digilux_ota_packages \
+  --key "{\"packageName\":{\"S\":\"${TEST_PKG_NAME}\"},\"version\":{\"S\":\"${TEST_VERSION}\"}}" \
+  --region "$REGION" --query 'Item.encS3Key.S' --output text 2>/dev/null)
+
+if [ -n "$ENC_KEY_S3" ] && [ "$ENC_KEY_S3" != "None" ]; then
+  aws s3api head-object \
+    --bucket digilux-ota-artifacts \
+    --key "$ENC_KEY_S3" \
+    --region "$REGION" > /dev/null 2>&1 \
+    && _pass "Encrypted artifact exists in S3 at opaque key: $ENC_KEY_S3" \
+    || _fail "Encrypted artifact NOT found in S3 at: $ENC_KEY_S3"
+
+  # (-) No object exists at the OLD readable path
+  OLD_KEY="Network_controller_firmware/${TEST_PKG_NAME}/${TEST_VERSION}/${TEST_PKG_NAME}-${TEST_VERSION}.enc"
+  aws s3api head-object \
+    --bucket digilux-ota-artifacts \
+    --key "$OLD_KEY" \
+    --region "$REGION" > /dev/null 2>&1 \
+    && _fail "Artifact found at OLD readable path — UUID masking not applied: $OLD_KEY" \
+    || _pass "No artifact at old readable path (UUID masking confirmed)"
+else
+  _warn "Skipping S3 object existence check — encS3Key not found in DynamoDB"
+fi
+
+# (+) Two uploads of different versions produce different UUIDs (no key collision)
+TEST_VERSION_B="5.0.$(date +%s)-uuid-collision-check"
+UPLOAD_B=$(call POST "/api/v1/ota/packages/upload-artefact" \
+  "{\"deviceType\":\"Network_controller_firmware\",\"version\":\"${TEST_VERSION_B}\",\"releaseType\":\"PROD\",\"checksum\":\"${TEST_CHECKSUM}\",\"releaseNotes\":\"UUID collision check upload\"}")
+UPLOAD_URL_B=$(echo "$UPLOAD_B" | python3 -c "import json,sys; print(json.load(sys.stdin).get('uploadUrl',''))" 2>/dev/null)
+UPLOAD_TOKEN_B=$(echo "$UPLOAD_B" | python3 -c "import json,sys; print(json.load(sys.stdin).get('uploadToken',''))" 2>/dev/null)
+
+if [ -n "$UPLOAD_URL_B" ] && [ "$UPLOAD_URL_B" != "None" ]; then
+  curl -s -o /dev/null -X PUT "$UPLOAD_URL_B" \
+    -H "Content-Type: application/octet-stream" \
+    -H "x-amz-meta-upload-token: ${UPLOAD_TOKEN_B}" \
+    --data-binary @/tmp/test_artifact.bin
+
+  echo "  → Waiting for second package to go ACTIVE (UUID collision check)..."
+  for i in $(seq 1 15); do
+    sleep 1
+    STATUS_B=$(aws dynamodb get-item \
+      --table-name digilux_ota_packages \
+      --key "{\"packageName\":{\"S\":\"${TEST_PKG_NAME}\"},\"version\":{\"S\":\"${TEST_VERSION_B}\"}}" \
+      --region "$REGION" --query 'Item.status.S' --output text 2>/dev/null)
+    [ "$STATUS_B" = "ACTIVE" ] && break
+  done
+
+  if [ "$STATUS_B" = "ACTIVE" ]; then
+    ENC_KEY_B=$(aws dynamodb get-item \
+      --table-name digilux_ota_packages \
+      --key "{\"packageName\":{\"S\":\"${TEST_PKG_NAME}\"},\"version\":{\"S\":\"${TEST_VERSION_B}\"}}" \
+      --region "$REGION" --query 'Item.encS3Key.S' --output text 2>/dev/null)
+    [ "$ENC_KEY_S3" != "$ENC_KEY_B" ] \
+      && _pass "Two uploads produce distinct UUID keys (no collision): ...${ENC_KEY_S3: -12} vs ...${ENC_KEY_B: -12}" \
+      || _fail "UUID collision — two uploads got the same encS3Key: $ENC_KEY_S3"
+  else
+    _warn "Second package did not reach ACTIVE in 15s — skipping collision check"
+  fi
+else
+  _warn "Skipping UUID collision check — second upload failed"
+fi
+
+# (-) Presigned URL from a job document must not contain cloudfront.net
+JOB_ID=$(cat /tmp/ota_test_job_id.txt 2>/dev/null || echo "NOJOB")
+if [ "$JOB_ID" != "NOJOB" ]; then
+  JOB_DOC=$(aws iot get-job-document --job-id "$JOB_ID" --region "$REGION" \
+    --query 'document' --output text 2>/dev/null)
+  if [ -n "$JOB_DOC" ]; then
+    echo "$JOB_DOC" | python3 -c "
+import json, sys
+doc = json.loads(sys.stdin.read())
+url = doc.get('artifact', {}).get('presignedUrl', '')
+if 'cloudfront.net' in url:
+    print('CLOUDFRONT')
+    sys.exit(1)
+sys.exit(0)
+" 2>/dev/null \
+      && _pass "Job document presignedUrl does not use CloudFront (S3 direct)" \
+      || _fail "Job document presignedUrl still uses CloudFront — env vars not cleared"
+
+    # (-) presignedUrl must not contain packageName or version
+    echo "$JOB_DOC" | python3 -c "
+import json, sys
+doc = json.loads(sys.stdin.read())
+url = doc.get('artifact', {}).get('presignedUrl', '').lower()
+pkg  = doc.get('packageName', '').lower()
+ver  = doc.get('version', '').replace('.', '-').lower()
+leaks = [x for x in [pkg, ver] if x and x in url]
+if leaks:
+    print('LEAKS: ' + str(leaks))
+    sys.exit(1)
+sys.exit(0)
+" 2>/dev/null \
+      && _pass "presignedUrl does not leak packageName or version in path" \
+      || _fail "presignedUrl leaks packageName/version — UUID masking not applied to this job"
+  else
+    _warn "Could not fetch job document for URL inspection"
+  fi
+else
+  _warn "Skipping job document URL checks — no job ID available"
+fi
 
 # ─────────────────────────────────────────────────────────────────────────────
 _section "RESULTS"
