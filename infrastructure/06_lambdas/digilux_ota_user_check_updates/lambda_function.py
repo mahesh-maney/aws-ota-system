@@ -15,6 +15,7 @@ import datetime
 import json
 import logging
 import os
+import time
 from decimal import Decimal
 
 import boto3
@@ -23,6 +24,8 @@ from botocore.exceptions import ClientError
 
 log = logging.getLogger()
 log.setLevel(os.environ.get("LOG_LEVEL", "INFO"))
+
+ACTOR = "check_updates"
 
 REGION                 = os.environ["REGION"]
 DEVICE_DATA_TABLE      = os.environ.get("DEVICE_DATA_TABLE",      "digilux_device_data")
@@ -55,6 +58,24 @@ def _resp(status: int, body: dict) -> dict:
     }
 
 
+def _log(level: str, msg: str, **fields) -> None:
+    """Emit a structured JSON log line at the given level."""
+    record = {"msg": msg, **fields}
+    getattr(log, level)(json.dumps(record))
+
+
+def _audit(event: str, actor: str, resource: dict, result: str, **extra) -> None:
+    print(json.dumps({
+        "audit":    True,
+        "event":    event,
+        "ts":       datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z",
+        "actor":    actor,
+        "resource": resource,
+        "result":   result,
+        **extra,
+    }))
+
+
 def _version_tuple(v: str):
     """Parse '4.2.0' → (4, 2, 0). Non-numeric segments use their numeric prefix (e.g. '28188-rc1' → 28188)."""
     result = []
@@ -79,7 +100,9 @@ def _invoke_entitlement_check(controller_id: str, firmware_category: str,
     an entitlement service outage.
     """
     if not controller_id or not firmware_category:
-        # Nothing to check — permissive default
+        _log("debug", "entitlement_check_skipped",
+             controllerId=controller_id, firmwareCategory=firmware_category,
+             detail="Missing input — defaulting to eligible=True")
         return {"eligible": True, "reason": "missing_input"}
 
     payload = json.dumps({
@@ -88,44 +111,41 @@ def _invoke_entitlement_check(controller_id: str, firmware_category: str,
         "tierOverride":     tier_override,
     }).encode()
 
+    _log("debug", "entitlement_invoke_start",
+         controllerId=controller_id, firmwareCategory=firmware_category,
+         function=ENTITLEMENT_FUNCTION)
+
+    t_start = time.monotonic()
     try:
         resp = lambda_client.invoke(
             FunctionName   = ENTITLEMENT_FUNCTION,
             InvocationType = "RequestResponse",
             Payload        = payload,
         )
-        result = json.loads(resp["Payload"].read())
+        result  = json.loads(resp["Payload"].read())
+        elapsed = int((time.monotonic() - t_start) * 1000)
+
         # Lambda invocation errors surface as FunctionError key
         if resp.get("FunctionError"):
-            log.warning(json.dumps({
-                "msg":              "entitlement_function_error",
-                "controllerId":     controller_id,
-                "firmwareCategory": firmware_category,
-                "functionError":    resp["FunctionError"],
-            }))
+            _log("warning", "entitlement_function_error",
+                 controllerId=controller_id, firmwareCategory=firmware_category,
+                 functionError=resp["FunctionError"], elapsedMs=elapsed,
+                 detail="Failing open — returning eligible=True")
             return {"eligible": True, "reason": "entitlement_function_error"}
+
+        _log("debug", "entitlement_invoke_complete",
+             controllerId=controller_id, firmwareCategory=firmware_category,
+             eligible=result.get("eligible"), reason=result.get("reason"),
+             subscriptionTier=result.get("subscriptionTier"),
+             elapsedMs=elapsed)
         return result
     except Exception as exc:
-        log.warning(json.dumps({
-            "msg":              "entitlement_invoke_failed",
-            "controllerId":     controller_id,
-            "firmwareCategory": firmware_category,
-            "error":            str(exc),
-        }))
-        # Fail open — never block legitimate OTA delivery
+        elapsed = int((time.monotonic() - t_start) * 1000)
+        _log("warning", "entitlement_invoke_failed",
+             controllerId=controller_id, firmwareCategory=firmware_category,
+             error=str(exc), excType=type(exc).__name__, elapsedMs=elapsed,
+             detail="Failing open — never block legitimate OTA delivery")
         return {"eligible": True, "reason": "entitlement_invoke_failed"}
-
-
-def _audit(event: str, actor: str, resource: dict, result: str, **extra) -> None:
-    print(json.dumps({
-        "audit": True,
-        "event": event,
-        "ts": datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z",
-        "actor": actor,
-        "resource": resource,
-        "result": result,
-        **extra,
-    }))
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -134,24 +154,43 @@ def _audit(event: str, actor: str, resource: dict, result: str, **extra) -> None
 
 def _get_user_devices(user_id: str) -> list[dict]:
     """Query digilux_device_data by userId-index GSI. Returns list of device items."""
-    tbl = dynamo.Table(DEVICE_DATA_TABLE)
+    _log("debug", "user_device_query_start",
+         userId=user_id, table=DEVICE_DATA_TABLE, index=DEVICE_DATA_USER_INDEX)
+    t_start = time.monotonic()
+    tbl  = dynamo.Table(DEVICE_DATA_TABLE)
     resp = tbl.query(
         IndexName=DEVICE_DATA_USER_INDEX,
         KeyConditionExpression=Key("userId").eq(user_id),
     )
-    return resp.get("Items", [])
+    items = resp.get("Items", [])
+    elapsed = int((time.monotonic() - t_start) * 1000)
+    _log("debug", "user_device_query_complete",
+         userId=user_id, deviceCount=len(items), elapsedMs=elapsed)
+    return items
 
 
 def _is_beta_device(thing_name: str) -> bool:
     """Return True if the device's IoT thing is in the canary group."""
     if not thing_name:
+        _log("debug", "beta_check_skipped_no_thing_name")
         return False
+    _log("debug", "beta_check_start",
+         thingName=thing_name, canaryGroup=CANARY_GROUP)
+    t_start = time.monotonic()
     try:
         resp   = iot.list_thing_groups_for_thing(thingName=thing_name)
         groups = [g.get("groupName", "") for g in resp.get("thingGroups", [])]
-        return CANARY_GROUP in groups
-    except Exception:
-        log.warning(f"Could not check canary group for thing={thing_name} — defaulting to non-beta")
+        result = CANARY_GROUP in groups
+        elapsed = int((time.monotonic() - t_start) * 1000)
+        _log("debug", "beta_check_complete",
+             thingName=thing_name, groups=groups,
+             isBeta=result, elapsedMs=elapsed)
+        return result
+    except Exception as e:
+        elapsed = int((time.monotonic() - t_start) * 1000)
+        _log("warning", "beta_check_failed",
+             thingName=thing_name, error=str(e), elapsedMs=elapsed,
+             detail="Could not check canary group — defaulting to non-beta")
         return False
 
 
@@ -163,6 +202,10 @@ def _get_latest_available_version(package_name: str, include_beta: bool) -> dict
       - releaseType = PROD always; also UAT if device is in the canary group
     Returns the highest semver version that matches, or None.
     """
+    _log("debug", "package_lookup_start",
+         packageName=package_name, includeBeta=include_beta)
+    t_start = time.monotonic()
+
     tbl = dynamo.Table(PACKAGES_TABLE)
 
     filter_expr = (
@@ -177,9 +220,20 @@ def _get_latest_available_version(package_name: str, include_beta: bool) -> dict
         FilterExpression=filter_expr,
     )
     items = resp.get("Items", [])
+    elapsed = int((time.monotonic() - t_start) * 1000)
+
+    _log("debug", "package_lookup_complete",
+         packageName=package_name, includeBeta=include_beta,
+         candidateCount=len(items), elapsedMs=elapsed,
+         versions=[i.get("version") for i in items])
+
     if not items:
         return None
-    return max(items, key=lambda i: _version_tuple(i.get("version", "0.0.0")))
+    best = max(items, key=lambda i: _version_tuple(i.get("version", "0.0.0")))
+    _log("debug", "package_best_version_selected",
+         packageName=package_name, selectedVersion=best.get("version"),
+         releaseType=best.get("releaseType"))
+    return best
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -187,41 +241,64 @@ def _get_latest_available_version(package_name: str, include_beta: bool) -> dict
 # ──────────────────────────────────────────────────────────────────────────────
 
 def lambda_handler(event, context):
+    handler_start = time.monotonic()
+    request_id    = context.aws_request_id if context else None
+
     try:
         # ── Auth: extract userId from Cognito JWT claims ─────────────────────
         claims  = event.get("requestContext", {}).get("authorizer", {}).get("claims", {})
         user_id = claims.get("sub")
         if not user_id:
-            log.warning("Missing sub claim in token")
+            _log("warning", "missing_sub_claim",
+                 detail="JWT sub claim absent — rejecting with 401")
             return _resp(401, {"error": "Unauthorized — invalid token"})
 
         email = claims.get("email", user_id)
-        log.info(json.dumps({"msg": "check_updates_request", "userId": user_id, "email": email}))
+        _log("info", "check_updates_request",
+             userId=user_id, email=email, requestId=request_id)
 
         # ── Fetch devices owned by this user ─────────────────────────────────
         device_items = _get_user_devices(user_id)
-        log.info(f"Found {len(device_items)} device(s) for userId={user_id}")
+        _log("info", "user_devices_fetched",
+             userId=user_id, deviceCount=len(device_items))
 
         if not device_items:
+            _log("info", "no_devices_for_user",
+                 userId=user_id, detail="User has no registered devices")
             _audit("USER_CHECK_UPDATES", user_id, {"userId": user_id}, "SUCCESS",
-                   devicesFound=0)
+                   devicesFound=0, updatesAvailable=0)
             return _resp(200, {"devices": []})
 
-        result_devices = []
+        result_devices      = []
+        not_registered_count = 0
+        up_to_date_count    = 0
+        blocked_count       = 0
 
         for dev in device_items:
             device_id = dev.get("deviceId")
             if not device_id:
-                log.warning(f"Device record missing deviceId — skipping: {dev}")
+                _log("warning", "device_record_missing_deviceid",
+                     userId=user_id, record=str(dev)[:200],
+                     detail="Device record has no deviceId — skipping")
                 continue
 
             # ── OTA fields come directly from device_data item ────────────────
             installed_version = dev.get("globalInstalledVersion", "")
             pkg_info          = dev.get("package") or {}
             pkg_name          = pkg_info.get("name", "")
+            thing_name        = dev.get("thingName")
+
+            _log("debug", "processing_device",
+                 userId=user_id, deviceId=device_id, thingName=thing_name,
+                 packageName=pkg_name, installedVersion=installed_version)
 
             if not installed_version or not pkg_name:
-                log.info(f"Device {device_id} has no globalInstalledVersion/package (OTA agent not yet started)")
+                _log("info", "device_not_registered_for_ota",
+                     userId=user_id, deviceId=device_id, thingName=thing_name,
+                     hasInstalledVersion=bool(installed_version),
+                     hasPackageName=bool(pkg_name),
+                     detail="OTA agent not yet started or registration incomplete")
+                not_registered_count += 1
                 result_devices.append({
                     "deviceId":  device_id,
                     "otaStatus": "NOT_REGISTERED",
@@ -229,73 +306,117 @@ def lambda_handler(event, context):
                 continue
 
             # ── Determine if this device sees UAT packages ───────────────────
-            thing_name   = dev.get("thingName")
             include_beta = _is_beta_device(thing_name)
-            log.info(json.dumps({
-                "msg": "device_beta_status",
-                "deviceId": device_id, "thingName": thing_name, "includeBeta": include_beta,
-            }))
+            _log("info", "device_beta_status",
+                 userId=user_id, deviceId=device_id,
+                 thingName=thing_name, includeBeta=include_beta)
 
             # ── Compare installed package with latest available version ───────
             latest_pkg = _get_latest_available_version(pkg_name, include_beta)
             if not latest_pkg:
-                log.debug(f"No available package found for {pkg_name}")
-            else:
-                latest_ver = latest_pkg.get("version", "")
-                if not _is_newer(latest_ver, installed_version):
-                    log.debug(f"{pkg_name}: installed={installed_version}, latest={latest_ver} — up to date")
-                else:
-                    # ── Entitlement check — gate on subscription tier ─────────
-                    firmware_category = latest_pkg.get("firmwareCategory") or None
-                    tier_override     = latest_pkg.get("tierOverride")     or None
-                    entitlement       = _invoke_entitlement_check(thing_name, firmware_category, tier_override)
+                _log("info", "no_available_package",
+                     userId=user_id, deviceId=device_id, packageName=pkg_name,
+                     includeBeta=include_beta,
+                     detail="No ACTIVE+activated package found — device is up to date or package not released")
+                up_to_date_count += 1
+                continue
 
-                    if not entitlement.get("eligible", True):
-                        log.info(json.dumps({
-                            "msg":              "update_blocked_by_entitlement",
-                            "userId":           user_id,
-                            "deviceId":         device_id,
-                            "packageName":      pkg_name,
-                            "availableVersion": latest_ver,
-                            "firmwareCategory": firmware_category,
-                            "reason":           entitlement.get("reason"),
-                            "subscriptionTier": entitlement.get("subscriptionTier"),
-                            "minimumTier":      entitlement.get("minimumTier"),
-                        }))
-                    else:
-                        result_devices.append({
-                            "deviceId":         device_id,
-                            "otaStatus":        "REGISTERED",
-                            "package":          pkg_name,
-                            "installedVersion": installed_version,
-                            "availableVersion": latest_ver,
-                            "fileName":         latest_pkg.get("fileName", ""),
-                        })
-                        log.info(json.dumps({
-                            "msg":              "update_available",
-                            "userId":           user_id,
-                            "deviceId":         device_id,
-                            "packageName":      pkg_name,
-                            "installedVersion": installed_version,
-                            "availableVersion": latest_ver,
-                            "fileName":         latest_pkg.get("fileName", ""),
-                        }))
+            latest_ver = latest_pkg.get("version", "")
+            _log("debug", "version_comparison",
+                 userId=user_id, deviceId=device_id, packageName=pkg_name,
+                 installedVersion=installed_version, latestVersion=latest_ver,
+                 installedTuple=list(_version_tuple(installed_version)),
+                 latestTuple=list(_version_tuple(latest_ver)))
+
+            if not _is_newer(latest_ver, installed_version):
+                _log("info", "device_up_to_date",
+                     userId=user_id, deviceId=device_id, packageName=pkg_name,
+                     installedVersion=installed_version, latestVersion=latest_ver)
+                up_to_date_count += 1
+                continue
+
+            # ── Entitlement check — gate on subscription tier ─────────────────
+            firmware_category = latest_pkg.get("firmwareCategory") or None
+            tier_override     = latest_pkg.get("tierOverride")     or None
+            _log("debug", "entitlement_check_required",
+                 userId=user_id, deviceId=device_id, packageName=pkg_name,
+                 availableVersion=latest_ver, firmwareCategory=firmware_category,
+                 tierOverride=tier_override)
+
+            entitlement = _invoke_entitlement_check(thing_name, firmware_category, tier_override)
+
+            if not entitlement.get("eligible", True):
+                _log("info", "update_blocked_by_entitlement",
+                     userId=user_id, deviceId=device_id,
+                     packageName=pkg_name,
+                     installedVersion=installed_version,
+                     availableVersion=latest_ver,
+                     firmwareCategory=firmware_category,
+                     reason=entitlement.get("reason"),
+                     subscriptionTier=entitlement.get("subscriptionTier"),
+                     minimumTier=entitlement.get("minimumTier"))
+                _audit("UPDATE_BLOCKED_ENTITLEMENT", user_id,
+                       {"deviceId": device_id, "packageName": pkg_name, "version": latest_ver},
+                       "BLOCKED",
+                       reason=entitlement.get("reason"),
+                       subscriptionTier=entitlement.get("subscriptionTier"),
+                       minimumTier=entitlement.get("minimumTier"),
+                       firmwareCategory=firmware_category)
+                blocked_count += 1
+            else:
+                result_devices.append({
+                    "deviceId":         device_id,
+                    "otaStatus":        "REGISTERED",
+                    "package":          pkg_name,
+                    "installedVersion": installed_version,
+                    "availableVersion": latest_ver,
+                    "fileName":         latest_pkg.get("fileName", ""),
+                    "releaseNotes":     latest_pkg.get("releaseNotes", ""),
+                })
+                _log("info", "update_available",
+                     userId=user_id, deviceId=device_id,
+                     packageName=pkg_name,
+                     installedVersion=installed_version,
+                     availableVersion=latest_ver,
+                     fileName=latest_pkg.get("fileName", ""),
+                     releaseNotesLength=len(latest_pkg.get("releaseNotes", "")))
+                _audit("UPDATE_AVAILABLE", user_id,
+                       {"deviceId": device_id, "packageName": pkg_name, "version": latest_ver},
+                       "SUCCESS",
+                       installedVersion=installed_version,
+                       availableVersion=latest_ver,
+                       fileName=latest_pkg.get("fileName", ""),
+                       isBeta=include_beta)
+
+        handler_ms = int((time.monotonic() - handler_start) * 1000)
 
         _audit("USER_CHECK_UPDATES", user_id, {"userId": user_id}, "SUCCESS",
-               devicesFound=len(result_devices))
+               totalDevices=len(device_items),
+               updatesAvailable=len(result_devices),
+               notRegistered=not_registered_count,
+               upToDate=up_to_date_count,
+               blocked=blocked_count,
+               handlerMs=handler_ms)
 
-        log.info(json.dumps({
-            "msg": "check_updates_complete",
-            "userId": user_id, "updates": len(result_devices),
-        }))
+        _log("info", "check_updates_complete",
+             userId=user_id,
+             totalDevices=len(device_items),
+             updatesAvailable=len(result_devices),
+             notRegistered=not_registered_count,
+             upToDate=up_to_date_count,
+             blocked=blocked_count,
+             handlerMs=handler_ms)
 
         return _resp(200, {"devices": result_devices})
 
     except ClientError as e:
         code = e.response["Error"]["Code"]
         msg  = e.response["Error"]["Message"]
-        log.error(json.dumps({"msg": "aws_client_error", "code": code, "error": msg}))
+        _log("error", "aws_client_error",
+             awsError=code, awsMessage=msg)
         return _resp(500, {"error": "Internal server error"})
     except Exception as e:
+        _log("error", "unhandled_exception",
+             error=str(e), excType=type(e).__name__)
         log.exception(f"Unhandled error in user_check_updates: {e}")
         return _resp(500, {"error": "Internal server error"})
