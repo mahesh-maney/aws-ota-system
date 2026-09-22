@@ -135,8 +135,15 @@ _section "T05 — PACKAGE UPLOAD FLOW"
 # Use a unique version to avoid collision
 TEST_VERSION="5.0.$(date +%s)-$RANDOM"
 
-# Generate test artifact and compute its SHA256 checksum upfront
-echo "test content for OTA E2E validation $(date)" | gzip > /tmp/test_artifact.bin
+# Generate test artifact — must be a valid tar containing manifest.json
+# artifact_processor validates tar structure before promoting PENDING → ACTIVE
+_TEST_DIR=$(mktemp -d)
+cat > "$_TEST_DIR/manifest.json" <<MANIFEST_EOF
+{"packageName":"HomeAssistantUtility","version":"${TEST_VERSION}","files":["payload.bin"]}
+MANIFEST_EOF
+echo "e2e test payload $(date)" > "$_TEST_DIR/payload.bin"
+tar -cf /tmp/test_artifact.bin -C "$_TEST_DIR" manifest.json payload.bin
+rm -rf "$_TEST_DIR"
 TEST_CHECKSUM=$(sha256sum /tmp/test_artifact.bin | awk '{print $1}')
 echo "  → test artifact SHA256: ${TEST_CHECKSUM:0:16}..."
 
@@ -299,9 +306,9 @@ JOB_ID=$(echo "$DEPLOY" | python3 -c "import json,sys; print(json.load(sys.stdin
 
 if [ -n "$JOB_ID" ] && [ "$JOB_ID" != "None" ]; then
   _pass "Deployment created: $JOB_ID"
-  assert_field "$DEPLOY" "status" "QUEUED" "New deployment starts as QUEUED"
+  assert_field "$DEPLOY" "status" "AWAITING_CONSENT" "New deployment starts as AWAITING_CONSENT (consent-gated)"
   assert_field "$DEPLOY" "rolloutStage" "CANARY" "Rollout stage preserved"
-  assert_has_field "$DEPLOY" "iotJobArn" "Response has iotJobArn"
+  assert_has_field "$DEPLOY" "consentCount" "Response has consentCount"
   echo "$JOB_ID" > /tmp/ota_test_job_id.txt
 else
   _fail "Deployment creation returned no jobId: $DEPLOY"
@@ -392,10 +399,11 @@ if [ "$JOB_ID" != "NOJOB" ]; then
     && _pass "pendingJobId cleared after SUCCEEDED" \
     || _warn "pendingJobId not cleared: $PENDING"
 
-  # Re-deploy already-installed version → 400
+  # Re-deploy same package+version → admin can always create consent-gated deployment (201)
+  # Version guard lives in user_consent (user side), not job_create (admin side)
   code=$(http_code POST "/api/v1/ota/deployments" \
     "{\"packageName\":\"${TEST_PKG_NAME}\",\"version\":\"${TEST_VERSION}\",\"targetType\":\"THING\",\"targetId\":\"${DEVICE_ID}\"}")
-  assert_code "$code" "400" "Re-deploy already-installed version → 400"
+  assert_code "$code" "201" "Re-deploy same version → 201 (admin creates consent record regardless of installed version)"
 else
   _warn "Skipping status handler tests — no job ID"
 fi

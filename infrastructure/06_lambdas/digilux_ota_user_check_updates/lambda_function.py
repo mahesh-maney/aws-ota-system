@@ -61,7 +61,7 @@ def _resp(status: int, body: dict) -> dict:
 def _log(level: str, msg: str, **fields) -> None:
     """Emit a structured JSON log line at the given level."""
     record = {"msg": msg, **fields}
-    getattr(log, level)(json.dumps(record))
+    getattr(log, level)(json.dumps(record, default=str))
 
 
 def _audit(event: str, actor: str, resource: dict, result: str, **extra) -> None:
