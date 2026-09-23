@@ -14,7 +14,7 @@ Digilux Cloud ──► Digilux Cloud: Encrypt (AES-256-GCM) + sign (ECDSA)
 Digilux Cloud ──► Digilux Cloud: Status: AWAITING_CONSENT
 User App ──► Digilux Cloud: POST /consent (accepted: true)
 Digilux Cloud ──► Digilux Cloud: IoT Job created for this device
-Controller ──► Digilux Cloud: GET /my/updates
+Controller ──► Digilux Cloud: GET /device/available-updates
 Digilux Cloud ──► Controller: availableVersion + releaseNotes
 Controller ──► Digilux Cloud: POST /consent (accepted: true)
 Digilux Cloud ──► Controller: downloadUrl + aesKey + aesIv
@@ -51,7 +51,7 @@ Each step is a hard gate — a failure at any step means abort and report.
 
 **Step 1 — Poll for available updates**
 
-Call `GET /api/v1/ota/my/updates` periodically. Act on the `otaStatus` of each device entry:
+Call `GET /api/v1/ota/device/available-updates` periodically. Act on the `otaStatus` of each device entry:
 
 - `REGISTERED` with `availableVersion` newer than `installedVersion` → proceed to Step 2.
 - `JOB_ACTIVE` → a firmware job is already running or has failed. Display `activeJob.message` to the user. No new consent or download needed.
@@ -107,7 +107,7 @@ All requests require `Authorization: Bearer <access_token>`.
 
 ---
 
-### GET /ota/my/updates
+### GET /ota/device/available-updates
 
 Returns available updates for all devices owned by the authenticated user.
 
@@ -389,7 +389,7 @@ the install did not succeed.
 
 | # | Step | Method | Path | Call when |
 |---|---|---|---|---|
-| 1 | Poll for updates | `GET` | `/ota/my/updates` | Periodic (every N minutes) |
+| 1 | Poll for updates | `GET` | `/ota/device/available-updates` | Periodic (every N minutes) |
 | 2 | Submit consent | `POST` | `/ota/my/updates/consent` | User accepts in app |
 | 3 | Download artifact | `GET` | `<downloadUrl from step 2>` | Immediately after step 2 |
 | 4 | Report result | IoT Job | — | After install succeeds or fails |
