@@ -393,6 +393,126 @@ the install did not succeed.
 
 ---
 
+## Dev / Integration Testing Endpoints
+
+> **These endpoints are for controller team integration testing only.**
+> They bypass the full upload → deployment → consent pipeline.
+> They will be removed once integration testing is complete.
+
+Base URL: `https://iot.digilux.co.in/smarthome/api/v1`
+
+Auth: same device user pool PKCE token used for all other OTA endpoints.
+
+---
+
+### POST /ota/dev/simulate-job
+
+Creates an IoT Job directly for a device without going through the admin upload
+or consent flow. Use this to test the download, verification, and install steps
+in isolation.
+
+**Request body**
+
+```json
+{ "deviceId": "edb39bba-baf1-4700-968c-a42228e53aa0" }
+```
+
+Optionally pin a specific firmware version:
+
+```json
+{ "deviceId": "edb39bba-baf1-4700-968c-a42228e53aa0", "version": "4.6.0" }
+```
+
+If `version` is omitted the latest ACTIVE package is used.
+
+**Response 201**
+
+```json
+{
+  "jobId":        "digilux-ota-dev-HomeAssistantUtility-4-6-0-1790186304",
+  "deviceId":     "edb39bba-baf1-4700-968c-a42228e53aa0",
+  "packageName":  "HomeAssistantUtility",
+  "version":      "4.6.0",
+  "status":       "QUEUED",
+  "presignedUrl": "https://digilux-ota-artifacts.s3.amazonaws.com/enc/..."
+}
+```
+
+The `presignedUrl` in the response is the encrypted artifact download URL —
+use it directly without calling `/consent`. The IoT Job document delivered
+to the device contains the same URL plus `sha256`, `signature`, and `size`
+fields needed for verification (identical structure to production jobs).
+
+**Error responses**
+
+| Code | Reason |
+|---|---|
+| `400` | `deviceId` missing |
+| `404` | Device not found, or no ACTIVE package for the device |
+| `409` | Device already has an active job — cancel it first (see DELETE below) |
+| `500` | Package found but has no encrypted artifact key |
+
+---
+
+### DELETE /ota/dev/simulate-job
+
+Cancels the active dev simulate job on a device and clears `pendingJobId` so
+the device is immediately ready for the next test run.
+
+**Request body**
+
+```json
+{ "deviceId": "edb39bba-baf1-4700-968c-a42228e53aa0" }
+```
+
+**Response 200**
+
+```json
+{
+  "cancelled": true,
+  "jobId":     "digilux-ota-dev-HomeAssistantUtility-4-6-0-1790186304",
+  "deviceId":  "edb39bba-baf1-4700-968c-a42228e53aa0",
+  "message":   "[DEV] IoT Job digilux-ota-dev-... cancelled and device reset"
+}
+```
+
+**Error responses**
+
+| Code | Reason |
+|---|---|
+| `404` | Device not found, or no active job on this device |
+| `409` | Active job is a production OTA job — use the normal OTA flow to handle it |
+
+> Only jobs with the `digilux-ota-dev-` prefix can be cancelled via this endpoint.
+> Production jobs are protected.
+
+---
+
+### Typical test loop
+
+```bash
+# 1 — Create a job (device receives it via IoT)
+curl -X POST https://iot.digilux.co.in/smarthome/api/v1/ota/dev/simulate-job \
+  -H "Authorization: Bearer <token>" \
+  -H "Content-Type: application/json" \
+  -d '{"deviceId": "your-device-id"}'
+
+# 2 — Run your download / verification / install test on the controller
+
+# 3 — Cancel and reset when done (or if you want to run again)
+curl -X DELETE https://iot.digilux.co.in/smarthome/api/v1/ota/dev/simulate-job \
+  -H "Authorization: Bearer <token>" \
+  -H "Content-Type: application/json" \
+  -d '{"deviceId": "your-device-id"}'
+```
+
+> **Note:** Simulate jobs (`digilux-ota-dev-*`) are intentionally invisible to
+> `GET /ota/device/available-updates` — they will never show as `JOB_ACTIVE`
+> in the app. This is by design so dev testing does not pollute the user-facing
+> update status.
+
+---
+
 ## Quick Reference
 
 **Base URL:** `https://iot.digilux.co.in/api/v1`
