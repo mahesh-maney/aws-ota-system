@@ -1307,6 +1307,252 @@ fi
 _t19_cleanup "$T19_PKG" "$T20_VER"
 
 # ─────────────────────────────────────────────────────────────────────────────
+_section "T21 — USER CONSENT: POST /api/v1/ota/my/updates/consent"
+# ─────────────────────────────────────────────────────────────────────────────
+# API Gateway authorizer for this endpoint requires PKCE OAuth scopes
+# (smarthome_server/read + write) which cannot be obtained programmatically.
+# Auth-layer tests call the real API endpoint to verify rejection behaviour.
+# All business-logic tests invoke the Lambda directly, bypassing API Gateway.
+# ─────────────────────────────────────────────────────────────────────────────
+
+T21_VERSION=$(grep TEST_VERSION /tmp/ota_test_version.txt | cut -d= -f2)
+T21_PKG=$(grep TEST_PKG_NAME /tmp/ota_test_version.txt | cut -d= -f2)
+T21_USER_ID="41f35d4a-d0d1-709e-634f-fc6198a3872d"   # demotesthw5@yopmail.com
+T21_CONSENT_URL="/api/v1/ota/my/updates/consent"
+
+# Helper: build Lambda event, invoke, populate T21_STATUS and T21_BODY
+t21_invoke() {
+  local user_id="$1" body_json="$2"
+  python3.9 -W ignore -c "
+import json, sys
+uid, body = sys.argv[1], sys.argv[2]
+print(json.dumps({
+  'httpMethod': 'POST',
+  'path': '/api/v1/ota/my/updates/consent',
+  'headers': {'Content-Type': 'application/json'},
+  'body': body,
+  'requestContext': {'authorizer': {'claims': {
+    'sub': uid, 'email': 'test@test.com', 'cognito:username': uid
+  }}}
+}))" "$user_id" "$body_json" > /tmp/t21_event.json 2>/dev/null
+
+  aws lambda invoke \
+    --function-name digilux_ota_user_consent \
+    --region "$REGION" \
+    --payload file:///tmp/t21_event.json \
+    /tmp/t21_response.json > /dev/null 2>&1
+
+  T21_STATUS=$(python3.9 -W ignore -c \
+    "import json; print(json.load(open('/tmp/t21_response.json')).get('statusCode',0))" 2>/dev/null)
+  T21_BODY=$(python3.9 -W ignore -c \
+    "import json; print(json.load(open('/tmp/t21_response.json')).get('body','{}'))" 2>/dev/null)
+}
+
+# Helper: extract a field from T21_BODY
+t21_field() {
+  echo "$T21_BODY" | python3.9 -c \
+    "import json,sys; d=json.loads(sys.stdin.read()); print(d.get('$1','__MISSING__'))" 2>/dev/null
+}
+
+# Ensure no stale pendingJobId on the test device before we start
+aws dynamodb update-item \
+  --table-name digilux_device_data \
+  --key "{\"deviceId\":{\"S\":\"${DEVICE_ID}\"},\"macAddress\":{\"S\":\"${DEVICE_MAC}\"}}" \
+  --update-expression "REMOVE pendingJobId" \
+  --region "$REGION" > /dev/null 2>&1
+
+# ── AUTH LAYER (real API endpoint — confirms scope enforcement) ───────────────
+
+T21_BODY_SAMPLE="{\"deviceId\":\"${DEVICE_ID}\",\"packageName\":\"${T21_PKG}\",\"version\":\"${T21_VERSION}\",\"accepted\":true}"
+
+# (-) No Authorization header → 401
+code=$(http_code POST "$T21_CONSENT_URL" "$T21_BODY_SAMPLE" "")
+assert_code "$code" "401" "T21.1 (-) No token → 401 (API Gateway)"
+
+# (-) Malformed token → 401
+code=$(http_code POST "$T21_CONSENT_URL" "$T21_BODY_SAMPLE" "Bearer invalid.token.here")
+[ "$code" = "401" ] || [ "$code" = "403" ] \
+  && _pass "T21.2 (-) Malformed token rejected (HTTP $code)" \
+  || _fail "T21.2 (-) Malformed token should be 401/403, got $code"
+
+# (-) USER_PASSWORD_AUTH access token — right pool but lacks smarthome_server OAuth scopes → 401
+# Proves API Gateway scope enforcement (smarthome_server/read + write) is active on this endpoint.
+T21_NO_SCOPE_TOKEN=$(python3.9 -W ignore -c "
+import boto3
+r = boto3.client('cognito-idp', region_name='ap-south-1').initiate_auth(
+    AuthFlow='USER_PASSWORD_AUTH',
+    AuthParameters={'USERNAME': 'demotesthw5@yopmail.com', 'PASSWORD': 'DigiluxTest@9900'},
+    ClientId='q7189jitfkk4ttesepkgls491'
+)
+print(r['AuthenticationResult']['AccessToken'])
+" 2>/dev/null)
+code=$(http_code POST "$T21_CONSENT_URL" "$T21_BODY_SAMPLE" "Bearer ${T21_NO_SCOPE_TOKEN}")
+assert_code "$code" "401" \
+  "T21.3 (-) Right pool, no smarthome_server OAuth scope → 401 (scope enforcement confirmed)"
+
+# ── INPUT VALIDATION (Lambda direct invocation) ───────────────────────────────
+
+# (-) Missing deviceId → 400
+t21_invoke "$T21_USER_ID" \
+  "{\"packageName\":\"${T21_PKG}\",\"version\":\"${T21_VERSION}\",\"accepted\":true}"
+[ "$T21_STATUS" = "400" ] \
+  && _pass "T21.4 (-) Missing deviceId → 400" \
+  || _fail "T21.4 (-) Missing deviceId — expected 400, got $T21_STATUS"
+
+# (-) Missing packageName → 400
+t21_invoke "$T21_USER_ID" \
+  "{\"deviceId\":\"${DEVICE_ID}\",\"version\":\"${T21_VERSION}\",\"accepted\":true}"
+[ "$T21_STATUS" = "400" ] \
+  && _pass "T21.5 (-) Missing packageName → 400" \
+  || _fail "T21.5 (-) Missing packageName — expected 400, got $T21_STATUS"
+
+# (-) Missing version → 400
+t21_invoke "$T21_USER_ID" \
+  "{\"deviceId\":\"${DEVICE_ID}\",\"packageName\":\"${T21_PKG}\",\"accepted\":true}"
+[ "$T21_STATUS" = "400" ] \
+  && _pass "T21.6 (-) Missing version → 400" \
+  || _fail "T21.6 (-) Missing version — expected 400, got $T21_STATUS"
+
+# (-) Device belongs to a different userId → 404
+t21_invoke "00000000-0000-0000-0000-000000000000" \
+  "{\"deviceId\":\"${DEVICE_ID}\",\"packageName\":\"${T21_PKG}\",\"version\":\"${T21_VERSION}\",\"accepted\":true}"
+[ "$T21_STATUS" = "404" ] \
+  && _pass "T21.7 (-) Device not owned by caller → 404" \
+  || _fail "T21.7 (-) Device not owned by caller — expected 404, got $T21_STATUS"
+
+# (-) Package version does not exist → 404
+t21_invoke "$T21_USER_ID" \
+  "{\"deviceId\":\"${DEVICE_ID}\",\"packageName\":\"${T21_PKG}\",\"version\":\"0.0.0-nonexistent\",\"accepted\":true}"
+[ "$T21_STATUS" = "404" ] \
+  && _pass "T21.8 (-) Non-existent package version → 404" \
+  || _fail "T21.8 (-) Non-existent package version — expected 404, got $T21_STATUS"
+
+# ── HAPPY PATH: accepted=true ─────────────────────────────────────────────────
+
+t21_invoke "$T21_USER_ID" \
+  "{\"deviceId\":\"${DEVICE_ID}\",\"packageName\":\"${T21_PKG}\",\"version\":\"${T21_VERSION}\",\"accepted\":true}"
+
+[ "$T21_STATUS" = "202" ] \
+  && _pass "T21.9 (+) accepted=true → 202" \
+  || _fail "T21.9 (+) accepted=true — expected 202, got $T21_STATUS: $(echo $T21_BODY | head -c 120)"
+
+T21_JOB_ID=$(t21_field "jobId")
+T21_JOB_RESP_STATUS=$(t21_field "status")
+
+[ -n "$T21_JOB_ID" ] && [ "$T21_JOB_ID" != "__MISSING__" ] \
+  && _pass "T21.9 (+) Response contains jobId: $T21_JOB_ID" \
+  || _fail "T21.9 (+) Response missing jobId — body: $T21_BODY"
+
+[ "$T21_JOB_RESP_STATUS" = "QUEUED" ] \
+  && _pass "T21.9 (+) Response status=QUEUED" \
+  || _fail "T21.9 (+) Expected status=QUEUED in response, got: $T21_JOB_RESP_STATUS"
+
+# (+) pendingJobId written to device_data
+T21_PENDING=$(aws dynamodb get-item \
+  --table-name digilux_device_data \
+  --key "{\"deviceId\":{\"S\":\"${DEVICE_ID}\"},\"macAddress\":{\"S\":\"${DEVICE_MAC}\"}}" \
+  --region "$REGION" \
+  --query 'Item.pendingJobId.S' --output text 2>/dev/null)
+[ "$T21_PENDING" = "$T21_JOB_ID" ] \
+  && _pass "T21.10 (+) pendingJobId written to device_data: $T21_PENDING" \
+  || _fail "T21.10 (+) pendingJobId mismatch — expected $T21_JOB_ID, got $T21_PENDING"
+
+# (+) IoT Job exists in AWS IoT targeted at the correct Thing
+if [ -n "$T21_JOB_ID" ] && [ "$T21_JOB_ID" != "__MISSING__" ]; then
+  T21_IOT_TARGETS=$(aws iot describe-job --job-id "$T21_JOB_ID" --region "$REGION" \
+    --query 'job.targets' --output json 2>/dev/null)
+  echo "$T21_IOT_TARGETS" | python3.9 -c "
+import json, sys
+targets = json.load(sys.stdin)
+arn = 'arn:aws:iot:ap-south-1:986906626244:thing/${DEVICE_ID}'
+print('OK' if arn in targets else 'MISSING')
+" 2>/dev/null | grep -q "^OK$" \
+    && _pass "T21.11 (+) IoT Job $T21_JOB_ID targeted at thing/${DEVICE_ID}" \
+    || _fail "T21.11 (+) IoT Job target mismatch — targets: $T21_IOT_TARGETS"
+
+  # (+) Job document contains all required fields
+  T21_JOB_DOC=$(aws iot get-job-document --job-id "$T21_JOB_ID" --region "$REGION" \
+    --query 'document' --output text 2>/dev/null)
+  T21_DOC_RESULT=$(echo "$T21_JOB_DOC" | python3.9 -c "
+import json, sys
+doc = json.loads(sys.stdin.read())
+art = doc.get('artifact', {})
+missing = [f for f in ['presignedUrl','sha256','signature','size'] if not art.get(f)]
+missing += [f for f in ['packageName','version'] if not doc.get(f)]
+print('MISSING:' + ','.join(missing) if missing else 'OK')
+" 2>/dev/null)
+  [ "$T21_DOC_RESULT" = "OK" ] \
+    && _pass "T21.12 (+) Job document has presignedUrl, sha256, signature, size, packageName, version" \
+    || _fail "T21.12 (+) Job document missing required fields: $T21_DOC_RESULT"
+
+  # (+) presignedUrl is opaque UUID path — packageName and version must not appear in URL
+  T21_URL_RESULT=$(echo "$T21_JOB_DOC" | python3.9 -c "
+import json, sys, re
+doc  = json.loads(sys.stdin.read())
+url  = doc.get('artifact', {}).get('presignedUrl', '').lower()
+pkg  = doc.get('packageName', '').lower()
+ver  = doc.get('version', '').replace('.', '-').lower()
+leaks = [x for x in [pkg, ver] if x and x in url]
+has_uuid_path = bool(re.search(r'enc/[0-9a-f-]{36}\.enc', url))
+if leaks:
+    print('LEAKS:' + str(leaks))
+elif not has_uuid_path:
+    print('NOT_UUID_PATH:' + url[:80])
+else:
+    print('OK')
+" 2>/dev/null)
+  case "$T21_URL_RESULT" in
+    OK)      _pass "T21.13 (+) presignedUrl uses opaque UUID path (enc/<uuid>.enc) — no package info leaked" ;;
+    LEAKS*)  _fail "T21.13 (+) presignedUrl leaks package info: $T21_URL_RESULT" ;;
+    *)       _fail "T21.13 (+) presignedUrl not in enc/<uuid>.enc format: $T21_URL_RESULT" ;;
+  esac
+else
+  _warn "T21.11-13 skipped — T21.9 did not return a jobId"
+fi
+
+# ── DECLINE PATH: accepted=false ──────────────────────────────────────────────
+# Create a fresh admin deployment to generate a PENDING consent record, then decline it.
+
+T21_DECLINE_DEPLOY=$(call POST "/api/v1/ota/deployments" \
+  "{\"packageName\":\"${T21_PKG}\",\"version\":\"${T21_VERSION}\",\"targetType\":\"THING\",\"targetId\":\"${DEVICE_ID}\",\"rolloutStage\":\"CANARY\"}")
+T21_DECLINE_DEPLOY_ID=$(echo "$T21_DECLINE_DEPLOY" | python3.9 -c \
+  "import json,sys; print(json.load(sys.stdin).get('jobId',''))" 2>/dev/null)
+
+if [ -n "$T21_DECLINE_DEPLOY_ID" ] && [ "$T21_DECLINE_DEPLOY_ID" != "None" ]; then
+  sleep 1  # allow DynamoDB to commit the PENDING consent record
+
+  t21_invoke "$T21_USER_ID" \
+    "{\"deviceId\":\"${DEVICE_ID}\",\"packageName\":\"${T21_PKG}\",\"version\":\"${T21_VERSION}\",\"accepted\":false}"
+  T21_DECLINE_FIELD=$(t21_field "status")
+  [ "$T21_STATUS" = "200" ] && [ "$T21_DECLINE_FIELD" = "DECLINED" ] \
+    && _pass "T21.14 (+) accepted=false with pending admin consent → 200 DECLINED" \
+    || _fail "T21.14 (+) accepted=false — expected 200/DECLINED, got HTTP $T21_STATUS body=$T21_BODY"
+else
+  _warn "T21.14 skipped — admin deployment creation failed, cannot test decline path"
+fi
+
+# ── DUPLICATE CONSENT while pendingJobId is active ───────────────────────────
+# After T21.9 the device has a live pendingJobId. A second consent for the same
+# job must be blocked with a 4xx — the device cannot have two active jobs.
+
+if [ -n "$T21_JOB_ID" ] && [ "$T21_JOB_ID" != "__MISSING__" ]; then
+  t21_invoke "$T21_USER_ID" \
+    "{\"deviceId\":\"${DEVICE_ID}\",\"packageName\":\"${T21_PKG}\",\"version\":\"${T21_VERSION}\",\"accepted\":true}"
+  echo "$T21_STATUS" | grep -qE "^4[0-9]{2}$" \
+    && _pass "T21.15 (-) Duplicate consent while job active → $T21_STATUS (blocked)" \
+    || _fail "T21.15 (-) Duplicate consent should be 4xx, got $T21_STATUS: $T21_BODY"
+else
+  _warn "T21.15 skipped — T21.9 did not produce a jobId"
+fi
+
+# ── CLEANUP ───────────────────────────────────────────────────────────────────
+aws dynamodb update-item \
+  --table-name digilux_device_data \
+  --key "{\"deviceId\":{\"S\":\"${DEVICE_ID}\"},\"macAddress\":{\"S\":\"${DEVICE_MAC}\"}}" \
+  --update-expression "REMOVE pendingJobId" \
+  --region "$REGION" > /dev/null 2>&1
+
+# ─────────────────────────────────────────────────────────────────────────────
 _section "RESULTS"
 # ─────────────────────────────────────────────────────────────────────────────
 TOTAL=$((PASS + FAIL + WARN))
