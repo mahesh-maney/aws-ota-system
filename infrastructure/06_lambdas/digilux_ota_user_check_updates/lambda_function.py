@@ -373,7 +373,17 @@ def lambda_handler(event, context):
                 continue
 
             # ── Active job check — if a job exists, report its status ─────────
+            # Only surface jobs that follow the OTA production naming convention
+            # ("digilux-ota-<pkg>-<ver>-<ts>").  Dev/simulate jobs use the prefix
+            # "digilux-ota-dev-" and must never affect this status response.
+            # Any future non-OTA IoT jobs should also use a different prefix so
+            # they are automatically ignored here.
             pending_job_id = dev.get("pendingJobId")
+            if pending_job_id and pending_job_id.startswith("digilux-ota-dev-"):
+                _log("debug", "pending_job_id_skipped_non_ota",
+                     userId=user_id, deviceId=device_id, jobId=pending_job_id,
+                     detail="Dev/simulate job — not surfaced in available-updates")
+                pending_job_id = None
             if pending_job_id:
                 _log("info", "device_has_pending_job",
                      userId=user_id, deviceId=device_id,
