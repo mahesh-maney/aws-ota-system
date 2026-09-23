@@ -696,7 +696,7 @@ def _handle_consent(user_id: str, email: str, body: dict) -> dict:
     if not pkg:
         _log("warning", "user_initiated_package_not_found",
              userId=user_id, packageName=package_name, version=version)
-        return _resp(404, {"error": f"Package {package_name}@{version} not found"})
+        return _resp(404, {"status": "failed", "errorMessage": f"Package {package_name}@{version} not found"})
     if pkg.get("status") != "ACTIVE":
         _log("warning", "user_initiated_package_not_active",
              userId=user_id, packageName=package_name, version=version,
