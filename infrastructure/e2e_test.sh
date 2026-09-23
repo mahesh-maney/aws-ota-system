@@ -728,6 +728,264 @@ else
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
+_section "T18 — CHECK UPDATES: JOB STATUS IN RESPONSE"
+# Prereq: digilux_ota_user_check_updates Lambda must have OTA_JOBS_TABLE env var set.
+# ─────────────────────────────────────────────────────────────────────────────
+
+TEST_VERSION=$(grep TEST_VERSION /tmp/ota_test_version.txt | cut -d= -f2)
+TEST_PKG_NAME=$(grep TEST_PKG_NAME /tmp/ota_test_version.txt | cut -d= -f2)
+CU_JOB_ID="digilux-ota-e2e-cu-job-$(date +%s)"
+NOW_MS=$(python3 -c "import time; print(int(time.time()*1000))")
+
+# Helper: extract a top-level field from the device entry matching DEVICE_ID
+cu_device_field() {
+  local resp="$1" field="$2"
+  echo "$resp" | python3 -c "
+import json,sys
+devs = json.load(sys.stdin).get('devices', [])
+dev  = next((x for x in devs if x.get('deviceId') == '${DEVICE_ID}'), {})
+print(dev.get('$field', '__MISSING__'))
+" 2>/dev/null
+}
+
+# Helper: extract a field from activeJob inside the device entry
+cu_activejob_field() {
+  local resp="$1" field="$2"
+  echo "$resp" | python3 -c "
+import json,sys
+devs = json.load(sys.stdin).get('devices', [])
+dev  = next((x for x in devs if x.get('deviceId') == '${DEVICE_ID}'), {})
+aj   = dev.get('activeJob', {})
+print(aj.get('$field', '__MISSING__'))
+" 2>/dev/null
+}
+
+# Helper: check whether the device entry contains an activeJob key at all
+cu_has_active_job() {
+  local resp="$1"
+  echo "$resp" | python3 -c "
+import json,sys
+devs = json.load(sys.stdin).get('devices', [])
+dev  = next((x for x in devs if x.get('deviceId') == '${DEVICE_ID}'), {})
+print('yes' if 'activeJob' in dev else 'no')
+" 2>/dev/null
+}
+
+# ── Baseline: no pendingJobId → normal response, no activeJob ────────────────
+aws dynamodb update-item \
+  --table-name digilux_device_data \
+  --key "{\"deviceId\":{\"S\":\"${DEVICE_ID}\"},\"macAddress\":{\"S\":\"${DEVICE_MAC}\"}}" \
+  --update-expression "REMOVE pendingJobId" \
+  --region "$REGION" > /dev/null 2>&1
+
+CU_RESP=$(call GET "/api/v1/ota/my/updates" "" "$NON_ADMIN_TOKEN")
+CU_OK=$(echo "$CU_RESP" | python3 -c "import json,sys; print('yes' if 'devices' in json.load(sys.stdin) else 'no')" 2>/dev/null)
+[ "$CU_OK" = "yes" ] \
+  && _pass "check_updates baseline → 200 with devices array" \
+  || _fail "check_updates baseline failed — no devices key in response"
+
+[ "$(cu_has_active_job "$CU_RESP")" = "no" ] \
+  && _pass "No pendingJobId → no activeJob in response (unchanged behaviour)" \
+  || _fail "No pendingJobId but activeJob appeared in response"
+
+# ── Insert synthetic job record + set pendingJobId on device ─────────────────
+aws dynamodb put-item \
+  --table-name digilux_ota_jobs \
+  --item "{
+    \"jobId\":       {\"S\":\"${CU_JOB_ID}\"},
+    \"packageName\": {\"S\":\"${TEST_PKG_NAME}\"},
+    \"version\":     {\"S\":\"${TEST_VERSION}\"},
+    \"targetId\":    {\"S\":\"${DEVICE_ID}\"},
+    \"status\":      {\"S\":\"AWAITING_CONSENT\"},
+    \"createdAt\":   {\"N\":\"${NOW_MS}\"}
+  }" \
+  --region "$REGION" > /dev/null 2>&1
+
+aws dynamodb update-item \
+  --table-name digilux_device_data \
+  --key "{\"deviceId\":{\"S\":\"${DEVICE_ID}\"},\"macAddress\":{\"S\":\"${DEVICE_MAC}\"}}" \
+  --update-expression "SET pendingJobId = :jid" \
+  --expression-attribute-values "{\":jid\":{\"S\":\"${CU_JOB_ID}\"}}" \
+  --region "$REGION" > /dev/null 2>&1
+
+# ── (+) AWAITING_CONSENT → JOB_ACTIVE + in-progress message ──────────────────
+CU_RESP=$(call GET "/api/v1/ota/my/updates" "" "$NON_ADMIN_TOKEN")
+
+OTA_STATUS=$(cu_device_field "$CU_RESP" "otaStatus")
+[ "$OTA_STATUS" = "JOB_ACTIVE" ] \
+  && _pass "AWAITING_CONSENT job → otaStatus=JOB_ACTIVE" \
+  || _fail "AWAITING_CONSENT — expected otaStatus=JOB_ACTIVE, got: $OTA_STATUS"
+
+AJ_STATUS=$(cu_activejob_field "$CU_RESP" "status")
+[ "$AJ_STATUS" = "AWAITING_CONSENT" ] \
+  && _pass "AWAITING_CONSENT → activeJob.status=AWAITING_CONSENT" \
+  || _fail "activeJob.status — expected AWAITING_CONSENT, got: $AJ_STATUS"
+
+AJ_VER=$(cu_activejob_field "$CU_RESP" "version")
+[ "$AJ_VER" = "$TEST_VERSION" ] \
+  && _pass "AWAITING_CONSENT → activeJob.version=$TEST_VERSION" \
+  || _fail "activeJob.version — expected $TEST_VERSION, got: $AJ_VER"
+
+AJ_JOB_ID=$(cu_activejob_field "$CU_RESP" "jobId")
+[ "$AJ_JOB_ID" = "$CU_JOB_ID" ] \
+  && _pass "AWAITING_CONSENT → activeJob.jobId matches" \
+  || _fail "activeJob.jobId mismatch — expected $CU_JOB_ID, got: $AJ_JOB_ID"
+
+AJ_MSG=$(cu_activejob_field "$CU_RESP" "message")
+echo "$AJ_MSG" | python3 -c "
+import sys
+msg = sys.stdin.read()
+ok  = 'in progress' in msg.lower() and '${TEST_VERSION}' in msg
+sys.exit(0 if ok else 1)
+" 2>/dev/null \
+  && _pass "AWAITING_CONSENT message contains version and 'in progress'" \
+  || _fail "AWAITING_CONSENT message wrong: $AJ_MSG"
+
+# (-) availableVersion must NOT appear when job is active (version compare skipped)
+AV=$(cu_device_field "$CU_RESP" "availableVersion")
+[ "$AV" = "__MISSING__" ] \
+  && _pass "AWAITING_CONSENT response has no availableVersion (version compare skipped)" \
+  || _fail "availableVersion unexpectedly present while job is active: $AV"
+
+# ── (+) QUEUED → JOB_ACTIVE + in-progress message ────────────────────────────
+aws dynamodb update-item \
+  --table-name digilux_ota_jobs \
+  --key "{\"jobId\":{\"S\":\"${CU_JOB_ID}\"}}" \
+  --update-expression "SET #s = :s" \
+  --expression-attribute-names "{\"#s\":\"status\"}" \
+  --expression-attribute-values "{\":s\":{\"S\":\"QUEUED\"}}" \
+  --region "$REGION" > /dev/null 2>&1
+
+CU_RESP=$(call GET "/api/v1/ota/my/updates" "" "$NON_ADMIN_TOKEN")
+AJ_STATUS=$(cu_activejob_field "$CU_RESP" "status")
+[ "$AJ_STATUS" = "QUEUED" ] \
+  && _pass "QUEUED job → activeJob.status=QUEUED" \
+  || _fail "QUEUED job — activeJob.status: $AJ_STATUS"
+
+AJ_MSG=$(cu_activejob_field "$CU_RESP" "message")
+echo "$AJ_MSG" | python3 -c "
+import sys; sys.exit(0 if 'in progress' in sys.stdin.read().lower() else 1)
+" 2>/dev/null \
+  && _pass "QUEUED job message is in-progress variant" \
+  || _fail "QUEUED job message wrong: $AJ_MSG"
+
+# ── (+) IN_PROGRESS → JOB_ACTIVE + in-progress message ───────────────────────
+aws dynamodb update-item \
+  --table-name digilux_ota_jobs \
+  --key "{\"jobId\":{\"S\":\"${CU_JOB_ID}\"}}" \
+  --update-expression "SET #s = :s" \
+  --expression-attribute-names "{\"#s\":\"status\"}" \
+  --expression-attribute-values "{\":s\":{\"S\":\"IN_PROGRESS\"}}" \
+  --region "$REGION" > /dev/null 2>&1
+
+CU_RESP=$(call GET "/api/v1/ota/my/updates" "" "$NON_ADMIN_TOKEN")
+AJ_STATUS=$(cu_activejob_field "$CU_RESP" "status")
+[ "$AJ_STATUS" = "IN_PROGRESS" ] \
+  && _pass "IN_PROGRESS job → activeJob.status=IN_PROGRESS" \
+  || _fail "IN_PROGRESS job — activeJob.status: $AJ_STATUS"
+
+AJ_MSG=$(cu_activejob_field "$CU_RESP" "message")
+echo "$AJ_MSG" | python3 -c "
+import sys; sys.exit(0 if 'in progress' in sys.stdin.read().lower() else 1)
+" 2>/dev/null \
+  && _pass "IN_PROGRESS job message is in-progress variant" \
+  || _fail "IN_PROGRESS job message wrong: $AJ_MSG"
+
+# ── (+) FAILED → JOB_ACTIVE + failed message ─────────────────────────────────
+aws dynamodb update-item \
+  --table-name digilux_ota_jobs \
+  --key "{\"jobId\":{\"S\":\"${CU_JOB_ID}\"}}" \
+  --update-expression "SET #s = :s" \
+  --expression-attribute-names "{\"#s\":\"status\"}" \
+  --expression-attribute-values "{\":s\":{\"S\":\"FAILED\"}}" \
+  --region "$REGION" > /dev/null 2>&1
+
+CU_RESP=$(call GET "/api/v1/ota/my/updates" "" "$NON_ADMIN_TOKEN")
+AJ_STATUS=$(cu_activejob_field "$CU_RESP" "status")
+[ "$AJ_STATUS" = "FAILED" ] \
+  && _pass "FAILED job → activeJob.status=FAILED" \
+  || _fail "FAILED job — activeJob.status: $AJ_STATUS"
+
+AJ_MSG=$(cu_activejob_field "$CU_RESP" "message")
+echo "$AJ_MSG" | python3 -c "
+import sys
+msg = sys.stdin.read()
+ok  = 'failed' in msg.lower() and '${TEST_VERSION}' in msg and 'support' in msg.lower()
+sys.exit(0 if ok else 1)
+" 2>/dev/null \
+  && _pass "FAILED message contains version, 'failed', and 'support'" \
+  || _fail "FAILED message wrong: $AJ_MSG"
+
+# (-) FAILED response must also not expose availableVersion
+AV=$(cu_device_field "$CU_RESP" "availableVersion")
+[ "$AV" = "__MISSING__" ] \
+  && _pass "FAILED job response has no availableVersion (version compare skipped)" \
+  || _fail "availableVersion present while job is FAILED: $AV"
+
+# ── (+) SUCCEEDED → falls through, no activeJob ───────────────────────────────
+aws dynamodb update-item \
+  --table-name digilux_ota_jobs \
+  --key "{\"jobId\":{\"S\":\"${CU_JOB_ID}\"}}" \
+  --update-expression "SET #s = :s" \
+  --expression-attribute-names "{\"#s\":\"status\"}" \
+  --expression-attribute-values "{\":s\":{\"S\":\"SUCCEEDED\"}}" \
+  --region "$REGION" > /dev/null 2>&1
+
+CU_RESP=$(call GET "/api/v1/ota/my/updates" "" "$NON_ADMIN_TOKEN")
+[ "$(cu_has_active_job "$CU_RESP")" = "no" ] \
+  && _pass "SUCCEEDED job → no activeJob (falls through to normal update check)" \
+  || _fail "SUCCEEDED job unexpectedly returned activeJob block"
+
+# ── (-) Stale pendingJobId (no matching job record) → graceful fallthrough ────
+GHOST_JOB_ID="digilux-ota-ghost-$(date +%s)"
+aws dynamodb update-item \
+  --table-name digilux_device_data \
+  --key "{\"deviceId\":{\"S\":\"${DEVICE_ID}\"},\"macAddress\":{\"S\":\"${DEVICE_MAC}\"}}" \
+  --update-expression "SET pendingJobId = :jid" \
+  --expression-attribute-values "{\":jid\":{\"S\":\"${GHOST_JOB_ID}\"}}" \
+  --region "$REGION" > /dev/null 2>&1
+
+CU_RESP=$(call GET "/api/v1/ota/my/updates" "" "$NON_ADMIN_TOKEN")
+CU_OK=$(echo "$CU_RESP" | python3 -c "import json,sys; print('yes' if 'devices' in json.load(sys.stdin) else 'no')" 2>/dev/null)
+[ "$CU_OK" = "yes" ] \
+  && _pass "Stale pendingJobId (ghost job record) → 200 graceful fallthrough, no 500" \
+  || _fail "Stale pendingJobId caused a crash: response=$CU_RESP"
+
+[ "$(cu_has_active_job "$CU_RESP")" = "no" ] \
+  && _pass "Ghost job → no activeJob block (warning logged, normal update check proceeds)" \
+  || _fail "Ghost job unexpectedly produced an activeJob block"
+
+# (-) Unauthenticated request must be rejected
+code=$(http_code GET "/api/v1/ota/my/updates" "" "Bearer invalid.token.here")
+[ "$code" = "401" ] || [ "$code" = "403" ] \
+  && _pass "check_updates rejects invalid token (HTTP $code)" \
+  || _fail "check_updates should reject invalid token, got $code"
+
+# (-) Admin token must not work on user endpoint (different Cognito pool)
+code=$(http_code GET "/api/v1/ota/my/updates" "" "$TOKEN")
+[ "$code" = "401" ] || [ "$code" = "403" ] \
+  && _pass "Admin token rejected on user endpoint GET /my/updates (HTTP $code)" \
+  || _warn "Admin token accepted on user endpoint — pool isolation may be misconfigured (HTTP $code)"
+
+# ── Cleanup ───────────────────────────────────────────────────────────────────
+aws dynamodb update-item \
+  --table-name digilux_device_data \
+  --key "{\"deviceId\":{\"S\":\"${DEVICE_ID}\"},\"macAddress\":{\"S\":\"${DEVICE_MAC}\"}}" \
+  --update-expression "REMOVE pendingJobId" \
+  --region "$REGION" > /dev/null 2>&1
+
+aws dynamodb delete-item \
+  --table-name digilux_ota_jobs \
+  --key "{\"jobId\":{\"S\":\"${CU_JOB_ID}\"}}" \
+  --region "$REGION" > /dev/null 2>&1
+
+echo "  → T18 cleanup done"
+
+# ── Audit log check for new events ───────────────────────────────────────────
+check_audit_log "/aws/lambda/digilux_ota_user_check_updates" "ACTIVE_JOB_REPORTED"  "ACTIVE_JOB_REPORTED audit in check_updates"
+check_audit_log "/aws/lambda/digilux_ota_user_check_updates" "USER_CHECK_UPDATES"   "USER_CHECK_UPDATES summary audit (jobActive count present)"
+
+# ─────────────────────────────────────────────────────────────────────────────
 _section "RESULTS"
 # ─────────────────────────────────────────────────────────────────────────────
 TOTAL=$((PASS + FAIL + WARN))

@@ -33,6 +33,16 @@ PACKAGES_TABLE         = os.environ.get("PACKAGES_TABLE",         "digilux_ota_p
 DEVICE_DATA_USER_INDEX = os.environ.get("DEVICE_DATA_USER_INDEX", "userId-index")
 CANARY_GROUP           = os.environ.get("CANARY_GROUP",           "DGX-Canary")
 ENTITLEMENT_FUNCTION   = os.environ.get("ENTITLEMENT_FUNCTION",   "digilux_entitlement_check")
+OTA_JOBS_TABLE         = os.environ.get("OTA_JOBS_TABLE",         "digilux_ota_jobs")
+OTA_IN_PROGRESS_MSG    = os.environ.get(
+    "OTA_IN_PROGRESS_MSG",
+    "Your Firmware update ver {version} is in progress, please check after some time for status. "
+    "Note: Please ensure the controller is Powered on.",
+)
+OTA_FAILED_MSG         = os.environ.get(
+    "OTA_FAILED_MSG",
+    "Your last firmware ver {version} update failed. Please contact support.",
+)
 
 dynamo         = boto3.resource("dynamodb", region_name=REGION)
 iot            = boto3.client("iot",        region_name=REGION)
@@ -236,6 +246,62 @@ def _get_latest_available_version(package_name: str, include_beta: bool) -> dict
     return best
 
 
+def _get_active_job(job_id: str, thing_name: str | None) -> dict | None:
+    """
+    Look up a job in digilux_ota_jobs, then refresh its status via IoT if possible.
+    Returns the job record dict, or None if not found / on error.
+    """
+    t_start = time.monotonic()
+    _log("debug", "active_job_lookup_start", jobId=job_id, thingName=thing_name)
+    try:
+        resp = dynamo.Table(OTA_JOBS_TABLE).get_item(Key={"jobId": job_id})
+        job  = resp.get("Item")
+        if not job:
+            _log("warning", "active_job_not_found", jobId=job_id,
+                 detail="pendingJobId set on device but no job record in OTA_JOBS_TABLE")
+            return None
+
+        # Refresh status from IoT for the most up-to-date execution state
+        if thing_name:
+            try:
+                iot_resp   = iot.describe_job_execution(jobId=job_id, thingName=thing_name)
+                iot_status = iot_resp.get("execution", {}).get("status")
+                if iot_status:
+                    _log("debug", "active_job_live_status_refreshed",
+                         jobId=job_id, thingName=thing_name,
+                         dbStatus=job.get("status"), iotStatus=iot_status)
+                    job["status"] = iot_status
+            except Exception as exc:
+                _log("warning", "active_job_iot_refresh_failed",
+                     jobId=job_id, thingName=thing_name, error=str(exc),
+                     detail="Using DynamoDB status as fallback")
+
+        elapsed = int((time.monotonic() - t_start) * 1000)
+        _log("debug", "active_job_lookup_complete",
+             jobId=job_id, status=job.get("status"),
+             packageName=job.get("packageName"), version=job.get("version"),
+             elapsedMs=elapsed)
+        return job
+
+    except Exception as exc:
+        elapsed = int((time.monotonic() - t_start) * 1000)
+        _log("warning", "active_job_lookup_failed",
+             jobId=job_id, error=str(exc), excType=type(exc).__name__, elapsedMs=elapsed)
+        return None
+
+
+_IN_PROGRESS_JOB_STATUSES = {"AWAITING_CONSENT", "QUEUED", "IN_PROGRESS"}
+
+
+def _job_user_message(status: str, version: str) -> str | None:
+    """Return the user-facing message for a job status, or None if no message needed."""
+    if status in _IN_PROGRESS_JOB_STATUSES:
+        return OTA_IN_PROGRESS_MSG.format(version=version)
+    if status == "FAILED":
+        return OTA_FAILED_MSG.format(version=version)
+    return None  # SUCCEEDED or unknown — let normal flow handle
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Handler
 # ──────────────────────────────────────────────────────────────────────────────
@@ -273,6 +339,7 @@ def lambda_handler(event, context):
         not_registered_count = 0
         up_to_date_count    = 0
         blocked_count       = 0
+        job_active_count    = 0
 
         for dev in device_items:
             device_id = dev.get("deviceId")
@@ -304,6 +371,57 @@ def lambda_handler(event, context):
                     "otaStatus": "NOT_REGISTERED",
                 })
                 continue
+
+            # ── Active job check — if a job exists, report its status ─────────
+            pending_job_id = dev.get("pendingJobId")
+            if pending_job_id:
+                _log("info", "device_has_pending_job",
+                     userId=user_id, deviceId=device_id,
+                     jobId=pending_job_id, thingName=thing_name)
+                job = _get_active_job(pending_job_id, thing_name)
+                if job:
+                    job_status  = job.get("status", "")
+                    job_version = job.get("version", "")
+                    message     = _job_user_message(job_status, job_version)
+
+                    if message is not None:
+                        # Job is in-progress or failed — report it, skip version comparison
+                        _log("info", "active_job_reported",
+                             userId=user_id, deviceId=device_id,
+                             jobId=pending_job_id, jobStatus=job_status,
+                             jobVersion=job_version, packageName=job.get("packageName"),
+                             messageTemplate=("in_progress" if job_status in _IN_PROGRESS_JOB_STATUSES else "failed"))
+                        _audit("ACTIVE_JOB_REPORTED", user_id,
+                               {"deviceId": device_id, "jobId": pending_job_id,
+                                "packageName": job.get("packageName"), "version": job_version},
+                               "SUCCESS", jobStatus=job_status,
+                               installedVersion=installed_version)
+                        job_active_count += 1
+                        result_devices.append({
+                            "deviceId":         device_id,
+                            "otaStatus":        "JOB_ACTIVE",
+                            "package":          job.get("packageName", pkg_name),
+                            "installedVersion": installed_version,
+                            "activeJob": {
+                                "jobId":   pending_job_id,
+                                "status":  job_status,
+                                "version": job_version,
+                                "message": message,
+                            },
+                        })
+                        continue
+                    else:
+                        # SUCCEEDED (or unknown) — fall through to normal version check
+                        _log("debug", "active_job_succeeded_fall_through",
+                             userId=user_id, deviceId=device_id,
+                             jobId=pending_job_id, jobStatus=job_status,
+                             detail="Job succeeded — continuing with normal update check")
+                else:
+                    # Job record missing in OTA_JOBS_TABLE despite pendingJobId being set
+                    _log("warning", "pending_job_record_missing_fall_through",
+                         userId=user_id, deviceId=device_id,
+                         jobId=pending_job_id,
+                         detail="No job record found — treating device as normal update candidate")
 
             # ── Determine if this device sees UAT packages ───────────────────
             include_beta = _is_beta_device(thing_name)
@@ -396,6 +514,7 @@ def lambda_handler(event, context):
                notRegistered=not_registered_count,
                upToDate=up_to_date_count,
                blocked=blocked_count,
+               jobActive=job_active_count,
                handlerMs=handler_ms)
 
         _log("info", "check_updates_complete",
@@ -405,6 +524,7 @@ def lambda_handler(event, context):
              notRegistered=not_registered_count,
              upToDate=up_to_date_count,
              blocked=blocked_count,
+             jobActive=job_active_count,
              handlerMs=handler_ms)
 
         return _resp(200, {"devices": result_devices})
