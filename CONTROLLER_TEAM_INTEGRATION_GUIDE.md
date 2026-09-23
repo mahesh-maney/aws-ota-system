@@ -314,8 +314,9 @@ assert computed == consent_response["sha256"], "SHA256 mismatch — artifact cor
 
 ### Check 3 — ECDSA signature
 
-Verify the ECDSA signature from the consent response against Digilux's public key. The signature
-covers the SHA256 hex string (not the raw bytes).
+Verify the ECDSA signature from the job document against Digilux's public key. The signature
+covers four fields joined by `|`: `version|size|packageName|sha256`. All four values are present
+in the job document, so no extra API call is needed to reconstruct the signing input.
 
 ```python
 from cryptography.hazmat.primitives import hashes, serialization
@@ -325,16 +326,25 @@ from cryptography.hazmat.primitives.asymmetric import ec
 with open("/etc/digilux/ota_public_key.pem", "rb") as f:
     pub_key = serialization.load_pem_public_key(f.read())
 
-sig_bytes = base64.b64decode(consent_response["signature"])
+# Reconstruct the exact signing input used by the Digilux backend
+signing_input = (
+    f"{job_doc['version']}|"
+    f"{job_doc['artifact']['size']}|"
+    f"{job_doc['packageName']}|"
+    f"{job_doc['artifact']['sha256']}"
+).encode()
+
+sig_bytes = base64.b64decode(job_doc["artifact"]["signature"])
 pub_key.verify(
     sig_bytes,
-    consent_response["sha256"].encode(),
+    signing_input,
     ec.ECDSA(hashes.SHA256())
 )  # raises InvalidSignature if verification fails
 ```
 
-This confirms the artifact was produced and signed by Digilux — not modified by any intermediary,
-including the infrastructure operator.
+This confirms the artifact was produced and signed by Digilux and that the version, size, package
+name, and content hash are all authentic — no single field can be substituted without breaking
+the signature.
 
 ### Summary
 
@@ -342,7 +352,7 @@ including the infrastructure operator.
 |---|---|---|
 | GCM tag | Truncated / corrupted download | `AESGCM.decrypt()` |
 | SHA256 | Plaintext integrity after decryption | `hashlib.sha256()` |
-| ECDSA | Authenticity — signed by Digilux | `pub_key.verify()` |
+| ECDSA | Authenticity + version/size/package binding — signed by Digilux | `pub_key.verify()` |
 
 ---
 
@@ -404,7 +414,7 @@ the install did not succeed.
 
 1. AES-256-GCM decrypt → `InvalidTag` = abort
 2. SHA256 of plaintext == `sha256` from consent response
-3. ECDSA verify signature with Digilux public key at `/etc/digilux/ota_public_key.pem`
+3. ECDSA verify signature: signing input is `version|size|packageName|sha256` (all from job doc), public key at `/etc/digilux/ota_public_key.pem`
 4. Per-file SHA256 + size from `manifest.json` match extracted files
 
 **File type install paths**

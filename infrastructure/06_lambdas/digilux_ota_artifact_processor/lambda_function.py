@@ -373,21 +373,25 @@ def _process_artifact(bucket: str, s3_key: str, obj_size: int) -> None:
          packageName=pkg_name, version=version,
          sha256=sha256, enrichedBytes=actual_size)
 
-    # ── 5. ECDSA sign ──────────────────────────────────────────────────────────
+    # ── 5. ECDSA sign (4-field input: version|size|packageName|sha256) ───────
+    signing_input = f"{version}|{actual_size}|{pkg_name}|{sha256}"
     _log("info", "signing_start",
          packageName=pkg_name, version=version,
          signingSecret=SIGNING_SECRET,
          algorithm="ECDSA-SHA256",
-         signingInput="sha256_hex_string")
+         signingFields="version|size|packageName|sha256",
+         signingInput=f"{version}|{actual_size}|{pkg_name}|{sha256[:16]}...")
     t_sign = time.monotonic()
-    signature = _sign(sha256)
+    signature = _sign(signing_input)
     sign_ms   = int((time.monotonic() - t_sign) * 1000)
     _log("info", "signing_complete",
          packageName=pkg_name, version=version,
          signatureLength=len(signature), signMs=sign_ms,
          sigPrefix=signature[:16] + "...")
     _audit("ARTIFACT_SIGNED", resource, "SUCCESS",
-           algorithm="ECDSA-SHA256", sha256=sha256,
+           algorithm="ECDSA-SHA256",
+           signingFields="version|size|packageName|sha256",
+           sha256=sha256, artifactSize=actual_size,
            signatureLength=len(signature), signMs=sign_ms)
 
     # ── 6. AES-256-GCM encrypt enriched tar ───────────────────────────────────
@@ -483,7 +487,7 @@ def _process_artifact(bucket: str, s3_key: str, obj_size: int) -> None:
                 ":active": "ACTIVE",
                 ":h":      sha256,
                 ":sig":    signature,
-                ":sz":     obj_size,
+                ":sz":     actual_size,  # enriched tar size (plaintext, post-manifest-injection)
                 ":ts":     now_ms,
                 ":encKey": enc_key,
                 ":sigKey": sig_key,

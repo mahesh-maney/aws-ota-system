@@ -1197,6 +1197,116 @@ check_audit_log "/aws/lambda/digilux_ota_artifact_processor" "PACKAGE_REGISTERED
 check_audit_log "/aws/lambda/digilux_ota_artifact_processor" "ARTIFACT_SIGNED"           "T19 artifact_processor SIGNED audit present"
 
 # ─────────────────────────────────────────────────────────────────────────────
+_section "T20 — ARTIFACT PROCESSOR: 4-FIELD ECDSA SIGNATURE"
+# ─────────────────────────────────────────────────────────────────────────────
+
+T20_BASE="5.20.$(date +%s)"
+
+# ── (+) ECDSA signature verifies over version|size|packageName|sha256 ────────
+echo "  → T20.1: 4-field ECDSA signature verification"
+_T20_DIR=$(mktemp -d)
+T20_VER="${T20_BASE}-1"
+cat > "$_T20_DIR/manifest.json" <<MEOF
+{"packageName":"HomeAssistantUtility","version":"${T20_VER}","files":[{"name":"payload.bin","type":1}]}
+MEOF
+echo "t20 firmware payload" > "$_T20_DIR/payload.bin"
+tar -czf /tmp/t20_valid.tar -C "$_T20_DIR" manifest.json payload.bin
+rm -rf "$_T20_DIR"
+T20_RAW_SIZE=$(wc -c < /tmp/t20_valid.tar | tr -d ' ')
+T20_SUM=$(_t19_checksum /tmp/t20_valid.tar)
+_t19_upload "$T20_VER" /tmp/t20_valid.tar "$T20_SUM"
+[ "$T19_STATUS" = "ACTIVE" ] \
+  && _pass "T20.1 (+) Package reached ACTIVE" \
+  || _fail "T20.1 (+) Package should be ACTIVE for signature test, got: $T19_STATUS"
+
+if [ "$T19_STATUS" = "ACTIVE" ]; then
+  # Verify ECDSA signature: derive public key from signing secret, reconstruct 4-field input
+  T20_RESULT=$(T20_VER="$T20_VER" T20_PKG="$T19_PKG" REGION="$REGION" python3.9 <<'PYEOF'
+import boto3, json, base64, os, sys
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import ec
+
+ver    = os.environ["T20_VER"]
+pkg    = os.environ["T20_PKG"]
+region = os.environ["REGION"]
+
+sm  = boto3.client("secretsmanager", region_name=region)
+ddb = boto3.resource("dynamodb", region_name=region)
+
+try:
+    secret   = sm.get_secret_value(SecretId="digilux-ota-signing-key")
+    key_data = json.loads(secret["SecretString"])
+    priv_key = serialization.load_pem_private_key(key_data["privateKey"].encode(), password=None)
+    pub_key  = priv_key.public_key()
+
+    item  = ddb.Table("digilux_ota_packages").get_item(
+        Key={"packageName": pkg, "version": ver}
+    )["Item"]
+    sha256        = item["sha256"]
+    sig_b64       = item["signature"]
+    artifact_size = int(item["artifactSize"])
+
+    signing_input = f"{ver}|{artifact_size}|{pkg}|{sha256}".encode()
+    sig_bytes     = base64.b64decode(sig_b64)
+    pub_key.verify(sig_bytes, signing_input, ec.ECDSA(hashes.SHA256()))
+    print("VALID")
+except Exception as e:
+    print(f"INVALID:{e}")
+PYEOF
+  )
+  [ "$T20_RESULT" = "VALID" ] \
+    && _pass "T20.1 (+) ECDSA signature verifies over version|size|packageName|sha256" \
+    || _fail "T20.1 (+) ECDSA signature invalid: $T20_RESULT"
+
+  # artifactSize in DynamoDB must be the enriched tar size, not the raw upload size
+  T20_STORED_SIZE=$(aws dynamodb get-item \
+    --table-name digilux_ota_packages \
+    --key "{\"packageName\":{\"S\":\"${T19_PKG}\"},\"version\":{\"S\":\"${T20_VER}\"}}" \
+    --region "$REGION" \
+    --query 'Item.artifactSize.N' --output text 2>/dev/null)
+  [ -n "$T20_STORED_SIZE" ] && [ "$T20_STORED_SIZE" != "$T20_RAW_SIZE" ] \
+    && _pass "T20.2 (+) artifactSize is enriched size ($T20_STORED_SIZE bytes), not raw upload ($T20_RAW_SIZE bytes)" \
+    || _fail "T20.2 (+) artifactSize mismatch: stored=$T20_STORED_SIZE raw=$T20_RAW_SIZE (should differ after manifest enrichment)"
+
+  # Verify old single-field signature does NOT verify (proves scheme changed)
+  T20_OLD_RESULT=$(T20_VER="$T20_VER" T20_PKG="$T19_PKG" REGION="$REGION" python3.9 <<'PYEOF'
+import boto3, json, base64, os
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import ec
+
+ver    = os.environ["T20_VER"]
+pkg    = os.environ["T20_PKG"]
+region = os.environ["REGION"]
+
+sm  = boto3.client("secretsmanager", region_name=region)
+ddb = boto3.resource("dynamodb", region_name=region)
+
+secret   = sm.get_secret_value(SecretId="digilux-ota-signing-key")
+key_data = json.loads(secret["SecretString"])
+priv_key = serialization.load_pem_private_key(key_data["privateKey"].encode(), password=None)
+pub_key  = priv_key.public_key()
+
+item    = ddb.Table("digilux_ota_packages").get_item(
+    Key={"packageName": pkg, "version": ver}
+)["Item"]
+sha256  = item["sha256"]
+sig_b64 = item["signature"]
+
+sig_bytes = base64.b64decode(sig_b64)
+try:
+    pub_key.verify(sig_bytes, sha256.encode(), ec.ECDSA(hashes.SHA256()))
+    print("VALID")   # should NOT happen
+except Exception:
+    print("INVALID") # expected — old single-field input no longer works
+PYEOF
+  )
+  [ "$T20_OLD_RESULT" = "INVALID" ] \
+    && _pass "T20.3 (+) Old single-field (sha256-only) signature input rejected — 4-field scheme enforced" \
+    || _fail "T20.3 (+) Old single-field input still verifies — signature scheme may not have changed"
+fi
+_t19_cleanup "$T19_PKG" "$T20_VER"
+
+# ─────────────────────────────────────────────────────────────────────────────
 _section "RESULTS"
 # ─────────────────────────────────────────────────────────────────────────────
 TOTAL=$((PASS + FAIL + WARN))
