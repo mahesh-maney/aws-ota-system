@@ -1,7 +1,7 @@
 """
 digilux_ota_dev_simulate_job — DEV / TEST ONLY
 ================================================
-Creates an IoT Job directly for a device, bypassing the full
+Creates or cancels an IoT Job directly for a device, bypassing the full
 upload → deployment → consent pipeline.
 
 Intended for integration testing by the controller team.
@@ -14,6 +14,15 @@ Request body:
 
 Response 201:
   { jobId, deviceId, packageName, version, status, presignedUrl }
+
+DELETE /api/v1/ota/dev/simulate-job
+Request body:
+  { "deviceId": "<uuid>" }
+
+Response 200:
+  { cancelled: true, jobId, deviceId, message }
+Response 404 if no active dev job found on the device.
+Only cancels jobs whose ID starts with "digilux-ota-dev-" (dev jobs only).
 """
 
 import json
@@ -115,20 +124,73 @@ def _presign(enc_key: str, expiry_sec: int) -> str:
     )
 
 
+# ── cancel handler ────────────────────────────────────────────────────────────
+
+def _handle_cancel(device_id: str) -> dict:
+    """DELETE — cancel the active dev simulate job for a device."""
+    dev = _get_device(device_id)
+    if not dev:
+        return _resp(404, {"error": f"Device {device_id} not found"})
+
+    job_id = dev.get("pendingJobId", "")
+    if not job_id:
+        return _resp(404, {"error": "No active job on this device"})
+
+    if not job_id.startswith("digilux-ota-dev-"):
+        return _resp(409, {
+            "error": "Active job is not a dev/simulate job — cancel it through the normal OTA flow",
+            "pendingJobId": job_id,
+        })
+
+    # Cancel the IoT Job (force=True handles QUEUED and IN_PROGRESS)
+    try:
+        iot.cancel_job(jobId=job_id, force=True)
+        log.info(json.dumps({"event": "dev_simulate_job_cancelled", "jobId": job_id,
+                             "deviceId": device_id}))
+    except iot.exceptions.ResourceNotFoundException:
+        # Job already gone from IoT — still clear pendingJobId below
+        log.warning(json.dumps({"event": "dev_cancel_job_not_found_in_iot",
+                                "jobId": job_id, "deviceId": device_id}))
+    except Exception as exc:
+        log.error(json.dumps({"event": "dev_cancel_iot_error", "jobId": job_id,
+                              "deviceId": device_id, "error": str(exc)}))
+        return _resp(500, {"error": f"Failed to cancel IoT Job: {exc}"})
+
+    # Clear pendingJobId on the device record
+    mac = dev.get("macAddress", "")
+    dynamodb.Table(DEVICE_TABLE).update_item(
+        Key={"deviceId": device_id, "macAddress": mac},
+        UpdateExpression="REMOVE pendingJobId SET lastUpdatedAt = :ts",
+        ExpressionAttributeValues={":ts": int(time.time() * 1000)},
+    )
+
+    return _resp(200, {
+        "cancelled": True,
+        "jobId":     job_id,
+        "deviceId":  device_id,
+        "message":   f"[DEV] IoT Job {job_id} cancelled and device reset",
+    })
+
+
 # ── handler ───────────────────────────────────────────────────────────────────
 
 def lambda_handler(event, context):
+    method = event.get("httpMethod", "POST").upper()
+
     raw_body  = event.get("body") or "{}"
     try:
         body = json.loads(raw_body)
     except (ValueError, TypeError):
         return _resp(400, {"error": "Request body must be valid JSON"})
 
-    device_id       = body.get("deviceId", "").strip()
-    pinned_version  = body.get("version", "").strip() or None
-
+    device_id = body.get("deviceId", "").strip()
     if not device_id:
         return _resp(400, {"error": "deviceId is required"})
+
+    if method == "DELETE":
+        return _handle_cancel(device_id)
+
+    pinned_version  = body.get("version", "").strip() or None
 
     # 1 ── Device lookup
     dev = _get_device(device_id)
