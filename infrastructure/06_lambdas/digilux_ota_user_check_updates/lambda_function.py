@@ -237,6 +237,72 @@ def _get_latest_available_version(package_name: str, include_beta: bool) -> dict
 
 
 # ──────────────────────────────────────────────────────────────────────────────
+# Pre-install package status check
+# ──────────────────────────────────────────────────────────────────────────────
+
+def _handle_package_status(event: dict, user_id: str, path_params: dict) -> dict:
+    """
+    GET /api/v1/ota/packages/{packageName}/{version}/status
+
+    Called by the device OTA agent immediately before installing a downloaded
+    artifact to confirm the package is still ACTIVE.  Returns a single
+    safe_to_install boolean so the agent needs no knowledge of status strings.
+    """
+    pkg_name = path_params.get("packageName", "").strip()
+    version  = path_params.get("version",     "").strip()
+
+    if not pkg_name or not version:
+        _log("warning", "package_status_missing_params",
+             userId=user_id, packageName=pkg_name, version=version)
+        return _resp(400, {"error": "packageName and version are required"})
+
+    _log("info", "package_status_request",
+         userId=user_id, packageName=pkg_name, version=version)
+
+    t_start = time.monotonic()
+    try:
+        item = dynamo.Table(PACKAGES_TABLE).get_item(
+            Key={"packageName": pkg_name, "version": version}
+        ).get("Item")
+    except ClientError as e:
+        _log("error", "package_status_dynamo_error",
+             userId=user_id, packageName=pkg_name, version=version,
+             awsError=e.response["Error"]["Code"],
+             awsMessage=e.response["Error"]["Message"])
+        return _resp(500, {"error": "Internal server error"})
+
+    elapsed = int((time.monotonic() - t_start) * 1000)
+
+    if not item:
+        _log("info", "package_status_not_found",
+             userId=user_id, packageName=pkg_name, version=version,
+             elapsedMs=elapsed)
+        return _resp(404, {"error": "Package not found"})
+
+    status    = item.get("status",    "UNKNOWN")
+    activated = bool(item.get("activated", False))
+    safe      = (status == "ACTIVE" and activated)
+
+    _log("info", "package_status_checked",
+         userId=user_id, packageName=pkg_name, version=version,
+         status=status, activated=activated, safeToInstall=safe,
+         elapsedMs=elapsed)
+
+    _audit("PACKAGE_STATUS_CHECKED", user_id,
+           {"packageName": pkg_name, "version": version},
+           "SUCCESS" if safe else "BLOCKED",
+           status=status, activated=activated, safeToInstall=safe)
+
+    return _resp(200, {
+        "packageName":     pkg_name,
+        "version":         version,
+        "status":          status,
+        "activated":       activated,
+        "safe_to_install": safe,
+    })
+
+
+# ──────────────────────────────────────────────────────────────────────────────
 # Handler
 # ──────────────────────────────────────────────────────────────────────────────
 
@@ -252,6 +318,11 @@ def lambda_handler(event, context):
             _log("warning", "missing_sub_claim",
                  detail="JWT sub claim absent — rejecting with 401")
             return _resp(401, {"error": "Unauthorized — invalid token"})
+
+        # ── Route: package status check vs check_updates ─────────────────────
+        path_params = event.get("pathParameters") or {}
+        if path_params.get("packageName") and path_params.get("version"):
+            return _handle_package_status(event, user_id, path_params)
 
         email = claims.get("email", user_id)
         _log("info", "check_updates_request",
