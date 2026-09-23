@@ -139,10 +139,10 @@ TEST_VERSION="5.0.$(date +%s)-$RANDOM"
 # artifact_processor validates tar structure before promoting PENDING → ACTIVE
 _TEST_DIR=$(mktemp -d)
 cat > "$_TEST_DIR/manifest.json" <<MANIFEST_EOF
-{"packageName":"HomeAssistantUtility","version":"${TEST_VERSION}","files":["payload.bin"]}
+{"packageName":"HomeAssistantUtility","version":"${TEST_VERSION}","files":[{"name":"payload.bin","type":1}]}
 MANIFEST_EOF
 echo "e2e test payload $(date)" > "$_TEST_DIR/payload.bin"
-tar -cf /tmp/test_artifact.bin -C "$_TEST_DIR" manifest.json payload.bin
+tar -czf /tmp/test_artifact.bin -C "$_TEST_DIR" manifest.json payload.bin
 rm -rf "$_TEST_DIR"
 TEST_CHECKSUM=$(sha256sum /tmp/test_artifact.bin | awk '{print $1}')
 echo "  → test artifact SHA256: ${TEST_CHECKSUM:0:16}..."
@@ -180,8 +180,8 @@ HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" -X PUT "$UPLOAD_URL" \
 assert_code "$HTTP_CODE" "200" "Binary PUT to S3 pre-signed URL → 200"
 
 # Wait for artifact processor (S3 event → Lambda → ACTIVE)
-echo "  → Waiting for artifact_processor (up to 15s)..."
-for i in $(seq 1 15); do
+echo "  → Waiting for artifact_processor (up to 30s)..."
+for i in $(seq 1 30); do
   sleep 1
   STATUS=$(aws dynamodb get-item \
     --table-name digilux_ota_packages \
@@ -192,7 +192,7 @@ for i in $(seq 1 15); do
 done
 [ "$STATUS" = "ACTIVE" ] \
   && _pass "Package auto-promoted to ACTIVE in ${i}s (S3 event → artifact_processor)" \
-  || _fail "Package not ACTIVE after 15s — status=$STATUS"
+  || _fail "Package not ACTIVE after 30s — status=$STATUS"
 
 # Fetch full package record once — reuse for all assertions
 PKG_ITEM=$(aws dynamodb get-item \
@@ -663,7 +663,7 @@ if [ -n "$UPLOAD_URL_B" ] && [ "$UPLOAD_URL_B" != "None" ]; then
     --data-binary @/tmp/test_artifact.bin
 
   echo "  → Waiting for second package to go ACTIVE (UUID collision check)..."
-  for i in $(seq 1 15); do
+  for i in $(seq 1 30); do
     sleep 1
     STATUS_B=$(aws dynamodb get-item \
       --table-name digilux_ota_packages \
@@ -984,6 +984,217 @@ echo "  → T18 cleanup done"
 # ── Audit log check for new events ───────────────────────────────────────────
 check_audit_log "/aws/lambda/digilux_ota_user_check_updates" "ACTIVE_JOB_REPORTED"  "ACTIVE_JOB_REPORTED audit in check_updates"
 check_audit_log "/aws/lambda/digilux_ota_user_check_updates" "USER_CHECK_UPDATES"   "USER_CHECK_UPDATES summary audit (jobActive count present)"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+_section "T19 — ARTIFACT PROCESSOR: MANIFEST ENRICHMENT"
+# ─────────────────────────────────────────────────────────────────────────────
+# Helper: upload a tar to a fresh package version, poll until ACTIVE or CORRUPTED.
+# Sets T19_STATUS to the resulting DynamoDB status.
+_t19_upload() {
+  local version="$1" tarfile="$2" checksum="$3"
+  local resp url token pkg
+
+  resp=$(call POST "/api/v1/ota/packages/upload-artefact" \
+    "{\"deviceType\":\"Network_controller_firmware\",\"version\":\"${version}\",\"releaseType\":\"PROD\",\"checksum\":\"${checksum}\",\"releaseNotes\":\"T19 manifest test\"}")
+
+  url=$(echo "$resp"   | python3 -c "import json,sys; print(json.load(sys.stdin).get('uploadUrl',''))"   2>/dev/null)
+  token=$(echo "$resp" | python3 -c "import json,sys; print(json.load(sys.stdin).get('uploadToken',''))" 2>/dev/null)
+  pkg=$(echo "$resp"   | python3 -c "import json,sys; print(json.load(sys.stdin).get('packageName',''))" 2>/dev/null)
+  T19_PKG="$pkg"
+
+  if [ -z "$url" ] || [ "$url" = "None" ]; then
+    T19_STATUS="NO_UPLOAD_URL"
+    return
+  fi
+
+  curl -s -o /dev/null -X PUT "$url" \
+    -H "Content-Type: application/octet-stream" \
+    -H "x-amz-meta-upload-token: $token" \
+    --data-binary @"$tarfile"
+
+  T19_STATUS="PENDING"
+  for i in $(seq 1 30); do
+    sleep 1
+    T19_STATUS=$(aws dynamodb get-item \
+      --table-name digilux_ota_packages \
+      --key "{\"packageName\":{\"S\":\"${pkg}\"},\"version\":{\"S\":\"${version}\"}}" \
+      --region "$REGION" \
+      --query 'Item.status.S' --output text 2>/dev/null)
+    [ "$T19_STATUS" = "ACTIVE" ] || [ "$T19_STATUS" = "CORRUPTED" ] && break
+  done
+}
+
+_t19_checksum() { python3 -c "import hashlib; print(hashlib.sha256(open('$1','rb').read()).hexdigest())"; }
+
+_t19_cleanup() {
+  local pkg="$1" ver="$2"
+  aws dynamodb delete-item \
+    --table-name digilux_ota_packages \
+    --key "{\"packageName\":{\"S\":\"${pkg}\"},\"version\":{\"S\":\"${ver}\"}}" \
+    --region "$REGION" > /dev/null 2>&1
+}
+
+T19_BASE="5.19.$(date +%s)"
+
+# ── (+) Valid tar with object-format manifest → ACTIVE + SHA256 differs ──────
+echo "  → T19.1: Valid tar with enriched manifest"
+_T19_DIR=$(mktemp -d)
+T19_VER="${T19_BASE}-1"
+cat > "$_T19_DIR/manifest.json" <<'MEOF'
+{"packageName":"HomeAssistantUtility","version":"T19_VER","files":[{"name":"ha-controller.jar","type":1},{"name":"app.config.yaml","type":5}]}
+MEOF
+sed -i '' "s/T19_VER/${T19_VER}/" "$_T19_DIR/manifest.json"
+echo "fake firmware binary" > "$_T19_DIR/ha-controller.jar"
+echo "logLevel: DEBUG" > "$_T19_DIR/app.config.yaml"
+tar -czf /tmp/t19_valid.tar -C "$_T19_DIR" manifest.json ha-controller.jar app.config.yaml
+rm -rf "$_T19_DIR"
+T19_RAW_SHA=$(_t19_checksum /tmp/t19_valid.tar)
+_t19_upload "$T19_VER" /tmp/t19_valid.tar "$T19_RAW_SHA"
+[ "$T19_STATUS" = "ACTIVE" ] \
+  && _pass "T19.1 (+) Valid tar with 2-file object manifest → ACTIVE" \
+  || _fail "T19.1 (+) Valid tar should be ACTIVE, got: $T19_STATUS"
+
+# Enriched tar SHA256 must differ from raw upload SHA256 (proves repacking)
+T19_STORED_SHA=$(aws dynamodb get-item \
+  --table-name digilux_ota_packages \
+  --key "{\"packageName\":{\"S\":\"${T19_PKG}\"},\"version\":{\"S\":\"${T19_VER}\"}}" \
+  --region "$REGION" \
+  --query 'Item.sha256.S' --output text 2>/dev/null)
+[ -n "$T19_STORED_SHA" ] && [ "$T19_STORED_SHA" != "$T19_RAW_SHA" ] \
+  && _pass "T19.1 (+) Stored SHA256 differs from raw upload → manifest enrichment confirmed" \
+  || _fail "T19.1 (+) SHA256 unchanged — manifest enrichment may not have run (raw=$T19_RAW_SHA stored=$T19_STORED_SHA)"
+_t19_cleanup "$T19_PKG" "$T19_VER"
+
+# ── (+) Unknown type value → warns but still ACTIVE ──────────────────────────
+echo "  → T19.2: Unknown file type warns but does not abort"
+_T19_DIR=$(mktemp -d)
+T19_VER="${T19_BASE}-2"
+cat > "$_T19_DIR/manifest.json" <<'MEOF'
+{"packageName":"HomeAssistantUtility","version":"T19_VER","files":[{"name":"payload.bin","type":99}]}
+MEOF
+sed -i '' "s/T19_VER/${T19_VER}/" "$_T19_DIR/manifest.json"
+echo "payload for unknown type" > "$_T19_DIR/payload.bin"
+tar -czf /tmp/t19_unknown_type.tar -C "$_T19_DIR" manifest.json payload.bin
+rm -rf "$_T19_DIR"
+T19_SUM=$(_t19_checksum /tmp/t19_unknown_type.tar)
+_t19_upload "$T19_VER" /tmp/t19_unknown_type.tar "$T19_SUM"
+[ "$T19_STATUS" = "ACTIVE" ] \
+  && _pass "T19.2 (+) Unknown type=99 → warn only, package is ACTIVE" \
+  || _fail "T19.2 (+) Unknown type should not quarantine, got: $T19_STATUS"
+_t19_cleanup "$T19_PKG" "$T19_VER"
+
+# ── (-) Missing manifest.json → CORRUPTED ────────────────────────────────────
+echo "  → T19.3: Missing manifest.json"
+_T19_DIR=$(mktemp -d)
+T19_VER="${T19_BASE}-3"
+echo "no manifest here" > "$_T19_DIR/payload.bin"
+tar -czf /tmp/t19_no_manifest.tar -C "$_T19_DIR" payload.bin
+rm -rf "$_T19_DIR"
+T19_SUM=$(_t19_checksum /tmp/t19_no_manifest.tar)
+_t19_upload "$T19_VER" /tmp/t19_no_manifest.tar "$T19_SUM"
+[ "$T19_STATUS" = "CORRUPTED" ] \
+  && _pass "T19.3 (-) Missing manifest.json → CORRUPTED" \
+  || _fail "T19.3 (-) Missing manifest.json should be CORRUPTED, got: $T19_STATUS"
+_t19_cleanup "$T19_PKG" "$T19_VER"
+
+# ── (-) File in manifest missing from tar → CORRUPTED ────────────────────────
+echo "  → T19.4: File listed in manifest missing from tar"
+_T19_DIR=$(mktemp -d)
+T19_VER="${T19_BASE}-4"
+cat > "$_T19_DIR/manifest.json" <<'MEOF'
+{"packageName":"HomeAssistantUtility","version":"T19_VER","files":[{"name":"missing-file.jar","type":1}]}
+MEOF
+sed -i '' "s/T19_VER/${T19_VER}/" "$_T19_DIR/manifest.json"
+tar -czf /tmp/t19_missing_file.tar -C "$_T19_DIR" manifest.json
+rm -rf "$_T19_DIR"
+T19_SUM=$(_t19_checksum /tmp/t19_missing_file.tar)
+_t19_upload "$T19_VER" /tmp/t19_missing_file.tar "$T19_SUM"
+[ "$T19_STATUS" = "CORRUPTED" ] \
+  && _pass "T19.4 (-) File listed in manifest missing from tar → CORRUPTED" \
+  || _fail "T19.4 (-) Missing file should be CORRUPTED, got: $T19_STATUS"
+_t19_cleanup "$T19_PKG" "$T19_VER"
+
+# ── (-) manifest.json missing required field (packageName) → CORRUPTED ────────
+echo "  → T19.5: manifest.json missing required field"
+_T19_DIR=$(mktemp -d)
+T19_VER="${T19_BASE}-5"
+cat > "$_T19_DIR/manifest.json" <<'MEOF'
+{"version":"T19_VER","files":[{"name":"payload.bin","type":1}]}
+MEOF
+sed -i '' "s/T19_VER/${T19_VER}/" "$_T19_DIR/manifest.json"
+echo "payload" > "$_T19_DIR/payload.bin"
+tar -czf /tmp/t19_missing_field.tar -C "$_T19_DIR" manifest.json payload.bin
+rm -rf "$_T19_DIR"
+T19_SUM=$(_t19_checksum /tmp/t19_missing_field.tar)
+_t19_upload "$T19_VER" /tmp/t19_missing_field.tar "$T19_SUM"
+[ "$T19_STATUS" = "CORRUPTED" ] \
+  && _pass "T19.5 (-) manifest.json missing packageName field → CORRUPTED" \
+  || _fail "T19.5 (-) Missing required field should be CORRUPTED, got: $T19_STATUS"
+_t19_cleanup "$T19_PKG" "$T19_VER"
+
+# ── (-) files[] entry missing 'name' field → CORRUPTED ───────────────────────
+echo "  → T19.6: files[] entry missing name field"
+_T19_DIR=$(mktemp -d)
+T19_VER="${T19_BASE}-6"
+cat > "$_T19_DIR/manifest.json" <<'MEOF'
+{"packageName":"HomeAssistantUtility","version":"T19_VER","files":[{"type":1}]}
+MEOF
+sed -i '' "s/T19_VER/${T19_VER}/" "$_T19_DIR/manifest.json"
+tar -czf /tmp/t19_missing_name.tar -C "$_T19_DIR" manifest.json
+rm -rf "$_T19_DIR"
+T19_SUM=$(_t19_checksum /tmp/t19_missing_name.tar)
+_t19_upload "$T19_VER" /tmp/t19_missing_name.tar "$T19_SUM"
+[ "$T19_STATUS" = "CORRUPTED" ] \
+  && _pass "T19.6 (-) files[] entry missing 'name' → CORRUPTED" \
+  || _fail "T19.6 (-) Missing name field should be CORRUPTED, got: $T19_STATUS"
+_t19_cleanup "$T19_PKG" "$T19_VER"
+
+# ── (-) files[] entry is a string not an object → CORRUPTED ──────────────────
+echo "  → T19.7: files[] entry is a string (old format)"
+_T19_DIR=$(mktemp -d)
+T19_VER="${T19_BASE}-7"
+cat > "$_T19_DIR/manifest.json" <<'MEOF'
+{"packageName":"HomeAssistantUtility","version":"T19_VER","files":["payload.bin"]}
+MEOF
+sed -i '' "s/T19_VER/${T19_VER}/" "$_T19_DIR/manifest.json"
+echo "payload" > "$_T19_DIR/payload.bin"
+tar -czf /tmp/t19_string_entry.tar -C "$_T19_DIR" manifest.json payload.bin
+rm -rf "$_T19_DIR"
+T19_SUM=$(_t19_checksum /tmp/t19_string_entry.tar)
+_t19_upload "$T19_VER" /tmp/t19_string_entry.tar "$T19_SUM"
+[ "$T19_STATUS" = "CORRUPTED" ] \
+  && _pass "T19.7 (-) files[] string entry (old format) → CORRUPTED" \
+  || _fail "T19.7 (-) String entry should be CORRUPTED, got: $T19_STATUS"
+_t19_cleanup "$T19_PKG" "$T19_VER"
+
+# ── (-) Not a valid tar → CORRUPTED ──────────────────────────────────────────
+echo "  → T19.8: Not a valid tar (random bytes)"
+T19_VER="${T19_BASE}-8"
+echo "this is not a tar file at all" > /tmp/t19_not_a_tar.bin
+T19_SUM=$(_t19_checksum /tmp/t19_not_a_tar.bin)
+_t19_upload "$T19_VER" /tmp/t19_not_a_tar.bin "$T19_SUM"
+[ "$T19_STATUS" = "CORRUPTED" ] \
+  && _pass "T19.8 (-) Non-tar upload → CORRUPTED" \
+  || _fail "T19.8 (-) Non-tar should be CORRUPTED, got: $T19_STATUS"
+_t19_cleanup "$T19_PKG" "$T19_VER"
+
+# ── (-) manifest.json contains invalid JSON → CORRUPTED ──────────────────────
+echo "  → T19.9: manifest.json is invalid JSON"
+_T19_DIR=$(mktemp -d)
+T19_VER="${T19_BASE}-9"
+echo "{ this is not valid json }" > "$_T19_DIR/manifest.json"
+tar -czf /tmp/t19_bad_json.tar -C "$_T19_DIR" manifest.json
+rm -rf "$_T19_DIR"
+T19_SUM=$(_t19_checksum /tmp/t19_bad_json.tar)
+_t19_upload "$T19_VER" /tmp/t19_bad_json.tar "$T19_SUM"
+[ "$T19_STATUS" = "CORRUPTED" ] \
+  && _pass "T19.9 (-) Invalid JSON manifest → CORRUPTED" \
+  || _fail "T19.9 (-) Invalid JSON manifest should be CORRUPTED, got: $T19_STATUS"
+_t19_cleanup "$T19_PKG" "$T19_VER"
+
+check_audit_log "/aws/lambda/digilux_ota_artifact_processor" "PACKAGE_REGISTERED_ACTIVE" "T19 artifact_processor ACTIVE audit present"
+check_audit_log "/aws/lambda/digilux_ota_artifact_processor" "ARTIFACT_SIGNED"           "T19 artifact_processor SIGNED audit present"
 
 # ─────────────────────────────────────────────────────────────────────────────
 _section "RESULTS"

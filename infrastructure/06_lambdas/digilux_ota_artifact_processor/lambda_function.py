@@ -358,7 +358,22 @@ def _process_artifact(bucket: str, s3_key: str, obj_size: int) -> None:
              sha256=sha256,
              detail="Computed SHA256 matches admin-provided checksum — artifact integrity confirmed")
 
-    # ── 4. ECDSA sign ──────────────────────────────────────────────────────────
+    # ── 4. Validate tar + enrich manifest.json with per-file SHA256 + size ──────
+    _log("info", "tar_validation_start",
+         packageName=pkg_name, version=version, sizeBytes=actual_size)
+    result = _enrich_tar_manifest(raw_bytes, pkg_name, version, bucket, s3_key)
+    if result is None:
+        return  # _quarantine already called inside _enrich_tar_manifest
+    enriched_bytes, manifest = result
+
+    # Recompute SHA256 over the enriched tar (manifest.json now has per-file checksums)
+    sha256 = hashlib.sha256(enriched_bytes).hexdigest()
+    actual_size = len(enriched_bytes)
+    _log("info", "enriched_tar_sha256",
+         packageName=pkg_name, version=version,
+         sha256=sha256, enrichedBytes=actual_size)
+
+    # ── 5. ECDSA sign ──────────────────────────────────────────────────────────
     _log("info", "signing_start",
          packageName=pkg_name, version=version,
          signingSecret=SIGNING_SECRET,
@@ -375,19 +390,12 @@ def _process_artifact(bucket: str, s3_key: str, obj_size: int) -> None:
            algorithm="ECDSA-SHA256", sha256=sha256,
            signatureLength=len(signature), signMs=sign_ms)
 
-    # ── 5. Validate tar structure + manifest.json ──────────────────────────────
-    _log("info", "tar_validation_start",
-         packageName=pkg_name, version=version, sizeBytes=actual_size)
-    manifest = _validate_tar_manifest(raw_bytes, pkg_name, version, bucket, s3_key)
-    if manifest is None:
-        return  # _quarantine already called inside _validate_tar_manifest
-
-    # ── 6. AES-256-GCM encrypt entire tar ─────────────────────────────────────
+    # ── 6. AES-256-GCM encrypt enriched tar ───────────────────────────────────
     _log("info", "encryption_start",
          packageName=pkg_name, version=version,
          algorithm="AES-256-GCM", plaintextBytes=actual_size)
     t_enc = time.monotonic()
-    aes_key_bytes, aes_iv_bytes, encrypted_bytes = _encrypt_artifact(raw_bytes)
+    aes_key_bytes, aes_iv_bytes, encrypted_bytes = _encrypt_artifact(enriched_bytes)
     enc_ms        = int((time.monotonic() - t_enc) * 1000)
     encrypted_size = len(encrypted_bytes)
     _log("info", "encryption_complete",
@@ -637,9 +645,18 @@ def _sig_s3_key(s3_key: str) -> str:
     return f"sig/{uuid.uuid4()}.sig"
 
 
-def _validate_tar_manifest(raw_bytes: bytes, pkg_name: str, version: str,
-                            bucket: str, s3_key: str) -> dict | None:
-    """Confirm raw_bytes is a valid tar containing manifest.json with required fields."""
+VALID_FILE_TYPES = {1, 2, 3, 4, 5, 6, 7, 8}
+
+
+def _enrich_tar_manifest(raw_bytes: bytes, pkg_name: str, version: str,
+                          bucket: str, s3_key: str) -> tuple | None:
+    """
+    Validate the tar, enrich manifest.json with per-file SHA256 + size,
+    and repack the tar with the enriched manifest.
+
+    Returns (enriched_tar_bytes, manifest) on success, or None on failure
+    (_quarantine is called internally before returning None).
+    """
     import io
     import tarfile
 
@@ -652,11 +669,10 @@ def _validate_tar_manifest(raw_bytes: bytes, pkg_name: str, version: str,
                  packageName=pkg_name, version=version,
                  fileCount=len(names), files=names)
 
+            # ── manifest.json must exist ──────────────────────────────────────
             if "manifest.json" not in names:
                 _log("error", "tar_missing_manifest",
-                     packageName=pkg_name, version=version,
-                     tarFiles=names,
-                     detail="manifest.json not found in tar archive root")
+                     packageName=pkg_name, version=version, tarFiles=names)
                 _quarantine(bucket, s3_key, pkg_name, version,
                             "INVALID_TAR_STRUCTURE",
                             "manifest.json not found inside tar archive")
@@ -669,9 +685,9 @@ def _validate_tar_manifest(raw_bytes: bytes, pkg_name: str, version: str,
                  packageName=pkg_name, version=version,
                  manifestPackage=manifest.get("packageName"),
                  manifestVersion=manifest.get("version"),
-                 manifestFileCount=len(manifest.get("files", [])),
-                 manifestKeys=list(manifest.keys()))
+                 manifestFileCount=len(manifest.get("files", [])))
 
+            # ── required top-level fields ─────────────────────────────────────
             for field in ("packageName", "version", "files"):
                 if field not in manifest:
                     _log("error", "manifest_missing_required_field",
@@ -682,24 +698,106 @@ def _validate_tar_manifest(raw_bytes: bytes, pkg_name: str, version: str,
                                 f"Required field '{field}' missing from manifest.json")
                     return None
 
-            # Cross-check manifest packageName/version against DynamoDB record
+            # ── cross-check packageName / version ─────────────────────────────
             if manifest.get("packageName") != pkg_name:
                 _log("warning", "manifest_package_name_mismatch",
                      packageName=pkg_name, version=version,
-                     manifestPackage=manifest.get("packageName"),
-                     detail="manifest.json packageName differs from DynamoDB record")
+                     manifestPackage=manifest.get("packageName"))
             if manifest.get("version") != version:
                 _log("warning", "manifest_version_mismatch",
                      packageName=pkg_name, version=version,
-                     manifestVersion=manifest.get("version"),
-                     detail="manifest.json version differs from DynamoDB record")
+                     manifestVersion=manifest.get("version"))
 
-            _log("info", "tar_manifest_validated",
+            # ── per-file validation + SHA256/size injection ───────────────────
+            enriched_files = []
+            for entry in manifest["files"]:
+                if not isinstance(entry, dict):
+                    _log("error", "manifest_file_entry_not_object",
+                         packageName=pkg_name, version=version, entry=str(entry),
+                         detail="Each files[] entry must be a JSON object with at least 'name' and 'type'")
+                    _quarantine(bucket, s3_key, pkg_name, version,
+                                "INVALID_MANIFEST",
+                                f"files[] entry is not a JSON object: {entry!r}")
+                    return None
+
+                fname = entry.get("name")
+                ftype = entry.get("type")
+
+                if not fname:
+                    _log("error", "manifest_file_entry_missing_name",
+                         packageName=pkg_name, version=version, entry=entry)
+                    _quarantine(bucket, s3_key, pkg_name, version,
+                                "INVALID_MANIFEST",
+                                "A files[] entry is missing the 'name' field")
+                    return None
+
+                if fname not in names:
+                    _log("error", "manifest_file_missing_from_tar",
+                         packageName=pkg_name, version=version,
+                         fileName=fname, tarFiles=names)
+                    _quarantine(bucket, s3_key, pkg_name, version,
+                                "MANIFEST_FILE_MISSING",
+                                f"File '{fname}' listed in manifest.json not found in tar")
+                    return None
+
+                if ftype not in VALID_FILE_TYPES:
+                    _log("warning", "manifest_unknown_file_type",
+                         packageName=pkg_name, version=version,
+                         fileName=fname, fileType=ftype,
+                         knownTypes=sorted(VALID_FILE_TYPES),
+                         detail="Unknown type — file will be included but controller will skip it")
+
+                file_bytes = tf.extractfile(fname).read()
+                file_sha256 = hashlib.sha256(file_bytes).hexdigest()
+                file_size   = len(file_bytes)
+
+                enriched_entry = dict(entry)
+                enriched_entry["sha256"] = file_sha256
+                enriched_entry["size"]   = file_size
+                enriched_files.append(enriched_entry)
+
+                _log("debug", "manifest_file_enriched",
+                     packageName=pkg_name, version=version,
+                     fileName=fname, fileType=ftype,
+                     sha256=file_sha256, sizeBytes=file_size)
+
+            manifest["files"] = enriched_files
+            _log("info", "manifest_enrichment_complete",
                  packageName=pkg_name, version=version,
-                 manifestPackage=manifest.get("packageName"),
-                 manifestVersion=manifest.get("version"),
-                 fileCount=len(manifest.get("files", [])))
-            return manifest
+                 fileCount=len(enriched_files))
+
+            # ── repack tar with enriched manifest.json ────────────────────────
+            enriched_manifest_bytes = json.dumps(manifest, indent=2).encode("utf-8")
+            out_buf = io.BytesIO()
+            with tarfile.open(fileobj=out_buf, mode="w:gz") as out_tf:
+                # Write all original files except manifest.json
+                for member in tf.getmembers():
+                    if member.name == "manifest.json":
+                        continue
+                    file_obj = tf.extractfile(member)
+                    if file_obj is not None:
+                        out_tf.addfile(member, file_obj)
+
+                # Write enriched manifest.json
+                minfo = tarfile.TarInfo(name="manifest.json")
+                minfo.size = len(enriched_manifest_bytes)
+                out_tf.addfile(minfo, io.BytesIO(enriched_manifest_bytes))
+
+            enriched_tar_bytes = out_buf.getvalue()
+            _log("info", "tar_repacked",
+                 packageName=pkg_name, version=version,
+                 originalBytes=len(raw_bytes),
+                 enrichedBytes=len(enriched_tar_bytes))
+            _audit("MANIFEST_ENRICHED",
+                   {"packageName": pkg_name, "version": version},
+                   "SUCCESS",
+                   fileCount=len(enriched_files),
+                   originalBytes=len(raw_bytes),
+                   enrichedBytes=len(enriched_tar_bytes),
+                   files=[{"name": f["name"], "type": f.get("type"), "sha256": f["sha256"], "size": f["size"]}
+                          for f in enriched_files])
+
+            return enriched_tar_bytes, manifest
 
     except tarfile.TarError as e:
         _log("error", "tar_open_failed",
