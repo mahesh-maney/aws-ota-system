@@ -1306,6 +1306,7 @@ PYEOF
 fi
 _t19_cleanup "$T19_PKG" "$T20_VER"
 
+
 # ─────────────────────────────────────────────────────────────────────────────
 _section "T21 — USER CONSENT: POST /api/v1/ota/my/updates/consent"
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1320,7 +1321,7 @@ T21_PKG=$(grep TEST_PKG_NAME /tmp/ota_test_version.txt | cut -d= -f2)
 T21_USER_ID="41f35d4a-d0d1-709e-634f-fc6198a3872d"   # demotesthw5@yopmail.com
 T21_CONSENT_URL="/api/v1/ota/my/updates/consent"
 
-# Helper: build Lambda event, invoke, populate T21_STATUS and T21_BODY
+# Helper: invoke user_consent Lambda, populate T21_STATUS and T21_BODY
 t21_invoke() {
   local user_id="$1" body_json="$2"
   python3.9 -W ignore -c "
@@ -1335,13 +1336,11 @@ print(json.dumps({
     'sub': uid, 'email': 'test@test.com', 'cognito:username': uid
   }}}
 }))" "$user_id" "$body_json" > /tmp/t21_event.json 2>/dev/null
-
   aws lambda invoke \
     --function-name digilux_ota_user_consent \
     --region "$REGION" \
     --payload file:///tmp/t21_event.json \
     /tmp/t21_response.json > /dev/null 2>&1
-
   T21_STATUS=$(python3.9 -W ignore -c \
     "import json; print(json.load(open('/tmp/t21_response.json')).get('statusCode',0))" 2>/dev/null)
   T21_BODY=$(python3.9 -W ignore -c \
@@ -1352,6 +1351,40 @@ print(json.dumps({
 t21_field() {
   echo "$T21_BODY" | python3.9 -c \
     "import json,sys; d=json.loads(sys.stdin.read()); print(d.get('$1','__MISSING__'))" 2>/dev/null
+}
+
+# Helper: invoke check_updates Lambda for T21_USER_ID, return the device entry for DEVICE_ID
+t21_check_updates() {
+  python3.9 -W ignore -c "
+import boto3, json, sys
+client = boto3.client('lambda', region_name='ap-south-1')
+event = {
+  'httpMethod': 'GET',
+  'path': '/api/v1/ota/device/available-updates',
+  'headers': {},
+  'requestContext': {'authorizer': {'claims': {
+    'sub': '${T21_USER_ID}', 'email': 'test@test.com',
+    'cognito:username': '${T21_USER_ID}'
+  }}}
+}
+resp = client.invoke(FunctionName='digilux_ota_user_check_updates',
+                     InvocationType='RequestResponse',
+                     Payload=json.dumps(event).encode())
+result = json.loads(resp['Payload'].read())
+body = json.loads(result.get('body','{}'))
+devices = body.get('devices', [])
+dev = next((d for d in devices if d.get('deviceId') == '${DEVICE_ID}'), {})
+print(json.dumps(dev))
+" 2>/dev/null
+}
+
+# Helper: read current pendingJobId from device_data
+t21_pending_job() {
+  aws dynamodb get-item \
+    --table-name digilux_device_data \
+    --key "{\"deviceId\":{\"S\":\"${DEVICE_ID}\"},\"macAddress\":{\"S\":\"${DEVICE_MAC}\"}}" \
+    --region "$REGION" \
+    --query 'Item.pendingJobId.S' --output text 2>/dev/null
 }
 
 # Ensure no stale pendingJobId on the test device before we start
@@ -1375,8 +1408,7 @@ code=$(http_code POST "$T21_CONSENT_URL" "$T21_BODY_SAMPLE" "Bearer invalid.toke
   && _pass "T21.2 (-) Malformed token rejected (HTTP $code)" \
   || _fail "T21.2 (-) Malformed token should be 401/403, got $code"
 
-# (-) USER_PASSWORD_AUTH access token — right pool but lacks smarthome_server OAuth scopes → 401
-# Proves API Gateway scope enforcement (smarthome_server/read + write) is active on this endpoint.
+# (-) USER_PASSWORD_AUTH token — right pool but lacks smarthome_server scopes → 401
 T21_NO_SCOPE_TOKEN=$(python3.9 -W ignore -c "
 import boto3
 r = boto3.client('cognito-idp', region_name='ap-south-1').initiate_auth(
@@ -1427,6 +1459,19 @@ t21_invoke "$T21_USER_ID" \
   && _pass "T21.8 (-) Non-existent package version → 404" \
   || _fail "T21.8 (-) Non-existent package version — expected 404, got $T21_STATUS"
 
+# State: a failed consent must not create a job or touch device_data
+T21_PENDING_AFTER_FAIL=$(t21_pending_job)
+[ "$T21_PENDING_AFTER_FAIL" = "None" ] || [ -z "$T21_PENDING_AFTER_FAIL" ] \
+  && _pass "T21.8 (-) State: failed consent left device_data unchanged (no pendingJobId)" \
+  || _fail "T21.8 (-) State: failed consent wrote pendingJobId='$T21_PENDING_AFTER_FAIL' — must not happen"
+
+T21_CU_AFTER_FAIL=$(t21_check_updates)
+T21_CU_STATUS_AFTER_FAIL=$(echo "$T21_CU_AFTER_FAIL" | python3.9 -c \
+  "import json,sys; d=json.loads(sys.stdin.read()); print(d.get('otaStatus','__MISSING__'))" 2>/dev/null)
+[ "$T21_CU_STATUS_AFTER_FAIL" != "JOB_ACTIVE" ] \
+  && _pass "T21.8 (-) State: check_updates does not show JOB_ACTIVE after a failed consent" \
+  || _fail "T21.8 (-) State: check_updates shows JOB_ACTIVE after a failed consent — spurious job created"
+
 # ── HAPPY PATH: accepted=true ─────────────────────────────────────────────────
 
 t21_invoke "$T21_USER_ID" \
@@ -1447,15 +1492,24 @@ T21_JOB_RESP_STATUS=$(t21_field "status")
   && _pass "T21.9 (+) Response status=QUEUED" \
   || _fail "T21.9 (+) Expected status=QUEUED in response, got: $T21_JOB_RESP_STATUS"
 
-# (+) pendingJobId written to device_data
-T21_PENDING=$(aws dynamodb get-item \
-  --table-name digilux_device_data \
-  --key "{\"deviceId\":{\"S\":\"${DEVICE_ID}\"},\"macAddress\":{\"S\":\"${DEVICE_MAC}\"}}" \
-  --region "$REGION" \
-  --query 'Item.pendingJobId.S' --output text 2>/dev/null)
+# State: pendingJobId written to device_data
+T21_PENDING=$(t21_pending_job)
 [ "$T21_PENDING" = "$T21_JOB_ID" ] \
   && _pass "T21.10 (+) pendingJobId written to device_data: $T21_PENDING" \
   || _fail "T21.10 (+) pendingJobId mismatch — expected $T21_JOB_ID, got $T21_PENDING"
+
+# State: check_updates immediately reflects JOB_ACTIVE for this device
+T21_CU_AFTER_CONSENT=$(t21_check_updates)
+T21_CU_OTA_STATUS=$(echo "$T21_CU_AFTER_CONSENT" | python3.9 -c \
+  "import json,sys; d=json.loads(sys.stdin.read()); print(d.get('otaStatus','__MISSING__'))" 2>/dev/null)
+T21_CU_ACTIVE_JOB_ID=$(echo "$T21_CU_AFTER_CONSENT" | python3.9 -c \
+  "import json,sys; d=json.loads(sys.stdin.read()); print(d.get('activeJob',{}).get('jobId','__MISSING__'))" 2>/dev/null)
+[ "$T21_CU_OTA_STATUS" = "JOB_ACTIVE" ] \
+  && _pass "T21.10 (+) State: check_updates shows otaStatus=JOB_ACTIVE after accepted=true" \
+  || _fail "T21.10 (+) State: check_updates expected JOB_ACTIVE, got $T21_CU_OTA_STATUS"
+[ "$T21_CU_ACTIVE_JOB_ID" = "$T21_JOB_ID" ] \
+  && _pass "T21.10 (+) State: check_updates activeJob.jobId matches consent response ($T21_JOB_ID)" \
+  || _fail "T21.10 (+) State: check_updates activeJob.jobId mismatch — expected $T21_JOB_ID, got $T21_CU_ACTIVE_JOB_ID"
 
 # (+) IoT Job exists in AWS IoT targeted at the correct Thing
 if [ -n "$T21_JOB_ID" ] && [ "$T21_JOB_ID" != "__MISSING__" ]; then
@@ -1510,6 +1564,35 @@ else
   _warn "T21.11-13 skipped — T21.9 did not return a jobId"
 fi
 
+# ── WRONG VERSION WHILE JOB IS ACTIVE ────────────────────────────────────────
+# This is the real-world scenario: device has a live job, user submits consent
+# with a non-existent version. Must return 404 AND leave the active job untouched.
+# (This is what caused the "job appeared on failed consent" confusion in production.)
+
+if [ -n "$T21_JOB_ID" ] && [ "$T21_JOB_ID" != "__MISSING__" ]; then
+  t21_invoke "$T21_USER_ID" \
+    "{\"deviceId\":\"${DEVICE_ID}\",\"packageName\":\"${T21_PKG}\",\"version\":\"0.0.0-wrong\",\"accepted\":true}"
+  [ "$T21_STATUS" = "404" ] \
+    && _pass "T21.16 (-) Wrong version while job active → 404" \
+    || _fail "T21.16 (-) Wrong version while job active — expected 404, got $T21_STATUS"
+
+  # State: pendingJobId must be the ORIGINAL job — not changed, not cleared
+  T21_PENDING_AFTER_WRONG=$(t21_pending_job)
+  [ "$T21_PENDING_AFTER_WRONG" = "$T21_JOB_ID" ] \
+    && _pass "T21.16 (-) State: pendingJobId unchanged after wrong-version consent ($T21_JOB_ID)" \
+    || _fail "T21.16 (-) State: pendingJobId changed — expected $T21_JOB_ID, got $T21_PENDING_AFTER_WRONG"
+
+  # State: check_updates still shows the SAME original job — not a new one, not gone
+  T21_CU_AFTER_WRONG=$(t21_check_updates)
+  T21_CU_JOB_AFTER_WRONG=$(echo "$T21_CU_AFTER_WRONG" | python3.9 -c \
+    "import json,sys; d=json.loads(sys.stdin.read()); print(d.get('activeJob',{}).get('jobId','__MISSING__'))" 2>/dev/null)
+  [ "$T21_CU_JOB_AFTER_WRONG" = "$T21_JOB_ID" ] \
+    && _pass "T21.16 (-) State: check_updates still shows original job after wrong-version consent" \
+    || _fail "T21.16 (-) State: check_updates job changed — expected $T21_JOB_ID, got $T21_CU_JOB_AFTER_WRONG"
+else
+  _warn "T21.16 skipped — T21.9 did not produce a jobId"
+fi
+
 # ── DECLINE PATH: accepted=false ──────────────────────────────────────────────
 # Create a fresh admin deployment to generate a PENDING consent record, then decline it.
 
@@ -1527,13 +1610,36 @@ if [ -n "$T21_DECLINE_DEPLOY_ID" ] && [ "$T21_DECLINE_DEPLOY_ID" != "None" ]; th
   [ "$T21_STATUS" = "200" ] && [ "$T21_DECLINE_FIELD" = "DECLINED" ] \
     && _pass "T21.14 (+) accepted=false with pending admin consent → 200 DECLINED" \
     || _fail "T21.14 (+) accepted=false — expected 200/DECLINED, got HTTP $T21_STATUS body=$T21_BODY"
+
+  # State: consent record in digilux_ota_user_consents must be DECLINED
+  T21_CONSENT_STATUS=$(aws dynamodb query \
+    --table-name digilux_ota_user_consents \
+    --index-name deploymentId-index \
+    --key-condition-expression "deploymentId = :d" \
+    --expression-attribute-values "{\":d\":{\"S\":\"${T21_DECLINE_DEPLOY_ID}\"}}" \
+    --region "$REGION" \
+    --query 'Items[0].status.S' --output text 2>/dev/null)
+  [ "$T21_CONSENT_STATUS" = "DECLINED" ] \
+    && _pass "T21.14 (+) State: consent record in DynamoDB is DECLINED" \
+    || _fail "T21.14 (+) State: consent record expected DECLINED, got '$T21_CONSENT_STATUS'"
+
+  # State: no IoT job was created for the decline — digilux_ota_jobs must have no QUEUED job
+  # for this deploymentId
+  T21_DECLINE_JOB_COUNT=$(aws dynamodb query \
+    --table-name digilux_ota_jobs \
+    --index-name deploymentId-index \
+    --key-condition-expression "deploymentId = :d" \
+    --expression-attribute-values "{\":d\":{\"S\":\"${T21_DECLINE_DEPLOY_ID}\"}}" \
+    --region "$REGION" \
+    --query 'Count' --output text 2>/dev/null)
+  [ "$T21_DECLINE_JOB_COUNT" = "0" ] || [ -z "$T21_DECLINE_JOB_COUNT" ] \
+    && _pass "T21.14 (+) State: no IoT job created for declined consent" \
+    || _fail "T21.14 (+) State: IoT job was created despite consent being DECLINED — $T21_DECLINE_JOB_COUNT job(s) found"
 else
   _warn "T21.14 skipped — admin deployment creation failed, cannot test decline path"
 fi
 
 # ── DUPLICATE CONSENT while pendingJobId is active ───────────────────────────
-# After T21.9 the device has a live pendingJobId. A second consent for the same
-# job must be blocked with a 4xx — the device cannot have two active jobs.
 
 if [ -n "$T21_JOB_ID" ] && [ "$T21_JOB_ID" != "__MISSING__" ]; then
   t21_invoke "$T21_USER_ID" \
@@ -1541,6 +1647,12 @@ if [ -n "$T21_JOB_ID" ] && [ "$T21_JOB_ID" != "__MISSING__" ]; then
   echo "$T21_STATUS" | grep -qE "^4[0-9]{2}$" \
     && _pass "T21.15 (-) Duplicate consent while job active → $T21_STATUS (blocked)" \
     || _fail "T21.15 (-) Duplicate consent should be 4xx, got $T21_STATUS: $T21_BODY"
+
+  # State: pendingJobId must still be the original job — not a new one
+  T21_PENDING_AFTER_DUP=$(t21_pending_job)
+  [ "$T21_PENDING_AFTER_DUP" = "$T21_JOB_ID" ] \
+    && _pass "T21.15 (-) State: pendingJobId still the original job after blocked duplicate" \
+    || _fail "T21.15 (-) State: pendingJobId changed from $T21_JOB_ID to $T21_PENDING_AFTER_DUP"
 else
   _warn "T21.15 skipped — T21.9 did not produce a jobId"
 fi
