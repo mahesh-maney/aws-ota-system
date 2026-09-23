@@ -15,7 +15,7 @@ This document describes all key flows in the Digilux OTA update system — from 
 | **Admin / Integration App** | Client | Uploads packages, triggers deployments, monitors status |
 | **API Gateway** | AWS | Routes HTTP requests to Lambda functions |
 | `digilux_ota_upload_url` | Lambda | Issues pre-signed S3 upload URLs, writes PENDING record. Derives `packageName` and `fileName` from `deviceType` automatically. |
-| `digilux_ota_artifact_processor` | Lambda | Triggered by S3 event; verifies upload token + checksum; computes SHA256, signs with ECDSA, promotes package PENDING→ACTIVE. Automatically supersedes lower-semver ACTIVE versions of the same package+releaseType. Quarantines invalid uploads (deletes S3 object, marks `CORRUPTED`). |
+| `digilux_ota_artifact_processor` | Lambda | Triggered by S3 event; verifies upload token + checksum; validates tar structure + enriches `manifest.json` with per-file SHA256+size; recomputes outer SHA256 over enriched tar; signs with ECDSA; AES-256-GCM encrypts; promotes package PENDING→ACTIVE. Automatically supersedes lower-semver ACTIVE versions of the same package+releaseType. Quarantines invalid uploads (deletes S3 object, marks `CORRUPTED`). |
 | `digilux_ota_job_create` | Lambda | Creates IoT Jobs, lists/gets/aborts deployments |
 | `digilux_ota_compatibility_check` | Lambda | Returns available updates for a specific device |
 | `digilux_ota_status_handler` | Lambda | Receives device status via IoT Rule; updates DynamoDB |
@@ -169,12 +169,14 @@ S3                  artifact_processor Lambda    Secrets Manager    DynamoDB (pa
 2. Lambda parses the S3 key: `{prefix}/{packageName}/{version}/{fileName}`
 3. Lambda looks up the `PENDING` DynamoDB record. Skips if already `ACTIVE` (idempotent). Deletes S3 object if no record found (orphan upload protection).
 4. **Security check 1 — Upload token binding:** Lambda calls `head_object` to read `x-amz-meta-upload-token` from S3 object metadata, compares against `uploadToken` stored in DynamoDB. Mismatch = rogue upload → quarantine (delete S3 object, mark `CORRUPTED`, emit audit log)
-5. Lambda streams the binary from S3 and computes SHA256 (chunked, 1 MB blocks)
+5. Lambda streams the binary from S3 and computes SHA256
 6. **Security check 2 — Checksum validation:** If `expectedChecksum` was stored, compares computed SHA256 against it. Mismatch = corrupted/tampered binary → quarantine
-7. Lambda fetches the ECDSA P-256 private key from Secrets Manager
-8. Lambda signs the SHA256 hex string with ECDSA → base64 signature
-9. Lambda updates the DynamoDB record: `status = ACTIVE`, writes `sha256`, `signature`, `artifactSize`; **removes** `uploadToken` and `expectedChecksum` (no longer needed)
-10. Lambda emits `PACKAGE_REGISTERED_ACTIVE` audit log
+7. **Manifest enrichment:** Lambda opens the tar, validates `manifest.json` structure, computes SHA256 + size for each file listed in `files[]`, injects these into the manifest entries, then repacks the tar. The outer SHA256 is recomputed over the enriched tar. Quarantines if: manifest.json absent, required fields missing, a listed file is absent from the tar, or a `files[]` entry is not a JSON object. Unknown `type` values warn but do not abort.
+8. Lambda signs the enriched tar's SHA256 hex string with ECDSA → base64 signature
+9. Lambda AES-256-GCM encrypts the enriched tar; wraps the AES key with a master key from Secrets Manager
+10. Lambda uploads encrypted artifact + signature to S3 at opaque UUID keys (`enc/<uuid>.enc`, `sig/<uuid>.sig`); deletes the original plaintext tar
+11. Lambda updates the DynamoDB record: `status = ACTIVE`, writes `sha256`, `signature`, `encS3Key`, `sigS3Key`, `aesKeyEnc`, `aesIv`, `masterIv`; **removes** `uploadToken` and `expectedChecksum`
+12. Lambda emits `MANIFEST_ENRICHED` + `PACKAGE_REGISTERED_ACTIVE` audit logs
 11. **Semver-aware auto-supersede:** Lambda queries all ACTIVE versions of the same `packageName + releaseType`. Any version with a **lower semver** is set to `SUPERSEDED` (with `supersededBy = currentVersion`). Versions with equal or higher semver are left untouched — this prevents a late-uploaded older version from wiping a live release.
 
 > **CORRUPTED status:** A package marked `CORRUPTED` is permanently rejected. Any future upload attempts to the same `packageName@version` are automatically deleted by the processor.
@@ -1106,3 +1108,4 @@ Key: `packageName` (hash) + `version` (range)
 | `1.3` | 2026-08-24 | Package lifecycle management: new Flow 2b (Promote / Restore); `artifact_processor` semver-aware auto-supersede on ACTIVE promotion; `package_activate` extended with `promote` (BETA→PROD, terminal) and `restore` (SUPERSEDED→ACTIVE rollback) actions; new release types `BETA` and `CUSTOM`; CUSTOM rollout stage for targeted per-device deployments |
 | `1.4` | 2026-08-24 | S3 key structure change: artifacts now stored under `Network_controller_firmware/{deviceType}/{version}/{fileName}`; `artifact_processor` detects old vs new key format transparently; `job_create` device lookup migrated from retired `digilux_device_inventory` to `digilux_device_data` (composite key query by `deviceId`); `operationType` integers documented (1–5); new device type `Network_controller_zigbee_stack_firmware` = `operationType 5` |
 | `1.5` | 2026-08-28 | Job lifecycle management: new Flow 14 (14a staleness check, 14b IoT lifecycle event sync, 14c auto-cancel on recall); new Lambda `digilux_ota_job_sync`; IoT Rule `digilux_ota_job_lifecycle_sync`; EventBridge rule (rate: 1 day); `thingName` removed from `digilux_ota_beta_users` — `job_create` now queries `digilux_device_data` fresh at BETA deployment time |
+| `1.6` | 2026-09-23 | Manifest enrichment in `artifact_processor`: tar validated, each `files[]` entry enriched with computed `sha256` + `size` before signing; enriched tar is repacked and its SHA256 recomputed as the canonical artifact hash; `MANIFEST_ENRICHED` audit event emitted; consent-gated OTA deployment flow (admin deploys → `AWAITING_CONSENT` → user consents → IoT Job created per device); `check_updates` returns `otaStatus=JOB_ACTIVE` with `activeJob` block when a job is pending/running/failed |

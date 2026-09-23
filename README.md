@@ -44,7 +44,7 @@ Admin / Integration App
         │                                        │ S3 Event
         │                                        ▼
         │                              digilux_ota_artifact_processor
-        │                              (SHA256 + ECDSA sign → ACTIVE)
+        │                              (validate tar + enrich manifest SHA256/size → sign + encrypt → ACTIVE)
         │
         ├── POST /deployments ──────────► digilux_ota_job_create
         │                                        │ Creates IoT Job
