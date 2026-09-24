@@ -11,6 +11,8 @@ Only devices registered under that userId are returned.
 OTA state (installedVersions, pendingJobId, thingName, model, hwRevision) is stored
 directly on digilux_device_data items — no separate inventory table lookup needed.
 """
+from __future__ import annotations
+
 import datetime
 import json
 import logging

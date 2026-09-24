@@ -12,6 +12,8 @@ Body: { "deviceId": "...", "packageName": "...", "version": "...", "accepted": t
     it is resolved (ACCEPTED or DECLINED).
   - If no pending consent record exists, the update is applied immediately (user-initiated).
 """
+from __future__ import annotations
+
 import datetime
 import json
 import logging
@@ -688,8 +690,13 @@ def _handle_consent(user_id: str, email: str, body: dict) -> dict:
              artifactSizeBytes=artifact_size)
 
         t_job = time.monotonic()
-        iot_job_arn = _create_iot_job(pkg, package_name, version,
-                                       thing_name, device_id, user_id, job_id, expiry_sec)
+        try:
+            iot_job_arn = _create_iot_job(pkg, package_name, version,
+                                           thing_name, device_id, user_id, job_id, expiry_sec)
+        except RuntimeError as exc:
+            _log("error", "key_server_failure_during_consent_accept",
+                 userId=user_id, deviceId=device_id, error=str(exc))
+            return _resp(500, {"error": "Key service unavailable — please try again"})
         job_ms = int((time.monotonic() - t_job) * 1000)
 
         # ── Write results to DynamoDB ─────────────────────────────────────────
@@ -823,8 +830,13 @@ def _handle_consent(user_id: str, email: str, body: dict) -> dict:
          installedVersion=installed_ver, artifactSizeBytes=artifact_size)
 
     t_job = time.monotonic()
-    iot_job_arn = _create_iot_job(pkg, package_name, version,
-                                   thing_name, device_id, user_id, job_id, expiry_sec)
+    try:
+        iot_job_arn = _create_iot_job(pkg, package_name, version,
+                                       thing_name, device_id, user_id, job_id, expiry_sec)
+    except RuntimeError as exc:
+        _log("error", "key_server_failure_during_user_initiated_consent",
+             userId=user_id, deviceId=device_id, error=str(exc))
+        return _resp(500, {"error": "Key service unavailable — please try again"})
     job_ms = int((time.monotonic() - t_job) * 1000)
 
     # ── Write results to DynamoDB ─────────────────────────────────────────────
@@ -915,7 +927,11 @@ def lambda_handler(event, context):
                  userId=user_id)
             return _resp(400, {"error": "Request body too large"})
 
-        body = json.loads(raw_body or "{}")
+        try:
+            body = json.loads(raw_body or "{}")
+        except json.JSONDecodeError:
+            _log("warning", "invalid_json_body", userId=user_id)
+            return _resp(400, {"error": "Invalid JSON body"})
 
         result = _handle_consent(user_id, email, body)
 

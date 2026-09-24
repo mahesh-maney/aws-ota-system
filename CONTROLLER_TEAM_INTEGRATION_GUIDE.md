@@ -11,17 +11,17 @@ before the controller downloads or installs anything.
 ```
 Admin ──► Digilux Cloud: Upload artifact + create deployment
 Digilux Cloud ──► Digilux Cloud: Encrypt (AES-256-GCM) + sign (ECDSA)
+Digilux Cloud ──► Digilux Cloud: Wrap AES data key via Digilux Key Server
 Digilux Cloud ──► Digilux Cloud: Status: AWAITING_CONSENT
 User App ──► Digilux Cloud: POST /consent (accepted: true)
-Digilux Cloud ──► Digilux Cloud: IoT Job created for this device
-Controller ──► Digilux Cloud: GET /device/available-updates
-Digilux Cloud ──► Controller: availableVersion + releaseNotes
-Controller ──► Digilux Cloud: POST /consent (accepted: true)
-Digilux Cloud ──► Controller: downloadUrl + aesKey + aesIv
-Controller ──► Digilux Cloud: Download encrypted artifact
-Controller ──► Controller: Verify GCM tag + SHA256 + ECDSA
+Digilux Cloud ──► Digilux Key Server: Unwrap AES data key
+Digilux Cloud ──► Digilux Cloud: IoT Job created (job doc contains dataKey + presignedUrl)
+Controller ──► AWS IoT Core: Receives job doc via MQTT (presignedUrl + dataKey + iv + sha256)
+Controller ──► Digilux Cloud: Download encrypted artifact via presignedUrl
+Controller ──► Controller: AES-256-GCM decrypt using dataKey + iv
+Controller ──► Controller: Verify SHA256 + ECDSA signature
 Controller ──► Controller: Extract tar, install files by type
-Controller ──► Digilux Cloud: Report IoT Job SUCCESS / FAILED
+Controller ──► AWS IoT Core: Report IoT Job SUCCESS / FAILED
 ```
 
 ---
@@ -63,36 +63,63 @@ Call `GET /api/v1/ota/device/available-updates` periodically. Act on the `otaSta
 Display the update to the user in the app (version number + `releaseNotes`). The user must
 explicitly accept before the agent proceeds. Do not download or install silently.
 
-**Step 3 — Submit consent and receive download URL**
+**Step 3 — Submit consent**
 
-Call `POST /api/v1/ota/my/updates/consent` with `accepted: true`. The response contains the
-presigned S3 `downloadUrl`, the `aesKey` (base64), and the `aesIv` (base64) needed to decrypt
-the artifact. Store these in memory — do not persist to disk.
+Call `POST /api/v1/ota/my/updates/consent` with `accepted: true`. The response is `202` with
+`{jobId, status, message}` — it does **not** contain the download URL or decryption key.
 
-**Step 4 — Download the encrypted artifact**
+Those are delivered by AWS IoT Core in the **IoT Job document** over the device's MQTT connection
+(see Step 4). The key never travels over HTTP — it is embedded in the encrypted MQTT channel only.
 
-HTTP GET the `downloadUrl`. The response body is a binary AES-256-GCM encrypted blob.
-The URL is time-limited — begin the download immediately after Step 3.
+**Step 4 — Receive the IoT Job document via MQTT**
 
-**Step 5 — Verify the artifact**
+AWS IoT Core pushes the job document to the device on the `jobs/notify-next` topic immediately
+after consent. The document contains everything needed to download and decrypt the artifact:
+
+```json
+{
+  "operationType": 1,
+  "packageName":   "HomeAssistantUtility",
+  "version":       "4.5.0",
+  "artifact": {
+    "presignedUrl": "https://digilux-ota-artifacts.s3.amazonaws.com/enc/<uuid>.enc?...",
+    "sha256":       "a3f8c2d1...",
+    "signature":    "<base64 ECDSA signature>",
+    "size":         2097152,
+    "dataKey":      "<base64 AES-256 plaintext key>",
+    "iv":           "<base64 96-bit GCM nonce>"
+  },
+  "mandatory": true,
+  "rollback":  true
+}
+```
+
+Store `dataKey`, `iv`, `sha256`, and `signature` in memory — do not persist to disk or logs.
+
+**Step 5 — Download the encrypted artifact**
+
+HTTP GET the `artifact.presignedUrl` from the job document. The response body is a binary
+AES-256-GCM encrypted blob. The URL is time-limited — begin the download immediately.
+
+**Step 6 — Verify the artifact**
 
 Three checks must all pass (see Verification section for details):
 
-1. AES-256-GCM decrypt using `aesKey` + `aesIv` — GCM tag failure = corrupted download, abort
-2. SHA256 of decrypted bytes must match `sha256` from the consent response
+1. AES-256-GCM decrypt using `dataKey` + `iv` from the job document — GCM tag failure = corrupted download, abort
+2. SHA256 of decrypted bytes must match `sha256` from the job document
 3. ECDSA signature must verify against Digilux's public key
 
-**Step 6 — Extract and verify per-file checksums**
+**Step 7 — Extract and verify per-file checksums**
 
 Extract the tar. Read `manifest.json`. For each file entry verify `sha256` and `size` match the
 extracted file. Any mismatch = abort, do not install partial files.
 
-**Step 7 — Install files by type**
+**Step 8 — Install files by type**
 
 For each file in the manifest, look up `type` in the type table (see Manifest section) to
 determine the install path. Copy the file to that path, replacing the existing one.
 
-**Step 8 — Report result**
+**Step 9 — Report result**
 
 Update the IoT Job status to `SUCCEEDED` or `FAILED` with a reason.
 Update `globalInstalledVersion` on the device record.
@@ -191,21 +218,23 @@ Submit user consent for an update. Call this only after the user has explicitly 
 
 Set `accepted: false` if the user declines — the server records the decline and sends a notification.
 
-**Response 200 (accepted: true)**
+**Response 202 (accepted: true)**
 
 ```json
 {
   "jobId":       "deploy-abc123",
-  "downloadUrl": "https://digilux-ota-artifacts.s3.amazonaws.com/enc/...",
-  "aesKey":      "<base64-encoded AES-256 key>",
-  "aesIv":       "<base64-encoded 96-bit GCM nonce>",
-  "sha256":      "a3f8c2d1...",
-  "signature":   "<base64-encoded ECDSA signature>"
+  "deviceId":    "edb39bba-baf1-4700-968c-a42228e53aa0",
+  "packageName": "HomeAssistantUtility",
+  "version":     "4.5.0",
+  "status":      "QUEUED",
+  "message":     "Update accepted. Your device will download and install the update shortly."
 }
 ```
 
-The `downloadUrl` is time-limited. Begin the download immediately. Store `aesKey`, `aesIv`,
-`sha256`, and `signature` in memory for the verification step.
+The HTTP response does **not** contain the download URL or the decryption key. Those are delivered
+exclusively via the IoT Job document over the device's MQTT connection — see Step 4 above.
+This means an HTTP interceptor cannot obtain the AES key; it travels only over the TLS-encrypted
+MQTT channel.
 
 **Response 200 (accepted: false)**
 
@@ -284,14 +313,14 @@ means the downloaded bytes are discarded.
 
 ### Check 1 — AES-256-GCM decryption
 
-The downloaded blob is AES-256-GCM ciphertext. Use the `aesKey` and `aesIv` from the consent
-response to decrypt.
+The downloaded blob is AES-256-GCM ciphertext. Use `dataKey` and `iv` from the IoT Job document
+(`artifact.dataKey` and `artifact.iv`) to decrypt.
 
 ```python
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
-aes_key   = base64.b64decode(consent_response["aesKey"])
-aes_iv    = base64.b64decode(consent_response["aesIv"])
+aes_key   = base64.b64decode(job_doc["artifact"]["dataKey"])
+aes_iv    = base64.b64decode(job_doc["artifact"]["iv"])
 aesgcm    = AESGCM(aes_key)
 plaintext = aesgcm.decrypt(aes_iv, ciphertext, None)  # raises if GCM tag fails
 ```
@@ -303,13 +332,13 @@ truncated or corrupted downloads. No separate length check is needed.
 ### Check 2 — SHA256 integrity
 
 After decryption, compute SHA256 of the plaintext bytes and compare against `sha256` from the
-consent response.
+IoT Job document (`artifact.sha256`).
 
 ```python
 import hashlib
 
 computed = hashlib.sha256(plaintext).hexdigest()
-assert computed == consent_response["sha256"], "SHA256 mismatch — artifact corrupted"
+assert computed == job_doc["artifact"]["sha256"], "SHA256 mismatch — artifact corrupted"
 ```
 
 ### Check 3 — ECDSA signature
@@ -521,8 +550,9 @@ curl -X DELETE https://iot.digilux.co.in/smarthome/api/v1/ota/dev/simulate-job \
 |---|---|---|---|---|
 | 1 | Poll for updates | `GET` | `/ota/device/available-updates` | Periodic (every N minutes) |
 | 2 | Submit consent | `POST` | `/ota/my/updates/consent` | User accepts in app |
-| 3 | Download artifact | `GET` | `<downloadUrl from step 2>` | Immediately after step 2 |
-| 4 | Report result | IoT Job | — | After install succeeds or fails |
+| 3 | Receive job doc | MQTT | `jobs/notify-next` | IoT Core pushes after consent |
+| 4 | Download artifact | `GET` | `artifact.presignedUrl` from job doc | Immediately after step 3 |
+| 5 | Report result | IoT Job | — | After install succeeds or fails |
 
 **Consent request body**
 

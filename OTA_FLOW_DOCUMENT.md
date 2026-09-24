@@ -1,7 +1,7 @@
 # Digilux OTA System — Flow Document
 
-**Version:** 1.5
-**Date:** 2026-08-28
+**Version:** 1.7
+**Date:** 2026-09-24
 **Audience:** Engineering, Integration, QA Teams
 
 This document describes all key flows in the Digilux OTA update system — from package upload through to device installation and failure recovery. Each flow shows the components involved, the sequence of operations, and the MQTT topics or API calls used.
@@ -173,9 +173,9 @@ S3                  artifact_processor Lambda    Secrets Manager    DynamoDB (pa
 6. **Security check 2 — Checksum validation:** If `expectedChecksum` was stored, compares computed SHA256 against it. Mismatch = corrupted/tampered binary → quarantine
 7. **Manifest enrichment:** Lambda opens the tar, validates `manifest.json` structure, computes SHA256 + size for each file listed in `files[]`, injects these into the manifest entries, then repacks the tar. The outer SHA256 is recomputed over the enriched tar. Quarantines if: manifest.json absent, required fields missing, a listed file is absent from the tar, or a `files[]` entry is not a JSON object. Unknown `type` values warn but do not abort.
 8. Lambda signs the enriched tar's SHA256 hex string with ECDSA → base64 signature
-9. Lambda AES-256-GCM encrypts the enriched tar; wraps the AES key with a master key from Secrets Manager
+9. Lambda AES-256-GCM encrypts the enriched tar with a freshly generated per-artifact AES-256 data key; calls **Digilux Key Server** (`POST /api/v1/ota/keys/wrap`) to wrap the data key — the master key never enters the customer AWS account
 10. Lambda uploads encrypted artifact + signature to S3 at opaque UUID keys (`enc/<uuid>.enc`, `sig/<uuid>.sig`); deletes the original plaintext tar
-11. Lambda updates the DynamoDB record: `status = ACTIVE`, writes `sha256`, `signature`, `encS3Key`, `sigS3Key`, `aesKeyEnc`, `aesIv`, `masterIv`; **removes** `uploadToken` and `expectedChecksum`
+11. Lambda updates the DynamoDB record: `status = ACTIVE`, writes `sha256`, `signature`, `encS3Key`, `sigS3Key`, `wrappedDataKey`, `aesIv`; **removes** `uploadToken` and `expectedChecksum`
 12. Lambda emits `MANIFEST_ENRICHED` + `PACKAGE_REGISTERED_ACTIVE` audit logs
 11. **Semver-aware auto-supersede:** Lambda queries all ACTIVE versions of the same `packageName + releaseType`. Any version with a **lower semver** is set to `SUPERSEDED` (with `supersededBy = currentVersion`). Versions with equal or higher semver are left untouched — this prevents a late-uploaded older version from wiping a live release.
 
@@ -512,27 +512,28 @@ Controller (OTA Agent)    IoT Core (Jobs)    status_handler Lambda    DynamoDB (
 
 ### Step-by-step
 
-1. IoT Core delivers the job document to the device via `jobs/notify-next` MQTT topic
+1. IoT Core delivers the job document to the device via `jobs/notify-next` MQTT topic. The document includes `artifact.presignedUrl`, `artifact.dataKey` (plaintext AES-256 key), `artifact.iv` (GCM nonce), `artifact.sha256`, and `artifact.signature`
 2. Agent reports `IN_PROGRESS (5%)` — "Starting download"
-3. **Download:** Agent downloads artifact from pre-signed S3 URL via HTTPS. Uses `.tmp` extension during download
-4. **Verify SHA256:** Agent computes SHA256 of downloaded file — aborts if mismatch
-5. **Verify ECDSA:** Agent verifies ECDSA P-256 signature using the public key at `/etc/digilux/ota-agent.pub` — aborts if invalid
-6. Agent reports `IN_PROGRESS (20%)` — "Running handler"
-7. **Handler runs** (progress mapped 20–95%):
+3. **Download:** Agent downloads artifact from `artifact.presignedUrl` via HTTPS. Uses `.tmp` extension during download
+4. **Decrypt:** Agent AES-256-GCM decrypts the downloaded bytes using `artifact.dataKey` + `artifact.iv` — aborts immediately if GCM tag check fails (corrupted/truncated download)
+5. **Verify SHA256:** Agent computes SHA256 of decrypted plaintext — aborts if mismatch against `artifact.sha256`
+6. **Verify ECDSA:** Agent verifies ECDSA P-256 signature using the public key at `/etc/digilux/ota-agent.pub` — aborts if invalid
+7. Agent reports `IN_PROGRESS (20%)` — "Running handler"
+8. **Handler runs** (progress mapped 20–95%):
    - Backs up current installation (up to 3 rolling backups kept)
    - Stops the running service
    - Extracts and installs the new artifact
    - Runs health check
    - Restarts service
-8. Agent saves new installed version to disk (`/var/lib/digilux/ota/installed_versions.json`)
-9. Agent publishes `SUCCEEDED (100%)` to both `$aws/things/{thing}/jobs/{jobId}/update` and `iot/device/{thing}/ota/status`
-10. IoT Rule `digilux_ota_status_ingest` fires → `status_handler` Lambda:
+9. Agent saves new installed version to disk (`/var/lib/digilux/ota/installed_versions.json`)
+10. Agent publishes `SUCCEEDED (100%)` to both `$aws/things/{thing}/jobs/{jobId}/update` and `iot/device/{thing}/ota/status`
+11. IoT Rule `digilux_ota_status_ingest` fires → `status_handler` Lambda:
     - Updates job status to `SUCCEEDED` in `digilux_ota_jobs`
     - Updates `installedVersions` in `digilux_device_data`
     - Clears `pendingJobId`
     - Emits `DEVICE_UPDATE_SUCCEEDED` audit log
-11. Agent updates Device Shadow with new versions
-12. Agent requests next pending job
+12. Agent updates Device Shadow with new versions
+13. Agent requests next pending job
 
 ---
 
@@ -1109,3 +1110,4 @@ Key: `packageName` (hash) + `version` (range)
 | `1.4` | 2026-08-24 | S3 key structure change: artifacts now stored under `Network_controller_firmware/{deviceType}/{version}/{fileName}`; `artifact_processor` detects old vs new key format transparently; `job_create` device lookup migrated from retired `digilux_device_inventory` to `digilux_device_data` (composite key query by `deviceId`); `operationType` integers documented (1–5); new device type `Network_controller_zigbee_stack_firmware` = `operationType 5` |
 | `1.5` | 2026-08-28 | Job lifecycle management: new Flow 14 (14a staleness check, 14b IoT lifecycle event sync, 14c auto-cancel on recall); new Lambda `digilux_ota_job_sync`; IoT Rule `digilux_ota_job_lifecycle_sync`; EventBridge rule (rate: 1 day); `thingName` removed from `digilux_ota_beta_users` — `job_create` now queries `digilux_device_data` fresh at BETA deployment time |
 | `1.6` | 2026-09-23 | Manifest enrichment in `artifact_processor`: tar validated, each `files[]` entry enriched with computed `sha256` + `size` before signing; enriched tar is repacked and its SHA256 recomputed as the canonical artifact hash; `MANIFEST_ENRICHED` audit event emitted; consent-gated OTA deployment flow (admin deploys → `AWAITING_CONSENT` → user consents → IoT Job created per device); `check_updates` returns `otaStatus=JOB_ACTIVE` with `activeJob` block when a job is pending/running/failed |
+| `1.7` | 2026-09-24 | Key server envelope encryption: `artifact_processor` wraps per-artifact AES data key via Digilux Key Server (`POST /api/v1/ota/keys/wrap`) — master key never enters customer AWS account; `wrappedDataKey` stored in DynamoDB instead of `aesKeyEnc`/`masterIv`; `user_consent` unwraps on consent (`POST /api/v1/ota/keys/unwrap`) and injects plaintext `dataKey` + `iv` into IoT Job document; consent HTTP response no longer returns `downloadUrl`/`aesKey` — device receives those exclusively via MQTT job doc; structured JSON logging (`_log`/`_audit`) added to all 4 OTA Lambdas including `dev_simulate_job` |

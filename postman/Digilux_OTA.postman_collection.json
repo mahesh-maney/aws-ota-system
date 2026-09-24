@@ -1813,6 +1813,120 @@
       ]
     },
     {
+      "name": "Dev / Simulate Job",
+      "description": "DEV/TEST ONLY \u2014 bypasses upload and consent pipeline. For controller team integration testing.",
+      "item": [
+        {
+          "name": "Create Simulate Job (POST)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{user_token}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/ota/dev/simulate-job",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "ota",
+                "dev",
+                "simulate-job"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"deviceId\": \"{{device_id}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "description": "Creates an IoT Job directly for a device without going through the admin upload or consent flow. Job ID will start with 'digilux-ota-dev-'. The response contains a presignedUrl you can use to download the encrypted artifact directly (no consent needed).\n\nOptionally pin a specific version:\n  { \"deviceId\": \"...\", \"version\": \"4.6.0\" }"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "var body = pm.response.json();",
+                  "if (body.jobId) { pm.environment.set('job_id', body.jobId); }",
+                  "pm.test('Status 201', () => pm.response.to.have.status(201));",
+                  "pm.test('jobId starts with digilux-ota-dev-', () => {",
+                  "  pm.expect(body.jobId).to.match(/^digilux-ota-dev-/);",
+                  "});"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ]
+        },
+        {
+          "name": "Cancel Simulate Job (DELETE)",
+          "request": {
+            "method": "DELETE",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Bearer {{user_token}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/v1/ota/dev/simulate-job",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "ota",
+                "dev",
+                "simulate-job"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"deviceId\": \"{{device_id}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "description": "Cancels the active dev simulate job on a device and clears pendingJobId so the device is ready for the next test run.\n\nOnly cancels jobs with 'digilux-ota-dev-' prefix. Production jobs are protected."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "pm.test('cancelled: true', () => {",
+                  "  pm.expect(pm.response.json().cancelled).to.be.true;",
+                  "});"
+                ],
+                "type": "text/javascript"
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
       "name": "End User Updates",
       "description": "User-initiated OTA update flow for the Flutter (homeowner) app.\n\n**Auth:** `user_token` \u2014 regular Cognito user, NO admin group required.\n\n**Two available flows:**\n\n1. **Consent Flow** \u2014 Creates an IoT Job; device polls AWS IoT for the job and downloads via HTTPS. Best for reliable, trackable updates.\n   - Check \u2192 Consent \u2192 Poll Status\n\n2. **App-Mediated Flow** \u2014 No IoT Job; Lambda returns the download URL to the app AND publishes it to the device over MQTT simultaneously. Lighter weight.\n   - Check \u2192 Get Download Link\n\n**Security:** Users can only see and update devices they own (verified via `digilux_device_data` `userId-index` GSI).",
       "auth": {
@@ -1958,18 +2072,11 @@
               "listen": "test",
               "script": {
                 "exec": [
-                  "const res = pm.response.json();",
-                  "if (res.jobId) {",
-                  "    pm.collectionVariables.set('job_id', res.jobId);",
-                  "    console.log('job_id saved:', res.jobId);",
-                  "}",
-                  "if (res.consentId) {",
-                  "    pm.collectionVariables.set('consent_id', res.consentId);",
-                  "    console.log('consent_id saved:', res.consentId);",
-                  "}",
-                  "pm.test('Status is 202 Accepted', () => pm.response.to.have.status(202));",
-                  "pm.test('jobId present', () => pm.expect(res.jobId).to.be.a('string').and.not.empty);",
-                  "pm.test('status is QUEUED', () => pm.expect(res.status).to.eql('QUEUED'));"
+                  "var body = pm.response.json();",
+                  "if (body.jobId) { pm.environment.set('job_id', body.jobId); }",
+                  "pm.test('Status 202', () => pm.response.to.have.status(202));",
+                  "pm.test('Has jobId', () => pm.expect(body.jobId).to.be.a('string'));",
+                  "// Note: downloadUrl and dataKey are in the IoT Job document (MQTT), not here"
                 ],
                 "type": "text/javascript"
               }
@@ -1990,7 +2097,7 @@
             ],
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"deviceId\": \"{{device_id}}\",\n  \"packageName\": \"{{package_name}}\",\n  \"version\": \"{{package_version}}\"\n}",
+              "raw": "{\n  \"deviceId\": \"{{device_id}}\",\n  \"packageName\": \"{{package_name}}\",\n  \"version\": \"{{package_version}}\",\n  \"accepted\": true\n}",
               "options": {
                 "raw": {
                   "language": "json"
@@ -2011,7 +2118,7 @@
                 "consent"
               ]
             },
-            "description": "Records the user's explicit consent and triggers the OTA update on their device via an AWS IoT Job.\n\n**Server-side security checks (in order):**\n1. Valid Cognito JWT with `sub` claim\n2. `deviceId` UUID format validation\n3. Device ownership \u2014 must be registered under this `userId` in `digilux_device_data`\n4. Package must exist and be `ACTIVE`\n5. Requested version must be strictly newer than the installed version\n6. No update already in progress (`pendingJobId` must be null)\n7. Rate limit \u2014 max 1 consent per device per 5 minutes\n\nOn success, an AWS IoT Job is created and the device downloads the binary via HTTPS from S3.\n\n`job_id` and `consent_id` are auto-saved by the test script."
+            "description": "Submit user consent. Body must include 'accepted: true' (or false to decline).\n\nResponse 202 (accepted):\n  { jobId, deviceId, packageName, version, status, message }\n\nThe download URL and decryption key (dataKey + iv) are NOT in this response.\nThey are delivered by AWS IoT Core in the IoT Job document via MQTT."
           },
           "response": [
             {
@@ -2468,12 +2575,11 @@
                   "listen": "test",
                   "script": {
                     "exec": [
-                      "const res = pm.response.json();",
-                      "if (res.jobId) pm.collectionVariables.set('job_id', res.jobId);",
-                      "if (res.consentId) pm.collectionVariables.set('consent_id', res.consentId);",
-                      "pm.test('Consent accepted (202)', () => pm.response.to.have.status(202));",
-                      "pm.test('Status is QUEUED', () => pm.expect(res.status).to.eql('QUEUED'));",
-                      "console.log('job_id:', res.jobId, '| consent_id:', res.consentId);"
+                      "var body = pm.response.json();",
+                      "if (body.jobId) { pm.environment.set('job_id', body.jobId); }",
+                      "pm.test('Status 202', () => pm.response.to.have.status(202));",
+                      "pm.test('Has jobId', () => pm.expect(body.jobId).to.be.a('string'));",
+                      "// Note: downloadUrl and dataKey are in the IoT Job document (MQTT), not here"
                     ],
                     "type": "text/javascript"
                   }
@@ -2494,7 +2600,7 @@
                 ],
                 "body": {
                   "mode": "raw",
-                  "raw": "{\n  \"deviceId\": \"{{device_id}}\",\n  \"packageName\": \"{{package_name}}\",\n  \"version\": \"{{package_version}}\"\n}",
+                  "raw": "{\n  \"deviceId\": \"{{device_id}}\",\n  \"packageName\": \"{{package_name}}\",\n  \"version\": \"{{package_version}}\",\n  \"accepted\": true\n}",
                   "options": {
                     "raw": {
                       "language": "json"
@@ -2514,7 +2620,8 @@
                     "updates",
                     "consent"
                   ]
-                }
+                },
+                "description": "Submit user consent. Body must include 'accepted: true' (or false to decline).\n\nResponse 202 (accepted):\n  { jobId, deviceId, packageName, version, status, message }\n\nThe download URL and decryption key (dataKey + iv) are NOT in this response.\nThey are delivered by AWS IoT Core in the IoT Job document via MQTT."
               },
               "response": []
             },

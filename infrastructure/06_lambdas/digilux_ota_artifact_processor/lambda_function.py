@@ -25,6 +25,8 @@ S3 key structures:
   New (2026-08-24+): Network_controller_firmware/{deviceType}/{version}/{fileName}
   Old (legacy):      {deviceType}/{packageName}/{version}/{fileName}
 """
+from __future__ import annotations
+
 import base64
 import datetime
 import hashlib
