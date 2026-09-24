@@ -1922,6 +1922,58 @@
                 "type": "text/javascript"
               }
             }
+          ],
+          "response": [
+            {
+              "name": "200 OK \u2014 Job cancelled",
+              "originalRequest": {
+                "method": "DELETE",
+                "header": [
+                  {
+                    "key": "Authorization",
+                    "value": "Bearer {{user_token}}"
+                  },
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "url": {
+                  "raw": "{{base_url}}/api/v1/ota/dev/simulate-job",
+                  "host": [
+                    "{{base_url}}"
+                  ],
+                  "path": [
+                    "api",
+                    "v1",
+                    "ota",
+                    "dev",
+                    "simulate-job"
+                  ]
+                },
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"deviceId\": \"{{device_id}}\"\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                },
+                "description": "Cancels the active dev simulate job on a device and clears pendingJobId so the device is ready for the next test run.\n\nOnly cancels jobs with 'digilux-ota-dev-' prefix. Production jobs are protected."
+              },
+              "status": "OK",
+              "code": 200,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "cookie": [],
+              "body": "{\n  \"cancelled\": true,\n  \"jobId\": \"digilux-ota-dev-HomeAssistantUtility-4-6-0-1790186304\",\n  \"deviceId\": \"{{device_id}}\",\n  \"message\": \"IoT Job digilux-ota-dev-... cancelled and device reset\"\n}"
+            }
           ]
         }
       ]
@@ -2062,6 +2114,46 @@
                   "raw": "{{base_url}}/api/v1/ota/device/available-updates"
                 }
               }
+            },
+            {
+              "name": "200 OK \u2014 Job active (in progress)",
+              "originalRequest": {
+                "method": "GET",
+                "url": {
+                  "raw": "{{base_url}}/api/v1/ota/device/available-updates"
+                }
+              },
+              "status": "OK",
+              "code": 200,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "cookie": [],
+              "body": "{\n  \"devices\": [\n    {\n      \"deviceId\": \"{{device_id}}\",\n      \"otaStatus\": \"JOB_ACTIVE\",\n      \"package\": \"HomeAssistantUtility\",\n      \"installedVersion\": \"4.4.0\",\n      \"activeJob\": {\n        \"jobId\": \"digilux-ota-HomeAssistantUtility-4-5-0-1790146510\",\n        \"status\": \"IN_PROGRESS\",\n        \"version\": \"4.5.0\",\n        \"message\": \"Your Firmware update ver 4.5.0 is in progress, please check after some time for status. Note: Please ensure the controller is Powered on.\"\n      }\n    }\n  ]\n}"
+            },
+            {
+              "name": "200 OK \u2014 Failed last job + new update available",
+              "originalRequest": {
+                "method": "GET",
+                "url": {
+                  "raw": "{{base_url}}/api/v1/ota/device/available-updates"
+                }
+              },
+              "status": "OK",
+              "code": 200,
+              "_postman_previewlanguage": "json",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "cookie": [],
+              "body": "{\n  \"devices\": [\n    {\n      \"deviceId\": \"{{device_id}}\",\n      \"otaStatus\": \"REGISTERED\",\n      \"package\": \"HomeAssistantUtility\",\n      \"installedVersion\": \"4.4.0\",\n      \"availableVersion\": \"4.7.0\",\n      \"releaseNotes\": \"Critical security fix.\",\n      \"lastFailedJob\": {\n        \"jobId\": \"digilux-ota-HomeAssistantUtility-4-6-0-1790183792\",\n        \"status\": \"FAILED\",\n        \"version\": \"4.6.0\",\n        \"message\": \"Your last firmware ver 4.6.0 update failed. Please contact support.\"\n      }\n    }\n  ]\n}"
             }
           ]
         },
@@ -2131,7 +2223,7 @@
                   "value": "application/json"
                 }
               ],
-              "body": "{\n  \"consentId\": \"a1b2c3d4-e5f6-7890-abcd-ef1234567890\",\n  \"jobId\": \"digilux-ota-controller-app-4-0-0-1785475706\",\n  \"deviceId\": \"edb39bba-baf1-4700-968c-a42228e53aa0\",\n  \"packageName\": \"controller-app\",\n  \"version\": \"4.0.0\",\n  \"status\": \"QUEUED\",\n  \"message\": \"Update accepted. Your device will download and install the update shortly. Use the status endpoint to track progress.\"\n}",
+              "body": "{\n  \"jobId\": \"digilux-ota-controller-app-4-0-0-1785475706\",\n  \"deviceId\": \"edb39bba-baf1-4700-968c-a42228e53aa0\",\n  \"packageName\": \"controller-app\",\n  \"version\": \"4.0.0\",\n  \"status\": \"QUEUED\",\n  \"message\": \"Update accepted. Your device will download and install the update shortly. Use the status endpoint to track progress.\"\n}",
               "originalRequest": {
                 "method": "POST",
                 "url": {

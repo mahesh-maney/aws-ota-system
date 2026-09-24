@@ -53,10 +53,11 @@ Each step is a hard gate — a failure at any step means abort and report.
 
 Call `GET /api/v1/ota/device/available-updates` periodically. Act on the `otaStatus` of each device entry:
 
-- `REGISTERED` with `availableVersion` newer than `installedVersion` → proceed to Step 2.
-- `JOB_ACTIVE` → a firmware job is already running or has failed. Display `activeJob.message` to the user. No new consent or download needed.
+- `REGISTERED` with `availableVersion` → a newer version is available. Proceed to Step 2.
+- `REGISTERED` with `availableVersion` **and** `lastFailedJob` → the previous job failed but a newer version is now available. Show `lastFailedJob.message` to the user alongside the new version. Prompt the user to accept again — submit a fresh consent as normal.
+- `JOB_ACTIVE` → a job is actively running (AWAITING_CONSENT, QUEUED, or IN_PROGRESS). Display `activeJob.message`. Do not submit a new consent while this is active.
 - `NOT_REGISTERED` → OTA agent not yet initialised. No action.
-- Device absent from the `devices` array, or present with no `availableVersion` and no `activeJob` → up to date.
+- Device absent from `devices`, or present with no `availableVersion` and no `activeJob` → up to date.
 
 **Step 2 — Notify the user**
 
@@ -155,7 +156,34 @@ Returns available updates for all devices owned by the authenticated user.
 }
 ```
 
-**Response 200 — job already active**
+**Response 200 — update available after a failed previous attempt**
+
+When the device's last job FAILED but a newer (or same) version is still available, both
+`availableVersion` and `lastFailedJob` are present. Show the failure context to the user
+alongside the new update offer — no special handling required; submit consent as normal.
+
+```json
+{
+  "devices": [
+    {
+      "deviceId": "edb39bba-baf1-4700-968c-a42228e53aa0",
+      "otaStatus": "REGISTERED",
+      "package": "HomeAssistantUtility",
+      "installedVersion": "4.4.0",
+      "availableVersion": "4.7.0",
+      "releaseNotes": "Critical security fix.",
+      "lastFailedJob": {
+        "jobId": "digilux-ota-HomeAssistantUtility-4-6-0-1790183792",
+        "status": "FAILED",
+        "version": "4.6.0",
+        "message": "Your last firmware ver 4.6.0 update failed. Please contact support."
+      }
+    }
+  ]
+}
+```
+
+**Response 200 — job already active (in-progress)**
 
 ```json
 {
@@ -180,8 +208,8 @@ Returns available updates for all devices owned by the authenticated user.
 
 | Value | Meaning | Action |
 |---|---|---|
-| `REGISTERED` | Update available | Notify user, proceed to consent |
-| `JOB_ACTIVE` | Job running or failed | Display `activeJob.message`, wait |
+| `REGISTERED` | Update available (optionally with `lastFailedJob`) | Notify user, proceed to consent |
+| `JOB_ACTIVE` | Job actively running (AWAITING_CONSENT / QUEUED / IN_PROGRESS) | Display `activeJob.message`, wait |
 | `NOT_REGISTERED` | OTA agent not initialised | No action |
 
 **`activeJob` fields** (present only when `otaStatus` is `JOB_ACTIVE`)
@@ -189,15 +217,24 @@ Returns available updates for all devices owned by the authenticated user.
 | Field | Type | Description |
 |---|---|---|
 | `jobId` | string | IoT Job identifier |
-| `status` | string | `AWAITING_CONSENT` \| `QUEUED` \| `IN_PROGRESS` \| `FAILED` |
+| `status` | string | `AWAITING_CONSENT` \| `QUEUED` \| `IN_PROGRESS` |
 | `version` | string | Firmware version being applied |
 | `message` | string | User-facing string — display as-is |
 
-`AWAITING_CONSENT`, `QUEUED`, and `IN_PROGRESS` all produce the in-progress message.
-`FAILED` produces the failure message. When the job reaches `SUCCEEDED`, `pendingJobId` is
-cleared and the endpoint returns to normal update-check behaviour.
+> `activeJob` is only produced for actively running jobs. A FAILED job falls through —
+> the device receives `availableVersion` (not `JOB_ACTIVE`) so the user can accept again.
 
-> `availableVersion` and `activeJob` are mutually exclusive in the same device entry.
+**`lastFailedJob` fields** (present alongside `availableVersion` when the previous job FAILED)
+
+| Field | Type | Description |
+|---|---|---|
+| `jobId` | string | ID of the last failed IoT Job |
+| `status` | string | Always `FAILED` |
+| `version` | string | Version of the firmware that failed |
+| `message` | string | User-facing failure message — display to inform the user |
+
+> `availableVersion` and `activeJob` are mutually exclusive.
+> `availableVersion` and `lastFailedJob` can appear together — show both to the user.
 
 ---
 
@@ -467,10 +504,13 @@ If `version` is omitted the latest ACTIVE package is used.
 }
 ```
 
-The `presignedUrl` in the response is the encrypted artifact download URL —
-use it directly without calling `/consent`. The IoT Job document delivered
-to the device contains the same URL plus `sha256`, `signature`, and `size`
-fields needed for verification (identical structure to production jobs).
+The IoT Job document delivered to the device via MQTT is **identical in structure to
+production jobs** — it contains `presignedUrl`, `sha256`, `signature`, `size`,
+`dataKey`, and `iv`. Use it to exercise the complete download → decrypt → verify →
+install pipeline without any code changes for production.
+
+The `presignedUrl` in the HTTP response is included for convenience (e.g. manual testing)
+but the controller should always read the URL from the job document, not the HTTP response.
 
 **Error responses**
 
@@ -485,8 +525,8 @@ fields needed for verification (identical structure to production jobs).
 
 ### DELETE /ota/dev/simulate-job
 
-Cancels the active dev simulate job on a device and clears `pendingJobId` so
-the device is immediately ready for the next test run.
+Cancels whatever job is currently pending on the device (dev or production) and clears
+`pendingJobId`, making the device immediately ready for the next test run.
 
 **Request body**
 
@@ -501,7 +541,7 @@ the device is immediately ready for the next test run.
   "cancelled": true,
   "jobId":     "digilux-ota-dev-HomeAssistantUtility-4-6-0-1790186304",
   "deviceId":  "edb39bba-baf1-4700-968c-a42228e53aa0",
-  "message":   "[DEV] IoT Job digilux-ota-dev-... cancelled and device reset"
+  "message":   "IoT Job digilux-ota-dev-... cancelled and device reset"
 }
 ```
 
@@ -509,11 +549,7 @@ the device is immediately ready for the next test run.
 
 | Code | Reason |
 |---|---|
-| `404` | Device not found, or no active job on this device |
-| `409` | Active job is a production OTA job — use the normal OTA flow to handle it |
-
-> Only jobs with the `digilux-ota-dev-` prefix can be cancelled via this endpoint.
-> Production jobs are protected.
+| `404` | Device not found, or no job currently set on this device |
 
 ---
 
