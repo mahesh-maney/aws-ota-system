@@ -162,7 +162,7 @@ def _presign(enc_key: str, expiry_sec: int) -> str:
 # ── cancel handler ────────────────────────────────────────────────────────────
 
 def _handle_cancel(device_id: str) -> dict:
-    """DELETE — cancel the active dev simulate job for a device."""
+    """DELETE — cancel whatever job is currently pending on the device."""
     _log("info", "cancel_request", deviceId=device_id)
     dev = _get_device(device_id)
     if not dev:
@@ -174,34 +174,25 @@ def _handle_cancel(device_id: str) -> dict:
         _log("warning", "cancel_no_pending_job", deviceId=device_id)
         return _resp(404, {"error": "No active job on this device"})
 
-    if not job_id.startswith("digilux-ota-dev-"):
-        _log("warning", "cancel_not_dev_job",
-             deviceId=device_id, jobId=job_id,
-             detail="Active job is not a dev/simulate job — skipping cancel")
-        return _resp(409, {
-            "error": "Active job is not a dev/simulate job — cancel it through the normal OTA flow",
-            "pendingJobId": job_id,
-        })
-
     # Cancel the IoT Job (force=True handles QUEUED and IN_PROGRESS)
     _log("info", "iot_cancel_start", deviceId=device_id, jobId=job_id)
     try:
         iot.cancel_job(jobId=job_id, force=True)
         _log("info", "iot_cancel_success", deviceId=device_id, jobId=job_id)
-        _audit("DEV_JOB_CANCELLED", ACTOR,
+        _audit("JOB_FORCE_CANCELLED", ACTOR,
                {"deviceId": device_id, "jobId": job_id}, "SUCCESS")
     except iot.exceptions.ResourceNotFoundException:
         # Job already gone from IoT — still clear pendingJobId below
         _log("warning", "iot_cancel_job_already_gone",
              deviceId=device_id, jobId=job_id,
              detail="Job not found in IoT — clearing pendingJobId anyway")
-        _audit("DEV_JOB_CANCEL_ALREADY_GONE", ACTOR,
+        _audit("JOB_FORCE_CANCEL_ALREADY_GONE", ACTOR,
                {"deviceId": device_id, "jobId": job_id}, "SUCCESS")
     except Exception as exc:
         _log("error", "iot_cancel_failed",
              deviceId=device_id, jobId=job_id,
              error=str(exc), excType=type(exc).__name__)
-        _audit("DEV_JOB_CANCEL_FAILED", ACTOR,
+        _audit("JOB_FORCE_CANCEL_FAILED", ACTOR,
                {"deviceId": device_id, "jobId": job_id}, "FAILURE",
                error=str(exc))
         return _resp(500, {"error": f"Failed to cancel IoT Job: {exc}"})
@@ -219,7 +210,7 @@ def _handle_cancel(device_id: str) -> dict:
         "cancelled": True,
         "jobId":     job_id,
         "deviceId":  device_id,
-        "message":   f"[DEV] IoT Job {job_id} cancelled and device reset",
+        "message":   f"IoT Job {job_id} cancelled and device reset",
     })
 
 
