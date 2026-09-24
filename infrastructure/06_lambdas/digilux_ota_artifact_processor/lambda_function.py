@@ -43,8 +43,10 @@ log.setLevel(os.environ.get("LOG_LEVEL", "INFO"))
 REGION            = os.environ["REGION"]
 PACKAGES_TABLE    = os.environ.get("PACKAGES_TABLE",    "digilux_ota_packages")
 ARTIFACT_BUCKET   = os.environ.get("ARTIFACT_BUCKET",   "digilux-ota-artifacts")
-SIGNING_SECRET    = os.environ.get("SIGNING_SECRET",    "digilux-ota-signing-key")
-MASTER_ENC_SECRET = os.environ.get("MASTER_ENC_SECRET", "digilux-ota-master-encryption-key")
+SIGNING_SECRET     = os.environ.get("SIGNING_SECRET",    "digilux-ota-signing-key")
+MASTER_ENC_SECRET  = os.environ.get("MASTER_ENC_SECRET", "digilux-ota-master-encryption-key")
+KEY_SERVER_URL     = os.environ.get("KEY_SERVER_URL",     "")
+KEY_SERVER_API_KEY = os.environ.get("KEY_SERVER_API_KEY", "")
 
 dynamo = boto3.resource("dynamodb", region_name=REGION)
 s3     = boto3.client("s3", region_name=REGION)
@@ -411,17 +413,18 @@ def _process_artifact(bucket: str, s3_key: str, obj_size: int) -> None:
            plaintextBytes=actual_size, ciphertextBytes=encrypted_size,
            encMs=enc_ms)
 
-    # ── 7. Double-encrypt AES key with master key ──────────────────────────────
+    # ── 7. Wrap AES data key via Digilux Key Server ────────────────────────────
     _log("info", "key_wrapping_start",
          packageName=pkg_name, version=version,
-         masterKeySecret=MASTER_ENC_SECRET,
-         detail="Wrapping artifact AES key with master key (defense in depth)")
+         keyServerUrl=KEY_SERVER_URL,
+         detail="Sending data key to Digilux Key Server for envelope encryption")
     t_wrap = time.monotonic()
-    aes_key_enc_b64, master_iv_b64 = _double_encrypt_aes_key(aes_key_bytes)
-    aes_iv_b64 = base64.b64encode(aes_iv_bytes).decode()
-    wrap_ms = int((time.monotonic() - t_wrap) * 1000)
+    wrapped_data_key = _wrap_data_key(aes_key_bytes)
+    aes_iv_b64       = base64.b64encode(aes_iv_bytes).decode()
+    wrap_ms          = int((time.monotonic() - t_wrap) * 1000)
     _log("info", "key_wrapping_complete",
-         packageName=pkg_name, version=version, wrapMs=wrap_ms)
+         packageName=pkg_name, version=version, wrapMs=wrap_ms,
+         wrappedKeyVersion=wrapped_data_key.split(":")[0])
 
     # ── 8. Upload encrypted artifact + signature file to S3 ───────────────────
     enc_key = _enc_s3_key(s3_key)
@@ -479,7 +482,7 @@ def _process_artifact(bucket: str, s3_key: str, obj_size: int) -> None:
                 "SET #st = :active, sha256 = :h, signature = :sig, "
                 "artifactSize = :sz, processedAt = :ts, "
                 "encS3Key = :encKey, sigS3Key = :sigKey, "
-                "aesKeyEnc = :keyEnc, aesIv = :iv, masterIv = :miv "
+                "wrappedDataKey = :wdk, aesIv = :iv "
                 "REMOVE uploadToken, expectedChecksum"
             ),
             ExpressionAttributeNames={"#st": "status"},
@@ -491,9 +494,8 @@ def _process_artifact(bucket: str, s3_key: str, obj_size: int) -> None:
                 ":ts":     now_ms,
                 ":encKey": enc_key,
                 ":sigKey": sig_key,
-                ":keyEnc": aes_key_enc_b64,
+                ":wdk":    wrapped_data_key,
                 ":iv":     aes_iv_b64,
-                ":miv":    master_iv_b64,
             },
             ConditionExpression="attribute_exists(packageName)",
         )
@@ -834,20 +836,50 @@ def _encrypt_artifact(raw_bytes: bytes) -> tuple:
     return aes_key, aes_iv, encrypted
 
 
-def _double_encrypt_aes_key(aes_key: bytes) -> tuple:
-    """Wrap aes_key with the master AES key from Secrets Manager."""
-    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-    _log("debug", "key_wrap_start",
-         masterKeySecret=MASTER_ENC_SECRET,
-         aesKeyBytes=len(aes_key), mode="AES-256-GCM")
-    secret     = sm.get_secret_value(SecretId=MASTER_ENC_SECRET)
-    master_key = base64.b64decode(json.loads(secret["SecretString"])["key"])
-    master_iv  = os.urandom(12)
-    aesgcm     = AESGCM(master_key)
-    enc        = aesgcm.encrypt(master_iv, aes_key, None)
-    _log("debug", "key_wrap_complete",
-         wrappedKeyBytes=len(enc))
-    return base64.b64encode(enc).decode(), base64.b64encode(master_iv).decode()
+def _wrap_data_key(aes_key_bytes: bytes) -> str:
+    """
+    Send the plaintext AES data key to the Digilux Key Server for envelope encryption.
+    Returns a wrapped key string of the form "v1:<base64url>" — safe to store in DynamoDB.
+    The master key never touches this Lambda; only the Key Server holds it.
+    """
+    import urllib.request
+    import urllib.error
+
+    if not KEY_SERVER_URL or not KEY_SERVER_API_KEY:
+        raise RuntimeError(
+            "KEY_SERVER_URL and KEY_SERVER_API_KEY must be set to use the key server"
+        )
+
+    key_b64  = base64.b64encode(aes_key_bytes).decode()
+    payload  = json.dumps({"plaintextKey": key_b64}).encode()
+    req      = urllib.request.Request(
+        f"{KEY_SERVER_URL}/api/v1/ota/keys/wrap",
+        data=payload,
+        headers={
+            "Content-Type":  "application/json",
+            "Authorization": f"Bearer {KEY_SERVER_API_KEY}",
+        },
+        method="POST",
+    )
+    _log("debug", "key_server_wrap_request",
+         url=f"{KEY_SERVER_URL}/api/v1/ota/keys/wrap", keyBytes=len(aes_key_bytes))
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            body = json.loads(resp.read().decode())
+        wrapped = body.get("wrappedKey", "")
+        if not wrapped:
+            raise RuntimeError("Key server /wrap returned empty wrappedKey")
+        _log("debug", "key_server_wrap_success",
+             keyVersion=wrapped.split(":")[0], keyId=body.get("keyId", ""))
+        return wrapped
+    except urllib.error.HTTPError as exc:
+        err_body = exc.read().decode() if exc.fp else ""
+        _log("error", "key_server_wrap_http_error",
+             status=exc.code, reason=str(exc.reason), body=err_body)
+        raise RuntimeError(f"Key server /wrap failed with HTTP {exc.code}: {err_body}") from exc
+    except urllib.error.URLError as exc:
+        _log("error", "key_server_wrap_connection_error", error=str(exc.reason))
+        raise RuntimeError(f"Key server unreachable: {exc.reason}") from exc
 
 
 def _sign(sha256_hex: str) -> str:
