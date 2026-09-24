@@ -258,6 +258,33 @@ def _get_device_item(device_id: str) -> dict | None:
     return items[0]
 
 
+_ACTIVE_JOB_STATUSES = {"AWAITING_CONSENT", "QUEUED", "IN_PROGRESS"}
+
+
+def _is_job_still_active(job_id: str) -> bool:
+    """Return True only if pendingJobId points to a job that is genuinely in-progress."""
+    try:
+        resp = dynamo.Table(OTA_JOBS_TABLE).get_item(Key={"jobId": job_id})
+        job  = resp.get("Item")
+        if job:
+            return job.get("status") in _ACTIVE_JOB_STATUSES
+        # Not in OTA_JOBS_TABLE — treat as done
+        return False
+    except Exception:
+        return False
+
+
+def _clear_stale_pending_job(device_id: str, mac_address: str, job_id: str) -> None:
+    """Remove a stale pendingJobId from the device record."""
+    _log("info", "clearing_stale_pending_job",
+         deviceId=device_id, jobId=job_id,
+         detail="Previous job is no longer active — cleared automatically")
+    dynamo.Table(DEVICE_DATA_TABLE).update_item(
+        Key={"deviceId": device_id, "macAddress": mac_address},
+        UpdateExpression="REMOVE pendingJobId",
+    )
+
+
 def _get_package(package_name: str, version: str) -> dict | None:
     _log("debug", "package_lookup", packageName=package_name, version=version)
     item = dynamo.Table(PACKAGES_TABLE).get_item(
@@ -667,14 +694,16 @@ def _handle_consent(user_id: str, email: str, body: dict) -> dict:
             return _resp(400, {"error": f"Package {package_name}@{version} is no longer available."})
 
         if dev.get("pendingJobId"):
-            _log("warning", "accept_blocked_pending_job",
-                 userId=user_id, deviceId=device_id, consentId=consent_id,
-                 existingJobId=dev["pendingJobId"],
-                 detail="Another update is already in progress on this device")
-            return _resp(409, {
-                "error": "An update is already in progress on this device.",
-                "pendingJobId": dev["pendingJobId"],
-            })
+            if _is_job_still_active(dev["pendingJobId"]):
+                _log("warning", "accept_blocked_pending_job",
+                     userId=user_id, deviceId=device_id, consentId=consent_id,
+                     existingJobId=dev["pendingJobId"],
+                     detail="Another update is already in progress on this device")
+                return _resp(409, {
+                    "error": "An update is already in progress on this device.",
+                    "pendingJobId": dev["pendingJobId"],
+                })
+            _clear_stale_pending_job(device_id, mac_address, dev["pendingJobId"])
 
         artifact_size = pkg.get("artifactSize", 0)
         if isinstance(artifact_size, Decimal):
@@ -808,13 +837,15 @@ def _handle_consent(user_id: str, email: str, body: dict) -> dict:
         })
 
     if dev.get("pendingJobId"):
-        _log("warning", "user_initiated_blocked_pending_job",
-             userId=user_id, deviceId=device_id,
-             existingJobId=dev["pendingJobId"])
-        return _resp(409, {
-            "error": "An update is already in progress on this device.",
-            "pendingJobId": dev["pendingJobId"],
-        })
+        if _is_job_still_active(dev["pendingJobId"]):
+            _log("warning", "user_initiated_blocked_pending_job",
+                 userId=user_id, deviceId=device_id,
+                 existingJobId=dev["pendingJobId"])
+            return _resp(409, {
+                "error": "An update is already in progress on this device.",
+                "pendingJobId": dev["pendingJobId"],
+            })
+        _clear_stale_pending_job(device_id, mac_address, dev["pendingJobId"])
 
     consent_id    = str(uuid.uuid4())
     job_id        = f"digilux-ota-{package_name}-{version}-{int(time.time())}".replace(".", "-")

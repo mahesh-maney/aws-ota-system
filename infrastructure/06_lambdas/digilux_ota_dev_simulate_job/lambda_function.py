@@ -63,6 +63,7 @@ REGION        = os.environ.get("REGION",           "ap-south-1")
 ACCOUNT_ID    = os.environ.get("ACCOUNT_ID",        "986906626244")
 DEVICE_TABLE  = os.environ.get("DEVICE_DATA_TABLE", "digilux_device_data")
 PACKAGES_TABLE = os.environ.get("PACKAGES_TABLE",   "digilux_ota_packages")
+OTA_JOBS_TABLE = os.environ.get("OTA_JOBS_TABLE",   "digilux_ota_jobs")
 ARTIFACT_BUCKET = os.environ.get("ARTIFACT_BUCKET", "digilux-ota-artifacts")
 IOT_JOB_TIMEOUT_MINUTES = int(os.environ.get("IOT_JOB_TIMEOUT_MINUTES", "1440"))
 
@@ -149,6 +150,27 @@ def _get_latest_active_package(package_name: str, pinned_version: str | None) ->
          packageName=package_name, version=candidates[0].get("version"),
          candidateCount=len(candidates))
     return candidates[0]
+
+
+_ACTIVE_JOB_STATUSES = {"AWAITING_CONSENT", "QUEUED", "IN_PROGRESS"}
+
+
+def _is_job_still_active(job_id: str) -> bool:
+    """Return True only if the job is genuinely in-progress (not FAILED/SUCCEEDED/CANCELLED)."""
+    try:
+        resp = dynamodb.Table(OTA_JOBS_TABLE).get_item(Key={"jobId": job_id})
+        job  = resp.get("Item")
+        if job:
+            return job.get("status") in _ACTIVE_JOB_STATUSES
+    except Exception:
+        pass
+    # Fall back to IoT for dev jobs (may not be in OTA_JOBS_TABLE)
+    try:
+        resp = iot.describe_job(jobId=job_id)
+        iot_status = resp["job"]["status"]
+        return iot_status not in ("COMPLETED", "CANCELED", "DELETION_IN_PROGRESS")
+    except Exception:
+        return False  # Job not found in IoT either → treat as done
 
 
 def _presign(enc_key: str, expiry_sec: int) -> str:
@@ -260,15 +282,24 @@ def lambda_handler(event, context):
              deviceId=device_id, detail="Device not fully registered")
         return _resp(409, {"error": "Device has no package name — device not fully registered"})
 
-    # 2 ── Block if a job is already running
+    # 2 ── Block if a job is already running (skip stale FAILED/SUCCEEDED jobs)
     existing_job = dev.get("pendingJobId")
     if existing_job:
-        _log("warning", "create_already_has_pending_job",
-             deviceId=device_id, existingJobId=existing_job)
-        return _resp(409, {
-            "error": "Device already has an active job. Cancel it first or wait for it to complete.",
-            "pendingJobId": existing_job,
-        })
+        if _is_job_still_active(existing_job):
+            _log("warning", "create_already_has_pending_job",
+                 deviceId=device_id, existingJobId=existing_job)
+            return _resp(409, {
+                "error": "Device already has an active job. Cancel it first or wait for it to complete.",
+                "pendingJobId": existing_job,
+            })
+        # Stale pendingJobId (job is FAILED/SUCCEEDED/CANCELLED) — clear it automatically
+        _log("info", "create_clearing_stale_pending_job",
+             deviceId=device_id, existingJobId=existing_job,
+             detail="Previous job is no longer active — clearing pendingJobId")
+        dynamodb.Table(DEVICE_TABLE).update_item(
+            Key={"deviceId": device_id, "macAddress": dev.get("macAddress", "")},
+            UpdateExpression="REMOVE pendingJobId",
+        )
 
     # 3 ── Package lookup
     pkg = _get_latest_active_package(package_name, pinned_version)
