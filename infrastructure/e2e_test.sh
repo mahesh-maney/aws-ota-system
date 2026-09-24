@@ -772,6 +772,37 @@ print('yes' if 'activeJob' in dev else 'no')
 " 2>/dev/null
 }
 
+# User ID for the T18 test device (demotesthw5@yopmail.com)
+CU_USER_ID="41f35d4a-d0d1-709e-634f-fc6198a3872d"
+
+# Helper: call check_updates — uses PKCE token via real API when available,
+# falls back to Lambda direct invocation (bypasses API Gateway auth).
+cu_call() {
+  if [ -n "${PKCE_TOKEN:-}" ]; then
+    curl -s -X GET "${BASE}/api/v1/ota/device/available-updates" \
+      -H "Authorization: Bearer $PKCE_TOKEN" \
+      -H "Content-Type: application/json"
+  else
+    python3.9 -W ignore -c "
+import boto3, json
+client = boto3.client('lambda', region_name='ap-south-1')
+event = {
+  'httpMethod': 'GET',
+  'path': '/api/v1/ota/device/available-updates',
+  'headers': {},
+  'requestContext': {'authorizer': {'claims': {
+    'sub': '${CU_USER_ID}', 'email': 'demotesthw5@yopmail.com'
+  }}}
+}
+resp = client.invoke(FunctionName='digilux_ota_user_check_updates',
+                     InvocationType='RequestResponse',
+                     Payload=json.dumps(event).encode())
+result = json.loads(resp['Payload'].read())
+print(result.get('body', '{}'))
+" 2>/dev/null
+  fi
+}
+
 # ── Baseline: no pendingJobId → normal response, no activeJob ────────────────
 aws dynamodb update-item \
   --table-name digilux_device_data \
@@ -779,7 +810,7 @@ aws dynamodb update-item \
   --update-expression "REMOVE pendingJobId" \
   --region "$REGION" > /dev/null 2>&1
 
-CU_RESP=$(call GET "/api/v1/ota/my/updates" "" "$NON_ADMIN_TOKEN")
+CU_RESP=$(cu_call)
 CU_OK=$(echo "$CU_RESP" | python3 -c "import json,sys; print('yes' if 'devices' in json.load(sys.stdin) else 'no')" 2>/dev/null)
 [ "$CU_OK" = "yes" ] \
   && _pass "check_updates baseline → 200 with devices array" \
@@ -810,7 +841,7 @@ aws dynamodb update-item \
   --region "$REGION" > /dev/null 2>&1
 
 # ── (+) AWAITING_CONSENT → JOB_ACTIVE + in-progress message ──────────────────
-CU_RESP=$(call GET "/api/v1/ota/my/updates" "" "$NON_ADMIN_TOKEN")
+CU_RESP=$(cu_call)
 
 OTA_STATUS=$(cu_device_field "$CU_RESP" "otaStatus")
 [ "$OTA_STATUS" = "JOB_ACTIVE" ] \
@@ -857,7 +888,7 @@ aws dynamodb update-item \
   --expression-attribute-values "{\":s\":{\"S\":\"QUEUED\"}}" \
   --region "$REGION" > /dev/null 2>&1
 
-CU_RESP=$(call GET "/api/v1/ota/my/updates" "" "$NON_ADMIN_TOKEN")
+CU_RESP=$(cu_call)
 AJ_STATUS=$(cu_activejob_field "$CU_RESP" "status")
 [ "$AJ_STATUS" = "QUEUED" ] \
   && _pass "QUEUED job → activeJob.status=QUEUED" \
@@ -879,7 +910,7 @@ aws dynamodb update-item \
   --expression-attribute-values "{\":s\":{\"S\":\"IN_PROGRESS\"}}" \
   --region "$REGION" > /dev/null 2>&1
 
-CU_RESP=$(call GET "/api/v1/ota/my/updates" "" "$NON_ADMIN_TOKEN")
+CU_RESP=$(cu_call)
 AJ_STATUS=$(cu_activejob_field "$CU_RESP" "status")
 [ "$AJ_STATUS" = "IN_PROGRESS" ] \
   && _pass "IN_PROGRESS job → activeJob.status=IN_PROGRESS" \
@@ -901,7 +932,7 @@ aws dynamodb update-item \
   --expression-attribute-values "{\":s\":{\"S\":\"FAILED\"}}" \
   --region "$REGION" > /dev/null 2>&1
 
-CU_RESP=$(call GET "/api/v1/ota/my/updates" "" "$NON_ADMIN_TOKEN")
+CU_RESP=$(cu_call)
 AJ_STATUS=$(cu_activejob_field "$CU_RESP" "status")
 [ "$AJ_STATUS" = "FAILED" ] \
   && _pass "FAILED job → activeJob.status=FAILED" \
@@ -932,7 +963,7 @@ aws dynamodb update-item \
   --expression-attribute-values "{\":s\":{\"S\":\"SUCCEEDED\"}}" \
   --region "$REGION" > /dev/null 2>&1
 
-CU_RESP=$(call GET "/api/v1/ota/my/updates" "" "$NON_ADMIN_TOKEN")
+CU_RESP=$(cu_call)
 [ "$(cu_has_active_job "$CU_RESP")" = "no" ] \
   && _pass "SUCCEEDED job → no activeJob (falls through to normal update check)" \
   || _fail "SUCCEEDED job unexpectedly returned activeJob block"
@@ -946,7 +977,7 @@ aws dynamodb update-item \
   --expression-attribute-values "{\":jid\":{\"S\":\"${GHOST_JOB_ID}\"}}" \
   --region "$REGION" > /dev/null 2>&1
 
-CU_RESP=$(call GET "/api/v1/ota/my/updates" "" "$NON_ADMIN_TOKEN")
+CU_RESP=$(cu_call)
 CU_OK=$(echo "$CU_RESP" | python3 -c "import json,sys; print('yes' if 'devices' in json.load(sys.stdin) else 'no')" 2>/dev/null)
 [ "$CU_OK" = "yes" ] \
   && _pass "Stale pendingJobId (ghost job record) → 200 graceful fallthrough, no 500" \
@@ -957,13 +988,13 @@ CU_OK=$(echo "$CU_RESP" | python3 -c "import json,sys; print('yes' if 'devices' 
   || _fail "Ghost job unexpectedly produced an activeJob block"
 
 # (-) Unauthenticated request must be rejected
-code=$(http_code GET "/api/v1/ota/my/updates" "" "Bearer invalid.token.here")
+code=$(http_code GET "/api/v1/ota/device/available-updates" "" "Bearer invalid.token.here")
 [ "$code" = "401" ] || [ "$code" = "403" ] \
   && _pass "check_updates rejects invalid token (HTTP $code)" \
   || _fail "check_updates should reject invalid token, got $code"
 
 # (-) Admin token must not work on user endpoint (different Cognito pool)
-code=$(http_code GET "/api/v1/ota/my/updates" "" "$TOKEN")
+code=$(http_code GET "/api/v1/ota/device/available-updates" "" "$TOKEN")
 [ "$code" = "401" ] || [ "$code" = "403" ] \
   && _pass "Admin token rejected on user endpoint GET /my/updates (HTTP $code)" \
   || _warn "Admin token accepted on user endpoint — pool isolation may be misconfigured (HTTP $code)"
@@ -1048,7 +1079,7 @@ t21_call() {
     T21_STATUS=$(echo "$raw" | tail -1)
     T21_BODY=$(echo "$raw" | head -1)
   else
-    t21_call "$body_json"
+    t21_invoke "$T21_USER_ID" "$body_json"
   fi
 }
 # Helper: extract a field from T21_BODY
