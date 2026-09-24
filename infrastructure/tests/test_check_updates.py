@@ -289,6 +289,129 @@ class TestAvailableUpdates:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# FAILED job fall-through + lastFailedJob
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class TestFailedJobBehavior:
+    """FAILED pendingJobId must not block version comparison.
+
+    When a previous job is FAILED:
+      - If a newer version is available → return UPDATE_AVAILABLE with lastFailedJob
+      - If the device is already up to date → return empty (no entry)
+    """
+
+    def _setup_failed_job(self, mock_dynamo, installed="1.0.0", available="2.0.0"):
+        job_id = "digilux-ota-HomeAssistantUtility-1-0-0-1234567890"
+        mock_dynamo[lf.DEVICE_DATA_TABLE].query.return_value = {
+            "Items": [_device(installed=installed, pending_job=job_id)]
+        }
+        mock_dynamo[lf.OTA_JOBS_TABLE].get_item.return_value = {
+            "Item": {
+                "jobId":       job_id,
+                "packageName": PKG_NAME,
+                "version":     installed,
+                "status":      "FAILED",
+            }
+        }
+        mock_dynamo[lf.PACKAGES_TABLE].query.return_value = {
+            "Items": [_package(version=available)] if available else []
+        }
+        return job_id
+
+    def test_failed_job_does_not_return_job_active(self, monkeypatch, mock_dynamo):
+        """A FAILED job must not produce otaStatus=JOB_ACTIVE."""
+        self._setup_failed_job(mock_dynamo)
+        resp = lf.lambda_handler(_event_with_claims(), MockContext())
+        devices = json.loads(resp["body"])["devices"]
+        # Device should appear (update available) but NOT as JOB_ACTIVE
+        assert all(d.get("otaStatus") != "JOB_ACTIVE" for d in devices)
+
+    def test_failed_job_with_newer_version_shows_available_update(self, monkeypatch, mock_dynamo):
+        """FAILED job + newer package → device returned with availableVersion."""
+        self._setup_failed_job(mock_dynamo, installed="1.0.0", available="2.0.0")
+        resp = lf.lambda_handler(_event_with_claims(), MockContext())
+        assert resp["statusCode"] == 200
+        devices = json.loads(resp["body"])["devices"]
+        assert len(devices) == 1
+        assert devices[0]["availableVersion"] == "2.0.0"
+
+    def test_failed_job_response_includes_last_failed_job(self, monkeypatch, mock_dynamo):
+        """FAILED job + newer package → lastFailedJob field present in response."""
+        job_id = self._setup_failed_job(mock_dynamo, installed="1.0.0", available="2.0.0")
+        resp = lf.lambda_handler(_event_with_claims(), MockContext())
+        devices = json.loads(resp["body"])["devices"]
+        assert len(devices) == 1
+        assert "lastFailedJob" in devices[0]
+        lf_job = devices[0]["lastFailedJob"]
+        assert lf_job["jobId"]   == job_id
+        assert lf_job["status"]  == "FAILED"
+        assert lf_job["version"] == "1.0.0"
+        assert "message" in lf_job
+
+    def test_failed_job_last_failed_job_message_not_empty(self, monkeypatch, mock_dynamo):
+        """lastFailedJob.message must be a non-empty string."""
+        self._setup_failed_job(mock_dynamo)
+        resp = lf.lambda_handler(_event_with_claims(), MockContext())
+        devices = json.loads(resp["body"])["devices"]
+        assert devices[0]["lastFailedJob"]["message"]
+
+    def test_failed_job_device_up_to_date_returns_empty(self, monkeypatch, mock_dynamo):
+        """FAILED job + no newer version → device is NOT returned (up to date)."""
+        self._setup_failed_job(mock_dynamo, installed="2.0.0", available="2.0.0")
+        resp = lf.lambda_handler(_event_with_claims(), MockContext())
+        assert resp["statusCode"] == 200
+        devices = json.loads(resp["body"])["devices"]
+        assert len(devices) == 0
+
+    def test_failed_job_no_available_package_returns_empty(self, monkeypatch, mock_dynamo):
+        """FAILED job + no published package at all → device not returned."""
+        self._setup_failed_job(mock_dynamo, installed="1.0.0", available=None)
+        mock_dynamo[lf.PACKAGES_TABLE].query.return_value = {"Items": []}
+        resp = lf.lambda_handler(_event_with_claims(), MockContext())
+        devices = json.loads(resp["body"])["devices"]
+        assert len(devices) == 0
+
+    def test_failed_job_older_available_package_returns_empty(self, monkeypatch, mock_dynamo):
+        """FAILED job + available version older than installed → device not returned."""
+        self._setup_failed_job(mock_dynamo, installed="3.0.0", available="2.0.0")
+        resp = lf.lambda_handler(_event_with_claims(), MockContext())
+        devices = json.loads(resp["body"])["devices"]
+        assert len(devices) == 0
+
+    def test_no_failed_job_no_last_failed_job_field(self, monkeypatch, mock_dynamo):
+        """Normal update (no FAILED pendingJob) must NOT include lastFailedJob field."""
+        mock_dynamo[lf.DEVICE_DATA_TABLE].query.return_value = {
+            "Items": [_device(installed="1.0.0")]  # no pending_job
+        }
+        mock_dynamo[lf.PACKAGES_TABLE].query.return_value = {"Items": [_package(version="2.0.0")]}
+        resp = lf.lambda_handler(_event_with_claims(), MockContext())
+        devices = json.loads(resp["body"])["devices"]
+        assert len(devices) == 1
+        assert "lastFailedJob" not in devices[0]
+
+    def test_in_progress_job_not_affected(self, monkeypatch, mock_dynamo):
+        """IN_PROGRESS job must still return JOB_ACTIVE (regression guard)."""
+        job_id = "digilux-ota-HomeAssistantUtility-2-0-0-9999999999"
+        mock_dynamo[lf.DEVICE_DATA_TABLE].query.return_value = {
+            "Items": [_device(installed="1.0.0", pending_job=job_id)]
+        }
+        mock_dynamo[lf.OTA_JOBS_TABLE].get_item.return_value = {
+            "Item": {
+                "jobId":       job_id,
+                "packageName": PKG_NAME,
+                "version":     "2.0.0",
+                "status":      "IN_PROGRESS",
+            }
+        }
+        resp = lf.lambda_handler(_event_with_claims(), MockContext())
+        devices = json.loads(resp["body"])["devices"]
+        assert len(devices) == 1
+        assert devices[0]["otaStatus"] == "JOB_ACTIVE"
+        assert devices[0]["activeJob"]["status"] == "IN_PROGRESS"
+        assert "lastFailedJob" not in devices[0]
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # lambda_handler auth
 # ═══════════════════════════════════════════════════════════════════════════════
 

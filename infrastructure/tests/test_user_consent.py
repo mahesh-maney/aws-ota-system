@@ -516,8 +516,13 @@ class TestHandleConsent:
     def test_existing_pending_job_returns_409(
         self, monkeypatch, mock_dynamo_tables, mock_iot, mock_s3, mock_unwrap
     ):
+        job_id = "digilux-ota-HomeAssistantUtility-4-5-0-12345"
+        # Make _is_job_still_active return True by providing an IN_PROGRESS job record
+        mock_dynamo_tables[lf.OTA_JOBS_TABLE].get_item.return_value = {
+            "Item": {"jobId": job_id, "status": "IN_PROGRESS"}
+        }
         mock_dynamo_tables[lf.DEVICE_DATA_TABLE].query.return_value = {
-            "Items": [_device(pending_job="digilux-ota-HomeAssistantUtility-4-5-0-12345")]
+            "Items": [_device(pending_job=job_id)]
         }
         resp = lf._handle_consent(USER_ID, "e@t.com", _consent_body())
         assert resp["statusCode"] == 409

@@ -1,5 +1,27 @@
 #!/bin/bash
 # OTA End-to-End Production Test Suite
+#
+# ── TOKEN SETUP (required before running) ────────────────────────────────────
+#
+# /tmp/ota_admin_token.txt   — Admin IdToken (NOT AccessToken) from Cognito pool
+#                              ap-south-1_jUErEu7CL, client 2qmig1uh220ttntbl0gfvcde4f.
+#                              Use `infrastructure/get_admin_token.sh` to generate.
+#                              ⚠ COMMON MISTAKE: AccessToken lacks Cognito authorizer
+#                              support → all admin endpoints return 401.
+#
+# /tmp/ota_nonadmin_token.txt — Any token from a different pool (used to test 401s).
+#                               USER_PASSWORD_AUTH IdToken from app pool works.
+#
+# /tmp/ota_pkce_token.txt    — PKCE AccessToken from app pool ap-south-1_h1o8s7257,
+#                              client q7189jitfkk4ttesepkgls491, with OAuth scopes
+#                              smarthome_server/read + smarthome_server/write.
+#                              Required for T18 (check_updates) and T21 (consent).
+#                              Use `infrastructure/get_pkce_token.py` to generate.
+#                              Optional: T18/T21 fall back to Lambda direct invoke.
+#
+# /tmp/ota_base_url.txt      — Base URL for admin API, e.g. https://iot.digilux.co.in/smarthome
+#
+# ─────────────────────────────────────────────────────────────────────────────
 set -uo pipefail
 
 TOKEN=$(cat /tmp/ota_admin_token.txt)
@@ -772,6 +794,29 @@ print('yes' if 'activeJob' in dev else 'no')
 " 2>/dev/null
 }
 
+# Helper: extract a field from lastFailedJob inside the device entry
+cu_lastfailedjob_field() {
+  local resp="$1" field="$2"
+  echo "$resp" | python3 -c "
+import json,sys
+devs = json.load(sys.stdin).get('devices', [])
+dev  = next((x for x in devs if x.get('deviceId') == '${DEVICE_ID}'), {})
+lfj  = dev.get('lastFailedJob', {})
+print(lfj.get('$field', '__MISSING__'))
+" 2>/dev/null
+}
+
+# Helper: check whether the device entry contains a lastFailedJob key at all
+cu_has_last_failed_job() {
+  local resp="$1"
+  echo "$resp" | python3 -c "
+import json,sys
+devs = json.load(sys.stdin).get('devices', [])
+dev  = next((x for x in devs if x.get('deviceId') == '${DEVICE_ID}'), {})
+print('yes' if 'lastFailedJob' in dev else 'no')
+" 2>/dev/null
+}
+
 # User ID for the T18 test device (demotesthw5@yopmail.com)
 CU_USER_ID="41f35d4a-d0d1-709e-634f-fc6198a3872d"
 
@@ -923,7 +968,9 @@ import sys; sys.exit(0 if 'in progress' in sys.stdin.read().lower() else 1)
   && _pass "IN_PROGRESS job message is in-progress variant" \
   || _fail "IN_PROGRESS job message wrong: $AJ_MSG"
 
-# ── (+) FAILED → JOB_ACTIVE + failed message ─────────────────────────────────
+# ── (+) FAILED → falls through, availableVersion present + lastFailedJob ──────
+# A FAILED job must NOT block the version comparison — the user should see
+# both the newest available firmware AND context about the last failure.
 aws dynamodb update-item \
   --table-name digilux_ota_jobs \
   --key "{\"jobId\":{\"S\":\"${CU_JOB_ID}\"}}" \
@@ -933,26 +980,49 @@ aws dynamodb update-item \
   --region "$REGION" > /dev/null 2>&1
 
 CU_RESP=$(cu_call)
-AJ_STATUS=$(cu_activejob_field "$CU_RESP" "status")
-[ "$AJ_STATUS" = "FAILED" ] \
-  && _pass "FAILED job → activeJob.status=FAILED" \
-  || _fail "FAILED job — activeJob.status: $AJ_STATUS"
 
-AJ_MSG=$(cu_activejob_field "$CU_RESP" "message")
-echo "$AJ_MSG" | python3 -c "
+# FAILED must NOT produce otaStatus=JOB_ACTIVE
+OTA_STATUS_FAILED=$(cu_device_field "$CU_RESP" "otaStatus")
+[ "$OTA_STATUS_FAILED" != "JOB_ACTIVE" ] \
+  && _pass "FAILED job → otaStatus is NOT JOB_ACTIVE (falls through to version check)" \
+  || _fail "FAILED job wrongly returned otaStatus=JOB_ACTIVE — should fall through"
+
+# FAILED must NOT produce activeJob block
+[ "$(cu_has_active_job "$CU_RESP")" = "no" ] \
+  && _pass "FAILED job → no activeJob block in response" \
+  || _fail "FAILED job unexpectedly returned an activeJob block"
+
+# FAILED → availableVersion must be present (version compare proceeded)
+AV=$(cu_device_field "$CU_RESP" "availableVersion")
+[ "$AV" != "__MISSING__" ] && [ -n "$AV" ] \
+  && _pass "FAILED job → availableVersion present in response: $AV" \
+  || _fail "FAILED job: availableVersion missing — version compare did not proceed"
+
+# FAILED → lastFailedJob block must be present
+[ "$(cu_has_last_failed_job "$CU_RESP")" = "yes" ] \
+  && _pass "FAILED job → lastFailedJob block present in response" \
+  || _fail "FAILED job: lastFailedJob block missing from response"
+
+# lastFailedJob must carry the correct job info
+LFJ_STATUS=$(cu_lastfailedjob_field "$CU_RESP" "status")
+[ "$LFJ_STATUS" = "FAILED" ] \
+  && _pass "lastFailedJob.status = FAILED" \
+  || _fail "lastFailedJob.status — expected FAILED, got: $LFJ_STATUS"
+
+LFJ_JOB_ID=$(cu_lastfailedjob_field "$CU_RESP" "jobId")
+[ "$LFJ_JOB_ID" = "$CU_JOB_ID" ] \
+  && _pass "lastFailedJob.jobId matches the FAILED job" \
+  || _fail "lastFailedJob.jobId mismatch — expected $CU_JOB_ID, got: $LFJ_JOB_ID"
+
+LFJ_MSG=$(cu_lastfailedjob_field "$CU_RESP" "message")
+echo "$LFJ_MSG" | python3 -c "
 import sys
 msg = sys.stdin.read()
-ok  = 'failed' in msg.lower() and '${TEST_VERSION}' in msg and 'support' in msg.lower()
+ok  = 'failed' in msg.lower() and 'support' in msg.lower()
 sys.exit(0 if ok else 1)
 " 2>/dev/null \
-  && _pass "FAILED message contains version, 'failed', and 'support'" \
-  || _fail "FAILED message wrong: $AJ_MSG"
-
-# (-) FAILED response must also not expose availableVersion
-AV=$(cu_device_field "$CU_RESP" "availableVersion")
-[ "$AV" = "__MISSING__" ] \
-  && _pass "FAILED job response has no availableVersion (version compare skipped)" \
-  || _fail "availableVersion present while job is FAILED: $AV"
+  && _pass "lastFailedJob.message contains 'failed' and 'support'" \
+  || _fail "lastFailedJob.message wrong: $LFJ_MSG"
 
 # ── (+) SUCCEEDED → falls through, no activeJob ───────────────────────────────
 aws dynamodb update-item \

@@ -65,6 +65,8 @@ DEVICE_TABLE  = os.environ.get("DEVICE_DATA_TABLE", "digilux_device_data")
 PACKAGES_TABLE = os.environ.get("PACKAGES_TABLE",   "digilux_ota_packages")
 OTA_JOBS_TABLE = os.environ.get("OTA_JOBS_TABLE",   "digilux_ota_jobs")
 ARTIFACT_BUCKET = os.environ.get("ARTIFACT_BUCKET", "digilux-ota-artifacts")
+KEY_SERVER_URL     = os.environ.get("KEY_SERVER_URL",     "")
+KEY_SERVER_API_KEY = os.environ.get("KEY_SERVER_API_KEY", "")
 IOT_JOB_TIMEOUT_MINUTES = int(os.environ.get("IOT_JOB_TIMEOUT_MINUTES", "1440"))
 
 # Presign expiry tiers (mirrors user_consent Lambda)
@@ -171,6 +173,51 @@ def _is_job_still_active(job_id: str) -> bool:
         return iot_status not in ("COMPLETED", "CANCELED", "DELETION_IN_PROGRESS")
     except Exception:
         return False  # Job not found in IoT either → treat as done
+
+
+def _unwrap_data_key(wrapped_key: str) -> str:
+    """
+    Call the Digilux Key Server /unwrap endpoint to decrypt the wrapped data key.
+    Returns base64-encoded plaintext AES-256 key.
+    The master key never enters this Lambda — only the Key Server can unwrap.
+    """
+    import urllib.request
+    import urllib.error
+
+    if not KEY_SERVER_URL or not KEY_SERVER_API_KEY:
+        raise RuntimeError(
+            "KEY_SERVER_URL and KEY_SERVER_API_KEY must be set to use the key server"
+        )
+
+    payload = json.dumps({"wrappedKey": wrapped_key}).encode()
+    req     = urllib.request.Request(
+        f"{KEY_SERVER_URL}/api/v1/ota/keys/unwrap",
+        data=payload,
+        headers={
+            "Content-Type":  "application/json",
+            "Authorization": f"Bearer {KEY_SERVER_API_KEY}",
+        },
+        method="POST",
+    )
+    _log("debug", "key_server_unwrap_request",
+         url=f"{KEY_SERVER_URL}/api/v1/ota/keys/unwrap",
+         wrappedKeyVersion=wrapped_key.split(":")[0] if ":" in wrapped_key else "?")
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            body = json.loads(resp.read().decode())
+        key_b64 = body.get("plaintextKey", "")
+        if not key_b64:
+            raise RuntimeError("Key server /unwrap returned empty plaintextKey")
+        _log("debug", "key_server_unwrap_success", keyId=body.get("keyId", ""))
+        return key_b64
+    except urllib.error.HTTPError as exc:
+        err_body = exc.read().decode() if exc.fp else ""
+        _log("error", "key_server_unwrap_http_error",
+             status=exc.code, reason=str(exc.reason), body=err_body)
+        raise RuntimeError(f"Key server /unwrap failed with HTTP {exc.code}: {err_body}") from exc
+    except urllib.error.URLError as exc:
+        _log("error", "key_server_unwrap_connection_error", error=str(exc.reason))
+        raise RuntimeError(f"Key server unreachable: {exc.reason}") from exc
 
 
 def _presign(enc_key: str, expiry_sec: int) -> str:
@@ -347,6 +394,28 @@ def lambda_handler(event, context):
         "mandatory": True,
         "rollback":  True,
     }
+
+    # 5b ── Inject decryption key via Key Server (mirrors user_consent Lambda)
+    wrapped_data_key = pkg.get("wrappedDataKey", "")
+    aes_iv_b64       = pkg.get("aesIv", "")
+    if wrapped_data_key and aes_iv_b64:
+        try:
+            plaintext_key_b64 = _unwrap_data_key(wrapped_data_key)
+            job_doc["artifact"]["dataKey"] = plaintext_key_b64
+            job_doc["artifact"]["iv"]      = aes_iv_b64
+            _log("info", "data_key_injected",
+                 deviceId=device_id, packageName=package_name, version=version,
+                 detail="Plaintext data key embedded in dev IoT Job document")
+        except Exception as exc:
+            _log("error", "data_key_inject_failed",
+                 deviceId=device_id, packageName=package_name, version=version,
+                 error=str(exc),
+                 detail="Key server unavailable — job created WITHOUT dataKey/iv; device cannot decrypt artifact")
+    else:
+        _log("warning", "data_key_not_available",
+             deviceId=device_id, packageName=package_name, version=version,
+             hasWrappedKey=bool(wrapped_data_key), hasIv=bool(aes_iv_b64),
+             detail="Package has no wrappedDataKey/aesIv — device will not be able to decrypt artifact")
 
     # 6 ── Create IoT Job
     thing_arn = f"arn:aws:iot:{REGION}:{ACCOUNT_ID}:thing/{thing_name}"

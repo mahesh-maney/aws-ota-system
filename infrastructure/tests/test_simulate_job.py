@@ -108,15 +108,19 @@ def patch_env(monkeypatch):
 def mock_dynamo(monkeypatch):
     device_table  = MagicMock()
     package_table = MagicMock()
+    job_table     = MagicMock()
 
     device_table.query.return_value    = {"Items": [_device()]}
     package_table.get_item.return_value = {"Item": None}
     package_table.query.return_value    = {"Items": [_package()]}
     device_table.update_item.return_value = {}
+    # Default: no job record → _is_job_still_active returns False (stale)
+    job_table.get_item.return_value = {"Item": None}
 
     tables = {
         lf.DEVICE_TABLE:   device_table,
         lf.PACKAGES_TABLE: package_table,
+        lf.OTA_JOBS_TABLE: job_table,
     }
     dynamo = MagicMock()
     dynamo.Table.side_effect = lambda n: tables.get(n, MagicMock())
@@ -132,6 +136,8 @@ def mock_iot(monkeypatch):
     iot.exceptions.ResourceNotFoundException = type(
         "ResourceNotFoundException", (Exception,), {}
     )
+    # describe_job raises by default — _is_job_still_active IoT fallback returns False
+    iot.describe_job.side_effect = Exception("IoT job not found in tests")
     monkeypatch.setattr(lf, "iot", iot)
     return iot
 
@@ -217,6 +223,10 @@ class TestPostCreateJob:
         assert resp["statusCode"] == 409
 
     def test_existing_pending_job_returns_409(self, mock_dynamo, mock_iot, mock_s3):
+        # Make _is_job_still_active return True by providing an active job record
+        mock_dynamo[lf.OTA_JOBS_TABLE].get_item.return_value = {
+            "Item": {"jobId": DEV_JOB_ID, "status": "QUEUED"}
+        }
         mock_dynamo[lf.DEVICE_TABLE].query.return_value = {
             "Items": [_device(pending_job=DEV_JOB_ID)]
         }
@@ -224,6 +234,20 @@ class TestPostCreateJob:
         assert resp["statusCode"] == 409
         body = json.loads(resp["body"])
         assert "pendingJobId" in body
+
+    def test_stale_failed_pending_job_auto_cleared(self, mock_dynamo, mock_iot, mock_s3):
+        """A FAILED/SUCCEEDED pendingJobId is auto-cleared and job creation proceeds."""
+        # job_table.get_item returns None by default → _is_job_still_active False → stale
+        mock_dynamo[lf.DEVICE_TABLE].query.return_value = {
+            "Items": [_device(pending_job=DEV_JOB_ID)]
+        }
+        resp = lf.lambda_handler(_post_event({"deviceId": DEVICE_ID}), MockContext())
+        assert resp["statusCode"] == 201
+        # pendingJobId must have been cleared (REMOVE) then set to the new job
+        calls = mock_dynamo[lf.DEVICE_TABLE].update_item.call_args_list
+        exprs = [c.kwargs.get("UpdateExpression", "") for c in calls]
+        assert any("REMOVE pendingJobId" in e for e in exprs), \
+            "Expected a REMOVE pendingJobId call for stale job auto-clear"
 
     def test_no_active_package_returns_404(self, mock_dynamo, mock_iot, mock_s3):
         mock_dynamo[lf.PACKAGES_TABLE].query.return_value = {"Items": []}
@@ -328,16 +352,16 @@ class TestDeleteCancelJob:
         expr = update_calls[0].kwargs["UpdateExpression"]
         assert "REMOVE pendingJobId" in expr
 
-    def test_production_job_returns_409(self, mock_dynamo, mock_iot, mock_s3):
-        """Cannot cancel a production job via simulate-job endpoint."""
+    def test_production_job_can_be_cancelled(self, mock_dynamo, mock_iot, mock_s3):
+        """DELETE cancels any pending job — not restricted to dev-prefix jobs."""
         mock_dynamo[lf.DEVICE_TABLE].query.return_value = {
             "Items": [_device(pending_job=PROD_JOB_ID)]
         }
         resp = lf.lambda_handler(_delete_event({"deviceId": DEVICE_ID}), MockContext())
-        assert resp["statusCode"] == 409
+        assert resp["statusCode"] == 200
         body = json.loads(resp["body"])
-        assert "pendingJobId" in body
-        mock_iot.cancel_job.assert_not_called()
+        assert body["cancelled"] is True
+        mock_iot.cancel_job.assert_called_once_with(jobId=PROD_JOB_ID, force=True)
 
     def test_no_pending_job_returns_404(self, mock_dynamo, mock_iot, mock_s3):
         mock_dynamo[lf.DEVICE_TABLE].query.return_value = {"Items": [_device()]}
