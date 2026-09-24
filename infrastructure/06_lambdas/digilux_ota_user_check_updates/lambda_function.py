@@ -386,6 +386,7 @@ def lambda_handler(event, context):
                      userId=user_id, deviceId=device_id, jobId=pending_job_id,
                      detail="Dev/simulate job — not surfaced in available-updates")
                 pending_job_id = None
+            last_failed_job: dict | None = None
             if pending_job_id:
                 _log("info", "device_has_pending_job",
                      userId=user_id, deviceId=device_id,
@@ -394,15 +395,15 @@ def lambda_handler(event, context):
                 if job:
                     job_status  = job.get("status", "")
                     job_version = job.get("version", "")
-                    message     = _job_user_message(job_status, job_version)
 
-                    if message is not None:
-                        # Job is in-progress or failed — report it, skip version comparison
+                    if job_status in _IN_PROGRESS_JOB_STATUSES:
+                        # Job is actively in progress — block version comparison
+                        message = OTA_IN_PROGRESS_MSG.format(version=job_version)
                         _log("info", "active_job_reported",
                              userId=user_id, deviceId=device_id,
                              jobId=pending_job_id, jobStatus=job_status,
                              jobVersion=job_version, packageName=job.get("packageName"),
-                             messageTemplate=("in_progress" if job_status in _IN_PROGRESS_JOB_STATUSES else "failed"))
+                             messageTemplate="in_progress")
                         _audit("ACTIVE_JOB_REPORTED", user_id,
                                {"deviceId": device_id, "jobId": pending_job_id,
                                 "packageName": job.get("packageName"), "version": job_version},
@@ -422,6 +423,22 @@ def lambda_handler(event, context):
                             },
                         })
                         continue
+
+                    if job_status == "FAILED":
+                        # Failed job — do NOT block version comparison.
+                        # Carry the failure info so it can be attached to the
+                        # UPDATE_AVAILABLE response, letting the user see the
+                        # new version while also showing what failed last time.
+                        last_failed_job = {
+                            "jobId":   pending_job_id,
+                            "status":  "FAILED",
+                            "version": job_version,
+                            "message": OTA_FAILED_MSG.format(version=job_version),
+                        }
+                        _log("info", "failed_job_fall_through",
+                             userId=user_id, deviceId=device_id,
+                             jobId=pending_job_id, jobVersion=job_version,
+                             detail="FAILED job — continuing version check so user can see new available update")
                     else:
                         # SUCCEEDED (or unknown) — fall through to normal version check
                         _log("debug", "active_job_succeeded_fall_through",
@@ -494,7 +511,7 @@ def lambda_handler(event, context):
                        firmwareCategory=firmware_category)
                 blocked_count += 1
             else:
-                result_devices.append({
+                entry: dict = {
                     "deviceId":         device_id,
                     "otaStatus":        "REGISTERED",
                     "package":          pkg_name,
@@ -502,7 +519,10 @@ def lambda_handler(event, context):
                     "availableVersion": latest_ver,
                     "fileName":         latest_pkg.get("fileName", ""),
                     "releaseNotes":     latest_pkg.get("releaseNotes", ""),
-                })
+                }
+                if last_failed_job:
+                    entry["lastFailedJob"] = last_failed_job
+                result_devices.append(entry)
                 _log("info", "update_available",
                      userId=user_id, deviceId=device_id,
                      packageName=pkg_name,
