@@ -14,6 +14,9 @@ Message: {
   "version": "...",
   "error": "..."    # optional, on FAILED
 }
+
+Also calls IoT Jobs UpdateJobExecution so IoT Core reflects the same status
+even when the device does not publish to $aws/things/.../jobs/{jobId}/update.
 """
 import datetime
 import json
@@ -72,6 +75,67 @@ def _audit(event: str, actor: str, resource: dict, result: str, **extra) -> None
     }))
 
 
+# Statuses accepted by IoT Jobs UpdateJobExecution
+_IOT_JOB_STATUSES = {
+    "IN_PROGRESS", "SUCCEEDED", "FAILED", "REJECTED", "TIMED_OUT",
+}
+
+
+def _sync_iot_job_execution(
+    job_id: str,
+    thing_name: str,
+    status: str,
+    progress: int,
+    status_detail: str,
+    error_msg: str,
+    error_code,
+    error_reason: str | None,
+) -> None:
+    """
+    Mirror the device's custom-topic status into AWS IoT Jobs.
+    Devices that only publish to iot/device/+/ota/status (and not the reserved
+    $aws/things/.../jobs/{jobId}/update topic) still get their IoT Core
+    job execution updated via this call.
+    """
+    if status not in _IOT_JOB_STATUSES:
+        log.warning(json.dumps({
+            "msg": "iot_job_sync_skipped_unsupported_status",
+            "jobId": job_id, "thingName": thing_name, "status": status,
+        }))
+        return
+
+    details = {
+        "progress": str(progress),
+        "detail":   status_detail or "",
+    }
+    if error_msg:
+        details["error"] = error_msg
+    if error_code is not None:
+        details["errorCode"] = str(error_code)
+    if error_reason:
+        details["errorReason"] = error_reason
+
+    try:
+        iot.update_job_execution(
+            jobId=job_id,
+            thingName=thing_name,
+            status=status,
+            statusDetails=details,
+        )
+        log.info(json.dumps({
+            "msg": "iot_job_execution_synced",
+            "jobId": job_id, "thingName": thing_name, "status": status,
+        }))
+    except Exception as exc:
+        # Never fail the DynamoDB path because IoT Core sync failed
+        # (e.g. InvalidStateTransition when execution is already terminal).
+        log.warning(json.dumps({
+            "msg": "iot_job_execution_sync_failed",
+            "jobId": job_id, "thingName": thing_name, "status": status,
+            "error": str(exc),
+        }))
+
+
 def lambda_handler(event, context):
     """
     event is the MQTT message payload injected by the IoT Rule SQL:
@@ -87,11 +151,16 @@ def lambda_handler(event, context):
         progress      = int(event.get("progress", 0))
         status_detail = event.get("statusDetail", "")
         status_details = event.get("statusDetails", {}) or {}
-        error_code    = status_details.get("errorCode")
+        raw_error_code = status_details.get("errorCode")
+        # Controllers may send errorCode as string ("10003") — coerce for map lookup
+        try:
+            error_code = int(raw_error_code) if raw_error_code is not None else None
+        except (TypeError, ValueError):
+            error_code = None
         error_reason  = ERROR_CODE_MAP.get(error_code, "UNKNOWN_ERROR") if error_code is not None else None
         pkg_name      = event.get("packageName", "")
         version       = event.get("version", "")
-        error_msg     = event.get("error", "")
+        error_msg     = event.get("error", "") or status_details.get("error", "")
 
         log.info(json.dumps({
             "msg": "device_status_received",
@@ -109,7 +178,16 @@ def lambda_handler(event, context):
             return
 
         now_ms = int(time.time() * 1000)
+        # thingName == deviceId in this system when the agent omits thingName
         device_key = thing_name or device_id
+        thing_name = device_key
+
+        # Sync IoT Core job execution so clients that skip the reserved
+        # $aws/things/.../jobs/{jobId}/update topic still update IoT Jobs.
+        _sync_iot_job_execution(
+            job_id, thing_name, status, progress,
+            status_detail, error_msg, error_code, error_reason,
+        )
 
         log.debug(f"Updating deviceStatuses[{device_key}] in job {job_id}")
         jobs_table = dynamo.Table(OTA_JOBS_TABLE)

@@ -146,8 +146,8 @@ if [ "$DEV_STATUS" = "REGISTERED" ]; then _pass "otaStatus=REGISTERED"; else _fa
 HAS_PKG=$(echo "$RESP" | python3 -c "import json,sys; d=json.load(sys.stdin); print('ok' if any(x.get('package')=='$PACKAGE_NAME' for x in d['devices']) else 'no')" 2>/dev/null)
 if [ "$HAS_PKG" = "ok" ]; then _pass "$PACKAGE_NAME entry present"; else _fail "$PACKAGE_NAME missing from devices list"; fi
 
-HAS_FIELDS=$(echo "$RESP" | python3 -c "import json,sys; d=json.load(sys.stdin); e=d['devices'][0]; print('ok' if all(k in e for k in ['deviceId','package','installedVersion','availableVersion','fileName']) else 'no')" 2>/dev/null)
-if [ "$HAS_FIELDS" = "ok" ]; then _pass "All flat fields present (deviceId, package, installedVersion, availableVersion, fileName)"; else _fail "One or more flat fields missing"; fi
+HAS_FIELDS=$(echo "$RESP" | python3 -c "import json,sys; d=json.load(sys.stdin); e=d['devices'][0]; print('ok' if all(k in e for k in ['deviceId','package','installedVersion','availableVersion','fileName','releaseNotes']) else 'no')" 2>/dev/null)
+if [ "$HAS_FIELDS" = "ok" ]; then _pass "All flat fields present (deviceId, package, installedVersion, availableVersion, fileName, releaseNotes)"; else _fail "One or more flat fields missing"; fi
 
 # ──────────────────────────────────────────────────────────────────────────────
 _section "TU03 — CONSENT INPUT VALIDATION"

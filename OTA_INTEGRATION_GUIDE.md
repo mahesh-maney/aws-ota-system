@@ -903,15 +903,52 @@ Returns all controller devices owned by the calling user and any available updat
       "package": "controller-app",
       "installedVersion": "2.0.0",
       "availableVersion": "5.0.0",
-      "fileName": "HomeAssistantUtility-5.0.0.jar"
+      "fileName": "HomeAssistantUtility-5.0.0.jar",
+      "releaseNotes": "Zigbee 3.0 support"
     }
   ]
 }
 ```
 
-One entry per `(device, package)` where an update is available. Devices with no updates are omitted. `otaStatus: NOT_REGISTERED` — OTA agent has never started on this device.
+One entry per `(device, package)` where an update is available. Devices with no updates are omitted. `otaStatus: NOT_REGISTERED` — OTA agent has never started on this device; these entries also carry `message: "Device firmware version doesn't exist"` and no version fields:
 
-> Only packages with `status=ACTIVE` **and** `activated=true` appear in user update checks. UAT packages only appear for devices in the `DGX-Canary` IoT Thing Group. The device will not appear until it has connected at least once.
+```json
+{
+  "devices": [
+    {
+      "deviceId": "edb39bba-baf1-4700-968c-a42228e53aa0",
+      "otaStatus": "NOT_REGISTERED",
+      "message": "Device firmware version doesn't exist"
+    }
+  ]
+}
+```
+
+**Devices with a deployment already created** (admin called `POST /ota/deployments` targeting the device) report the version that deployment pushes, plus two extra fields:
+
+```json
+{
+  "devices": [
+    {
+      "deviceId": "edb39bba-baf1-4700-968c-a42228e53aa0",
+      "otaStatus": "REGISTERED",
+      "package": "ZigbeeFirmware",
+      "installedVersion": "4.2.0",
+      "availableVersion": "4.3.0",
+      "fileName": "ZigbeeFirmware-4.3.0.tar",
+      "releaseNotes": "Faster device pairing",
+      "pendingJobId": "digilux-ota-ZigbeeFirmware-4-3-0-1787934251",
+      "jobStatus": "QUEUED"
+    }
+  ]
+}
+```
+
+`pendingJobId` and `jobStatus` (`QUEUED` or `IN_PROGRESS`) are present only in this case — the device is already going to install that exact version via its IoT Job, so no consent call is needed. Because the deployment is authoritative, the version is reported even when the package is `BETA`/`CUSTOM` or not yet published, and the entitlement check is skipped. Once the job reaches a terminal state the fields disappear and the response falls back to the normal lookup below.
+
+> Without a deployment, only packages with `status=ACTIVE` **and** `activated=true` appear in user update checks. UAT packages only appear for devices in the `DGX-Canary` IoT Thing Group. The device will not appear until it has connected at least once.
+>
+> `pendingJobId` is stamped on devices targeted individually (`targetType=THING`) and on every device of a `BETA`/`CUSTOM` deployment (`targetType=THING_LIST`). `THING_GROUP` deployments do not stamp it, so those devices fall back to the normal lookup.
 
 ---
 
@@ -1709,4 +1746,5 @@ Results are printed to stdout and saved to `infrastructure/e2e_test_results.txt`
 | `2.3` | 2026-08-25 | Digilux Engineering | Non-admin package visibility: `GET /ota/packages` no longer requires `ota-admin` group — any authenticated user can list packages (read-only); admin UI Packages page and nav link now accessible to all users; action buttons (Publish/Withdraw/Recall/Promote/Restore/Delete) remain admin-only; non-admin badge changed from "Upload only" to "Read only" |
 | `2.2` | 2026-08-24 | Digilux Engineering | Package delete endpoint: `DELETE /api/v1/ota/packages/{packageName}/{version}` with 6 validations (block ACTIVE, require reason, check active deployments, 7-day cooling-off for SUPERSEDED with force override, S3 artifact deletion, soft delete for RECALLED); role-based admin UI: non-admin users restricted to upload-only (no Packages/Deployments nav, no admin routes); admin detected from `cognito:groups` JWT claim; Delete modal on PackagesPage with reason input, version type-to-confirm, cooling-off force checkbox; `GET /ota/packages` status filter fixed — omitting or sending empty `status=` now returns all statuses (was incorrectly defaulting to ACTIVE) |
 | `2.1` | 2026-08-24 | Digilux Engineering | New S3 key structure `Network_controller_firmware/{deviceType}/{version}/{fileName}` — unified firmware prefix for all device types; `artifact_processor` backward-compatible (detects old vs new key format automatically); new device type `Network_controller_zigbee_stack_firmware` (`packageName=ZigbeeStackFirmware`, `.bin`, `operationType=5`); `job_create` Lambda fixed to read device inventory from `digilux_device_data` (was erroneously reading from retired `digilux_device_inventory`) — fixes "already installed" guard and `pendingJobId` tracking; device type table updated with `operationType` integers; e2e test suite fixed (T03/T11/T12 were using stale `controller-app` package name); 70/70 PASS |
+| `2.8` | 2026-09-22 | Digilux Engineering | Deployment-aware available-updates: `digilux_ota_user_check_updates` now reads `pendingJobId` from `device_data` and, when a QUEUED/IN_PROGRESS deployment targets the device, returns that job's `availableVersion` + `releaseNotes` plus `pendingJobId`/`jobStatus` — reported regardless of `releaseType`/`activated` and without the entitlement gate, since the device will install that exact version; `releaseNotes` added to every update entry (was stored in `digilux_ota_packages` but never returned); `job_create` now stamps `pendingJobId` on all `THING_LIST` targets (BETA/CUSTOM deployments, previously only `THING`) and abort clears it for all of them; fixed CUSTOM deployments — `releaseType` validation referenced `pkg` before the package lookup (`NameError` → HTTP 500) and target resolution overwrote the resolved thing ARNs with a bogus thing-group ARN built from the comma-joined deviceIds; BETA and CUSTOM now share one target-resolution path, so CUSTOM skips devices with no `thingName` instead of guessing `thingName = deviceId` |
 | `2.7` | 2026-09-01 | Digilux Engineering | Redesigned MQTT registration payload: removed `model`, `hwRevision`, `installedVersions` map — replaced with flat `globalInstalledVersion` string + `package: { name, installedVersion }` object; `digilux_ota_device_register` updated accordingly; `digilux_ota_user_check_updates` reads `globalInstalledVersion`+`package.name` from `device_data` and returns a flat per-device response (`deviceId`, `otaStatus`, `package`, `installedVersion`, `availableVersion`, `fileName`); `digilux_ota_user_consent` version guard fixed to read `globalInstalledVersion` instead of stale `installedVersions` map — older-than-installed check now works correctly; Section 7 device inventory table updated; 51/51 user e2e PASS |

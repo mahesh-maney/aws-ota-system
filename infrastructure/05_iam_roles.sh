@@ -97,6 +97,16 @@ aws iam put-role-policy \
       {
         \"Effect\": \"Allow\",
         \"Action\": [
+          \"iot:UpdateJobExecution\"
+        ],
+        \"Resource\": [
+          \"arn:aws:iot:$REGION:$ACCOUNT_ID:job/digilux-ota-*\",
+          \"arn:aws:iot:$REGION:$ACCOUNT_ID:thing/*\"
+        ]
+      },
+      {
+        \"Effect\": \"Allow\",
+        \"Action\": [
           \"secretsmanager:GetSecretValue\"
         ],
         \"Resource\": \"arn:aws:secretsmanager:$REGION:$ACCOUNT_ID:secret:digilux-ota-*\"
