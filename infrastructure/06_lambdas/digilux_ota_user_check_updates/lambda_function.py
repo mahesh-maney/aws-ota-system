@@ -299,7 +299,7 @@ def _job_user_message(status: str, version: str) -> str | None:
     """Return the user-facing message for a job status, or None if no message needed."""
     if status in _IN_PROGRESS_JOB_STATUSES:
         return OTA_IN_PROGRESS_MSG.format(version=version)
-    if status == "FAILED":
+    if status in ("FAILED", "TIMED_OUT"):
         return OTA_FAILED_MSG.format(version=version)
     return None  # SUCCEEDED or unknown — let normal flow handle
 
@@ -424,21 +424,21 @@ def lambda_handler(event, context):
                         })
                         continue
 
-                    if job_status == "FAILED":
-                        # Failed job — do NOT block version comparison.
+                    if job_status in ("FAILED", "TIMED_OUT"):
+                        # Failed/timed-out job — do NOT block version comparison.
                         # Carry the failure info so it can be attached to the
                         # UPDATE_AVAILABLE response, letting the user see the
                         # new version while also showing what failed last time.
                         last_failed_job = {
                             "jobId":   pending_job_id,
-                            "status":  "FAILED",
+                            "status":  job_status,
                             "version": job_version,
                             "message": OTA_FAILED_MSG.format(version=job_version),
                         }
                         _log("info", "failed_job_fall_through",
                              userId=user_id, deviceId=device_id,
-                             jobId=pending_job_id, jobVersion=job_version,
-                             detail="FAILED job — continuing version check so user can see new available update")
+                             jobId=pending_job_id, jobVersion=job_version, jobStatus=job_status,
+                             detail="FAILED/TIMED_OUT job — continuing version check so user can see new available update")
                     else:
                         # SUCCEEDED (or unknown) — fall through to normal version check
                         _log("debug", "active_job_succeeded_fall_through",

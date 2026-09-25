@@ -221,15 +221,15 @@ alongside the new update offer — no special handling required; submit consent 
 | `version` | string | Firmware version being applied |
 | `message` | string | User-facing string — display as-is |
 
-> `activeJob` is only produced for actively running jobs. A FAILED job falls through —
+> `activeJob` is only produced for actively running jobs. A FAILED or TIMED_OUT job falls through —
 > the device receives `availableVersion` (not `JOB_ACTIVE`) so the user can accept again.
 
-**`lastFailedJob` fields** (present alongside `availableVersion` when the previous job FAILED)
+**`lastFailedJob` fields** (present alongside `availableVersion` when the previous job FAILED or TIMED_OUT)
 
 | Field | Type | Description |
 |---|---|---|
 | `jobId` | string | ID of the last failed IoT Job |
-| `status` | string | Always `FAILED` |
+| `status` | string | `FAILED` or `TIMED_OUT` |
 | `version` | string | Version of the firmware that failed |
 | `message` | string | User-facing failure message — display to inform the user |
 

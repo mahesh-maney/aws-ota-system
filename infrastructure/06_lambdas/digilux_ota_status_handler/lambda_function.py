@@ -6,7 +6,7 @@ Message: {
   "jobId": "...",
   "deviceId": "...",
   "thingName": "...",
-  "status": "IN_PROGRESS" | "SUCCEEDED" | "FAILED" | "REJECTED",
+  "status": "IN_PROGRESS" | "SUCCEEDED" | "FAILED" | "REJECTED" | "TIMED_OUT",
   "progress": 0-100,
   "statusDetail": "...",
   "statusDetails": { "errorCode": <int> },   # on REJECTED
@@ -141,7 +141,40 @@ def lambda_handler(event, context):
         )
         log.info(f"Job {job_id} aggregate status → {aggregate} (device {device_key} reported {status})")
 
-        if status in ("SUCCEEDED", "FAILED", "REJECTED"):
+        if status == "TIMED_OUT":
+            # IoT timed out waiting for the device — treat like a stale failure.
+            # Clear pendingJobId so the device can receive future updates.
+            data_table = dynamo.Table(DEVICE_DATA_TABLE)
+            dev_items  = data_table.query(
+                KeyConditionExpression=Key("deviceId").eq(device_id)
+            ).get("Items", [])
+            if dev_items:
+                mac_address = dev_items[0]["macAddress"]
+                data_table.update_item(
+                    Key={"deviceId": device_id, "macAddress": mac_address},
+                    UpdateExpression="SET pendingJobId = :null, lastUpdatedAt = :ts",
+                    ExpressionAttributeValues={":null": None, ":ts": now_ms},
+                )
+                log.info(f"device_data pendingJobId cleared for device={device_id} after TIMED_OUT")
+            jobs_table.update_item(
+                Key={"jobId": job_id},
+                UpdateExpression="SET #s = :s, completedAt = :ts",
+                ExpressionAttributeNames={"#s": "status"},
+                ExpressionAttributeValues={":s": "TIMED_OUT", ":ts": now_ms},
+            )
+            log.warning(json.dumps({
+                "msg": "device_update_timed_out",
+                "deviceId": device_id, "jobId": job_id,
+                "packageName": pkg_name, "version": version,
+                "thingName": thing_name,
+            }))
+            _audit("DEVICE_UPDATE_TIMED_OUT",
+                   f"device:{device_id}",
+                   {"deviceId": device_id, "jobId": job_id},
+                   "FAILURE",
+                   packageName=pkg_name, version=version, thingName=thing_name)
+
+        elif status in ("SUCCEEDED", "FAILED", "REJECTED"):
             # Look up macAddress for the composite key update
             data_table = dynamo.Table(DEVICE_DATA_TABLE)
             dev_items  = data_table.query(
@@ -269,7 +302,7 @@ def _aggregate_status(job_id: str, reporting_thing: str, new_status: str) -> str
         statuses[reporting_thing] = new_status
 
         all_vals = set(statuses.values())
-        if "FAILED" in all_vals or "REJECTED" in all_vals:
+        if "FAILED" in all_vals or "REJECTED" in all_vals or "TIMED_OUT" in all_vals:
             return "FAILED"
         if "IN_PROGRESS" in all_vals:
             return "IN_PROGRESS"

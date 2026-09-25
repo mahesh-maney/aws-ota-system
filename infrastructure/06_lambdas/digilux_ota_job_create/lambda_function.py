@@ -681,6 +681,11 @@ def _abort_job(job_id: str, claims: dict) -> dict:
         target_type = job_item.get("targetType")
         target_id   = job_item.get("targetId")
 
+        if status == "SUCCEEDED":
+            _log("warning", "abort_job_rejected_already_succeeded",
+                 jobId=job_id, requestedBy=actor)
+            return _response(400, {"error": "Cannot abort a SUCCEEDED deployment. Use Rollback instead."})
+
         _log("info", "abort_job_current_state",
              jobId=job_id, currentStatus=status,
              targetType=target_type, targetId=target_id,
