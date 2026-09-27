@@ -87,7 +87,7 @@ class IamStack(cdk.Stack):
                         resources=["*"],
                     ),
                     # IoT — UpdateJobExecution scoped to digilux-ota-* jobs only
-                    # (status_handler mirrors device status into IoT Core)
+                    # (status_handler mirrors device status into IoT Core via iot-jobs-data)
                     iam.PolicyStatement(
                         sid="IoTUpdateJobExecution",
                         actions=["iot:UpdateJobExecution"],
@@ -95,6 +95,12 @@ class IamStack(cdk.Stack):
                             f"arn:aws:iot:{region}:{account}:job/digilux-ota-*",
                             f"arn:aws:iot:{region}:{account}:thing/*",
                         ],
+                    ),
+                    # Needed to resolve the account Jobs data-plane endpoint
+                    iam.PolicyStatement(
+                        sid="IoTDescribeEndpoint",
+                        actions=["iot:DescribeEndpoint"],
+                        resources=["*"],
                     ),
                     # Secrets Manager — signing key + CloudFront key
                     iam.PolicyStatement(

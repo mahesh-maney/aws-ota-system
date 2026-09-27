@@ -2,6 +2,10 @@
 # Phase 5 — IAM roles and policies for OTA Lambda functions and IoT rules
 set -euo pipefail
 
+# Avoid interactive pager hanging scripts on (END)
+export AWS_PAGER=""
+export PAGER=cat
+
 REGION="ap-south-1"
 ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
 ROLE_NAME="digilux-ota-lambda-role"
@@ -103,6 +107,13 @@ aws iam put-role-policy \
           \"arn:aws:iot:$REGION:$ACCOUNT_ID:job/digilux-ota-*\",
           \"arn:aws:iot:$REGION:$ACCOUNT_ID:thing/*\"
         ]
+      },
+      {
+        \"Effect\": \"Allow\",
+        \"Action\": [
+          \"iot:DescribeEndpoint\"
+        ],
+        \"Resource\": \"*\"
       },
       {
         \"Effect\": \"Allow\",
