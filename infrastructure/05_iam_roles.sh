@@ -101,7 +101,8 @@ aws iam put-role-policy \
       {
         \"Effect\": \"Allow\",
         \"Action\": [
-          \"iot:UpdateJobExecution\"
+          \"iot:UpdateJobExecution\",
+          \"iotjobsdata:UpdateJobExecution\"
         ],
         \"Resource\": [
           \"arn:aws:iot:$REGION:$ACCOUNT_ID:job/digilux-ota-*\",
