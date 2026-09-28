@@ -41,18 +41,9 @@ _iot_jobs_data = None
 
 # ── Error code → reason mapping (maintained on backend) ─────────────────────
 # Controller sends: { "status": "REJECTED", "statusDetails": { "errorCode": N } }
-# Digilux agent (dgl-ota-agent) uses 1xxx/2xxx/3xxx; legacy docs used 1000x.
 ERROR_CODE_MAP = {
-    # dgl-ota-agent codes
-    1001: "SIGNATURE_MISSING",
-    1002: "SIGNATURE_INVALID",
-    1003: "PUBLIC_KEY_MISSING",
-    2001: "CHECKSUM_MISMATCH",
-    2002: "SIZE_MISMATCH",
-    2003: "DOWNLOAD_FAILED",
     3001: "APPLY_FAILED",
     9000: "UNKNOWN",
-    # Legacy / documented 10000-range codes
     10001: "SIGNATURE_MISSING",
     10002: "SIGNATURE_INVALID_FORMAT",
     10003: "SIGNATURE_VERIFICATION_FAILED",
@@ -70,7 +61,7 @@ ERROR_CODE_MAP = {
 }
 
 # Codes that trigger an immediate SECURITY_ALERT audit event
-SECURITY_ERROR_CODES = {1001, 1002, 1003, 10002, 10003, 10004, 10005, 10006}
+SECURITY_ERROR_CODES = {10002, 10003, 10004, 10005, 10006}
 
 
 def _jobs_data_client():
@@ -340,8 +331,6 @@ def lambda_handler(event, context):
                         "deviceId": device_id, "jobId": job_id,
                         "packageName": pkg_name, "version": version,
                         "error": error_msg, "statusDetail": status_detail,
-                        **({"errorCode": error_code, "errorReason": error_reason}
-                           if error_code is not None else {}),
                     }))
                     data_table.update_item(
                         Key={"deviceId": device_id, "macAddress": mac_address},
