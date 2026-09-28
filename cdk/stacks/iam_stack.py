@@ -78,11 +78,31 @@ class IamStack(cdk.Stack):
                         actions=[
                             "iot:CreateJob", "iot:DescribeJob", "iot:ListJobs", "iot:CancelJob",
                             "iot:ListJobExecutionsForJob", "iot:ListJobExecutionsForThing",
-                            "iot:DescribeJobExecution", "iot:DescribeThing", "iot:ListThings",
+                            "iot:DescribeJobExecution",
+                            "iot:DescribeThing", "iot:ListThings",
                             "iot:AddThingToThingGroup", "iot:RemoveThingFromThingGroup",
                             "iot:DescribeThingGroup", "iot:GetThingShadow", "iot:UpdateThingShadow",
                             "iot:SearchIndex", "iot:TagResource",
                         ],
+                        resources=["*"],
+                    ),
+                    # IoT — UpdateJobExecution scoped to digilux-ota-* jobs only
+                    # Jobs data-plane API uses action prefix iotjobsdata: (not iot:)
+                    iam.PolicyStatement(
+                        sid="IoTUpdateJobExecution",
+                        actions=[
+                            "iot:UpdateJobExecution",
+                            "iotjobsdata:UpdateJobExecution",
+                        ],
+                        resources=[
+                            f"arn:aws:iot:{region}:{account}:job/digilux-ota-*",
+                            f"arn:aws:iot:{region}:{account}:thing/*",
+                        ],
+                    ),
+                    # Needed to resolve the account Jobs data-plane endpoint
+                    iam.PolicyStatement(
+                        sid="IoTDescribeEndpoint",
+                        actions=["iot:DescribeEndpoint"],
                         resources=["*"],
                     ),
                     # Secrets Manager — signing key + CloudFront key

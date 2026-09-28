@@ -14,6 +14,9 @@ Message: {
   "version": "...",
   "error": "..."    # optional, on FAILED
 }
+
+Also calls IoT Jobs UpdateJobExecution so IoT Core reflects the same status
+even when the device does not publish to $aws/things/.../jobs/{jobId}/update.
 """
 import datetime
 import json
@@ -33,24 +36,25 @@ OTA_JOBS_TABLE    = os.environ.get("OTA_JOBS_TABLE",    "digilux_ota_jobs")
 
 dynamo = boto3.resource("dynamodb", region_name=REGION)
 iot    = boto3.client("iot", region_name=REGION)
+# UpdateJobExecution lives on the Jobs *data-plane* client, not control-plane `iot`.
+_iot_jobs_data = None
 
 # ── Error code → reason mapping (maintained on backend) ─────────────────────
 # Controller sends: { "status": "REJECTED", "statusDetails": { "errorCode": N } }
 ERROR_CODE_MAP = {
-    # Security errors (10000–10099)
+    3001: "APPLY_FAILED",
+    9000: "UNKNOWN",
     10001: "SIGNATURE_MISSING",
     10002: "SIGNATURE_INVALID_FORMAT",
     10003: "SIGNATURE_VERIFICATION_FAILED",
     10004: "CHECKSUM_MISMATCH",
     10005: "CERTIFICATE_EXPIRED",
     10006: "CERTIFICATE_UNTRUSTED",
-    # Package / compatibility errors (10100–10199)
     10101: "PACKAGE_VERSION_ALREADY_INSTALLED",
     10102: "PACKAGE_INCOMPATIBLE_DEVICE_TYPE",
     10103: "INSUFFICIENT_STORAGE",
     10104: "DOWNLOAD_FAILED",
     10105: "PACKAGE_CORRUPT",
-    # Job / protocol errors (10200–10299)
     10201: "JOB_ALREADY_IN_PROGRESS",
     10202: "JOB_NOT_FOUND",
     10203: "INVALID_JOB_DOCUMENT",
@@ -58,6 +62,23 @@ ERROR_CODE_MAP = {
 
 # Codes that trigger an immediate SECURITY_ALERT audit event
 SECURITY_ERROR_CODES = {10002, 10003, 10004, 10005, 10006}
+
+
+def _jobs_data_client():
+    """Lazy Jobs data-plane client (required for UpdateJobExecution)."""
+    global _iot_jobs_data
+    if _iot_jobs_data is None:
+        endpoint = iot.describe_endpoint(endpointType="iot:Jobs")["endpointAddress"]
+        _iot_jobs_data = boto3.client(
+            "iot-jobs-data",
+            region_name=REGION,
+            endpoint_url=f"https://{endpoint}",
+        )
+        log.info(json.dumps({
+            "msg": "iot_jobs_data_client_ready",
+            "endpoint": endpoint,
+        }))
+    return _iot_jobs_data
 
 
 def _audit(event: str, actor: str, resource: dict, result: str, **extra) -> None:
@@ -70,6 +91,84 @@ def _audit(event: str, actor: str, resource: dict, result: str, **extra) -> None
         "result": result,
         **extra,
     }))
+
+
+# Statuses accepted by IoT Jobs UpdateJobExecution
+_IOT_JOB_STATUSES = {
+    "IN_PROGRESS", "SUCCEEDED", "FAILED", "REJECTED", "TIMED_OUT",
+}
+
+
+def _sync_iot_job_execution(
+    job_id: str,
+    thing_name: str,
+    status: str,
+    progress: int,
+    status_detail: str,
+    error_msg: str,
+    error_code,
+    error_reason: str | None,
+) -> None:
+    """
+    Mirror the device's custom-topic status into AWS IoT Jobs.
+    Devices that only publish to iot/device/+/ota/status (and not the reserved
+    $aws/things/.../jobs/{jobId}/update topic) still get their IoT Core
+    job execution updated via this call.
+    """
+    if status not in _IOT_JOB_STATUSES:
+        log.warning(json.dumps({
+            "msg": "iot_job_sync_skipped_unsupported_status",
+            "jobId": job_id, "thingName": thing_name, "status": status,
+        }))
+        return
+
+    # AWS IoT Jobs rejects any statusDetails value with length 0.
+    def _put(dst: dict, key: str, value) -> None:
+        if value is None:
+            return
+        text = str(value).strip()
+        if text:
+            dst[key] = text
+
+    details = {}
+    if progress is not None:
+        _put(details, "progress", progress)
+    # Prefer an explicit statusDetail; otherwise use error text / mapped reason
+    # so REJECTED/FAILED never call UpdateJobExecution with detail="".
+    _put(details, "detail", status_detail)
+    if "detail" not in details:
+        _put(details, "detail", error_msg)
+    if "detail" not in details:
+        _put(details, "detail", error_reason)
+    _put(details, "error", error_msg)
+    if error_code is not None:
+        _put(details, "errorCode", error_code)
+    _put(details, "errorReason", error_reason)
+
+    try:
+        # Control-plane client `iot` has no update_job_execution — Jobs data plane does.
+        kwargs = {
+            "jobId": job_id,
+            "thingName": thing_name,
+            "status": status,
+        }
+        if details:
+            kwargs["statusDetails"] = details
+        _jobs_data_client().update_job_execution(**kwargs)
+        log.info(json.dumps({
+            "msg": "iot_job_execution_synced",
+            "jobId": job_id, "thingName": thing_name, "status": status,
+            "statusDetails": details,
+        }))
+    except Exception as exc:
+        # Never fail the DynamoDB path because IoT Core sync failed
+        # (e.g. InvalidStateTransition when execution is already terminal).
+        log.warning(json.dumps({
+            "msg": "iot_job_execution_sync_failed",
+            "jobId": job_id, "thingName": thing_name, "status": status,
+            "statusDetails": details,
+            "error": str(exc),
+        }))
 
 
 def lambda_handler(event, context):
@@ -87,11 +186,16 @@ def lambda_handler(event, context):
         progress      = int(event.get("progress", 0))
         status_detail = event.get("statusDetail", "")
         status_details = event.get("statusDetails", {}) or {}
-        error_code    = status_details.get("errorCode")
+        raw_error_code = status_details.get("errorCode")
+        # Controllers may send errorCode as string ("10003") — coerce for map lookup
+        try:
+            error_code = int(raw_error_code) if raw_error_code is not None else None
+        except (TypeError, ValueError):
+            error_code = None
         error_reason  = ERROR_CODE_MAP.get(error_code, "UNKNOWN_ERROR") if error_code is not None else None
         pkg_name      = event.get("packageName", "")
         version       = event.get("version", "")
-        error_msg     = event.get("error", "")
+        error_msg     = event.get("error", "") or status_details.get("error", "")
 
         log.info(json.dumps({
             "msg": "device_status_received",
@@ -109,7 +213,16 @@ def lambda_handler(event, context):
             return
 
         now_ms = int(time.time() * 1000)
+        # thingName == deviceId in this system when the agent omits thingName
         device_key = thing_name or device_id
+        thing_name = device_key
+
+        # Sync IoT Core job execution so clients that skip the reserved
+        # $aws/things/.../jobs/{jobId}/update topic still update IoT Jobs.
+        _sync_iot_job_execution(
+            job_id, thing_name, status, progress,
+            status_detail, error_msg, error_code, error_reason,
+        )
 
         log.debug(f"Updating deviceStatuses[{device_key}] in job {job_id}")
         jobs_table = dynamo.Table(OTA_JOBS_TABLE)
@@ -233,7 +346,26 @@ def lambda_handler(event, context):
                            packageName=pkg_name, version=version,
                            thingName=thing_name, error=error_msg,
                            statusDetail=status_detail,
-                           needsRecovery="NEEDS_RECOVERY" in (status_detail or ""))
+                           needsRecovery="NEEDS_RECOVERY" in (status_detail or ""),
+                           **({"errorCode": error_code, "errorReason": error_reason}
+                              if error_code is not None else {}))
+
+                    # Authenticity failures after start-next are reported as FAILED;
+                    # still raise SECURITY_ALERT for the same codes as REJECTED.
+                    if error_code in SECURITY_ERROR_CODES:
+                        log.error(json.dumps({
+                            "msg": "SECURITY_ALERT",
+                            "deviceId": device_id, "jobId": job_id,
+                            "errorCode": error_code, "errorReason": error_reason,
+                            "thingName": thing_name, "status": "FAILED",
+                        }))
+                        _audit("SECURITY_ALERT",
+                               f"device:{device_id}",
+                               {"deviceId": device_id, "jobId": job_id},
+                               "ALERT",
+                               packageName=pkg_name, version=version,
+                               thingName=thing_name,
+                               errorCode=error_code, errorReason=error_reason)
 
                 else:  # REJECTED
                     log.warning(json.dumps({

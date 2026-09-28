@@ -21,6 +21,9 @@ infrastructure/06_lambdas/*/package/
 /tmp/ota_*.txt
 /tmp/ota_test.sh
 
+# Generated test artefacts (large binaries — rebuild with infrastructure/make_test_artifact.py)
+test-artifacts/
+
 # Environment / secrets
 .env
 *.env
