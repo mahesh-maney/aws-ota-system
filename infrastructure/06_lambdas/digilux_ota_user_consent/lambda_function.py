@@ -7,10 +7,17 @@ POST /api/v1/ota/my/updates/consent
 Auth: Cognito ID token (any authenticated user).
 
 Body: { "deviceId": "...", "packageName": "...", "version": "...", "accepted": true | false }
-  - "accepted" is optional and defaults to true.
-  - If a PENDING admin-initiated consent record exists for this device + package + version,
-    it is resolved (ACCEPTED or DECLINED).
-  - If no pending consent record exists, the update is applied immediately (user-initiated).
+
+Flow:
+  - accepted=false → audit log only; nothing written to DB; return 200.
+  - accepted=true  → validate device ownership + package ACTIVE + active deployment,
+                      create IoT Job, write ACCEPTED consent record.
+
+Key rules:
+  - Only ACCEPTED consent records exist in the DB — no PENDING, no DECLINED.
+  - User taps NO → log+audit only; user will see the update again on next check_updates.
+  - Retry: if user accepted before and job TIMED_OUT/FAILED, a new IoT Job is created
+    under the same consent record.
 """
 from __future__ import annotations
 
@@ -48,9 +55,6 @@ RATE_LIMIT_MINUTES = int(os.environ.get("RATE_LIMIT_MINUTES", "5"))
 KEY_SERVER_URL     = os.environ.get("KEY_SERVER_URL",     "")
 KEY_SERVER_API_KEY = os.environ.get("KEY_SERVER_API_KEY", "")
 
-SES_SENDER         = os.environ.get("SES_SENDER", "noreply@iot.digilux.co.in")
-SES_REGION         = os.environ.get("SES_REGION", REGION)
-
 # Pre-signed URL expiry tiers
 _TIER1_MAX_MB  = int(os.environ.get("PRESIGN_EXPIRY_TIER1_MAX_MB", "50"))
 _TIER1_SEC     = int(os.environ.get("PRESIGN_EXPIRY_TIER1_SEC",    "3600"))
@@ -69,7 +73,9 @@ CLOUDFRONT_PRIVATE_KEY_SECRET = os.environ.get("CLOUDFRONT_PRIVATE_KEY_SECRET", 
 
 _cf_private_key_cache = None
 
-CONSENTS_USER_INDEX = os.environ.get("CONSENTS_USER_INDEX", "userId-deviceId-index")
+DEPLOYMENTS_TABLE             = os.environ.get("DEPLOYMENTS_TABLE",              "digilux_ota_deployments")
+DEPLOYMENTS_PKG_STATUS_INDEX  = os.environ.get("DEPLOYMENTS_PKG_STATUS_INDEX",   "packageName-status-index")
+CONSENTS_USER_INDEX           = os.environ.get("CONSENTS_USER_INDEX",            "userId-deviceId-index")
 
 OPERATION_TYPE_MAP = {
     "Network_controller_firmware":        1,
@@ -88,7 +94,6 @@ _VERSION_RE = re.compile(r"^[a-zA-Z0-9.\-_]{1,32}$")
 dynamo = boto3.resource("dynamodb", region_name=REGION)
 iot    = boto3.client("iot",        region_name=REGION)
 s3     = boto3.client("s3",         region_name=REGION)
-ses    = boto3.client("ses",        region_name=SES_REGION)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -258,7 +263,8 @@ def _get_device_item(device_id: str) -> dict | None:
     return items[0]
 
 
-_ACTIVE_JOB_STATUSES = {"AWAITING_CONSENT", "QUEUED", "IN_PROGRESS"}
+_ACTIVE_JOB_STATUSES  = {"QUEUED", "IN_PROGRESS"}
+_RETRYABLE_JOB_STATUSES = {"TIMED_OUT", "FAILED"}
 
 
 def _is_job_still_active(job_id: str) -> bool:
@@ -319,86 +325,6 @@ def _check_rate_limit(user_id: str, device_id: str) -> bool:
     _log("debug", "rate_limit_result",
          userId=user_id, deviceId=device_id, isRateLimited=is_limited)
     return is_limited
-
-
-def _get_user_email(user_id: str) -> str | None:
-    """Get user email from Cognito user pool (best-effort)."""
-    _log("debug", "user_email_lookup_start", userId=user_id)
-    try:
-        cognito = boto3.client("cognito-idp", region_name=REGION)
-        pool_id = os.environ.get("COGNITO_USER_POOL_ID", "")
-        if not pool_id:
-            _log("warning", "cognito_pool_id_missing",
-                 detail="COGNITO_USER_POOL_ID env var not set — cannot look up user email")
-            return None
-        resp = cognito.admin_get_user(UserPoolId=pool_id, Username=user_id)
-        for attr in resp.get("UserAttributes", []):
-            if attr["Name"] == "email":
-                _log("debug", "user_email_found",
-                     userId=user_id, emailMasked=attr["Value"][:3] + "***")
-                return attr["Value"]
-        _log("debug", "user_email_not_in_attributes", userId=user_id)
-    except Exception as e:
-        _log("warning", "user_email_lookup_failed",
-             userId=user_id, error=str(e),
-             detail="Best-effort email lookup failed — will use fallback")
-    return None
-
-
-def _send_decline_email(user_email: str, package_name: str, version: str,
-                         device_id: str, reason: str) -> None:
-    """Send SES email notifying user that OTA update was not applied."""
-    if not user_email:
-        _log("warning", "decline_email_skipped",
-             packageName=package_name, version=version, deviceId=device_id,
-             detail="No email address available — skipping decline notification")
-        return
-    _log("info", "decline_email_send_start",
-         packageName=package_name, version=version,
-         deviceId=device_id, recipient=user_email[:3] + "***")
-    try:
-        subject = f"Digilux OTA Update Not Applied — {package_name} v{version}"
-        body_text = (
-            f"Hi,\n\n"
-            f"The firmware update {package_name} v{version} for device {device_id} "
-            f"was not applied.\n\n"
-            f"Reason: {reason}\n\n"
-            f"If this was a mistake, please open the Digilux app to update your device.\n\n"
-            f"— Digilux Team"
-        )
-        body_html = (
-            f"<p>Hi,</p>"
-            f"<p>The firmware update <strong>{package_name} v{version}</strong> "
-            f"for device <code>{device_id}</code> was <strong>not applied</strong>.</p>"
-            f"<p><strong>Reason:</strong> {reason}</p>"
-            f"<p>If this was a mistake, please open the Digilux app to update your device.</p>"
-            f"<p>— Digilux Team</p>"
-        )
-        ses.send_email(
-            Source=SES_SENDER,
-            Destination={"ToAddresses": [user_email]},
-            Message={
-                "Subject": {"Data": subject, "Charset": "UTF-8"},
-                "Body": {
-                    "Text": {"Data": body_text, "Charset": "UTF-8"},
-                    "Html": {"Data": body_html, "Charset": "UTF-8"},
-                },
-            },
-        )
-        _log("info", "decline_email_sent",
-             packageName=package_name, version=version,
-             deviceId=device_id, recipient=user_email[:3] + "***")
-        _audit("DECLINE_EMAIL_SENT", ACTOR,
-               {"packageName": package_name, "version": version, "deviceId": device_id},
-               "SUCCESS", recipientMasked=user_email[:3] + "***")
-    except Exception as e:
-        _log("warning", "decline_email_failed",
-             packageName=package_name, version=version,
-             deviceId=device_id, error=str(e),
-             detail="Non-critical: email send failed — consent is still DECLINED in DB")
-        _audit("DECLINE_EMAIL_FAILED", ACTOR,
-               {"packageName": package_name, "version": version, "deviceId": device_id},
-               "WARN", error=str(e))
 
 
 def _unwrap_data_key(wrapped_key: str) -> str:
@@ -554,33 +480,100 @@ def _create_iot_job(pkg: dict, package_name: str, version: str,
 # Consent handler
 # ──────────────────────────────────────────────────────────────────────────────
 
-def _find_pending_consent(user_id: str, device_id: str,
-                           package_name: str, version: str) -> dict | None:
-    """Find a PENDING admin-initiated consent record for this user/device/package/version."""
-    _log("debug", "pending_consent_lookup",
+def _find_active_deployment_for_consent(package_name: str,
+                                         version: str) -> dict | None:
+    """
+    Find the ACTIVE deployment for a package+version to link a new consent record to.
+    Used for user-initiated PRODUCTION consents (no pre-created PENDING consent).
+    Searches BETA first, then PRODUCTION — caller should prefer whichever applies.
+    Returns the deployment record or None.
+    """
+    _log("debug", "find_active_deployment_for_consent",
+         packageName=package_name, version=version)
+    try:
+        # Query by packageName+status; filter by version
+        resp = dynamo.Table(DEPLOYMENTS_TABLE).query(
+            IndexName=DEPLOYMENTS_PKG_STATUS_INDEX,
+            KeyConditionExpression=(
+                Key("packageName").eq(package_name) & Key("status").eq("ACTIVE")
+            ),
+            FilterExpression=Attr("version").eq(version),
+        )
+        items = resp.get("Items", [])
+        if items:
+            dep = items[0]
+            _log("debug", "found_active_deployment_for_consent",
+                 packageName=package_name, version=version,
+                 deploymentId=dep["deploymentId"],
+                 rolloutStage=dep.get("rolloutStage"))
+            return dep
+        _log("debug", "no_active_deployment_for_consent",
+             packageName=package_name, version=version,
+             detail="User initiated consent for version with no active deployment — allowed")
+    except Exception as e:
+        _log("warning", "find_active_deployment_for_consent_failed",
+             packageName=package_name, version=version, error=str(e))
+    return None
+
+
+def _find_retryable_consent(user_id: str, device_id: str,
+                             package_name: str, version: str) -> dict | None:
+    """
+    Find an ACCEPTED consent for this user/device/package/version where the
+    associated IoT job has TIMED_OUT or FAILED.
+    Used for the retry path: user re-taps YES after a timeout/failure.
+    Returns the consent record if retryable, else None.
+    """
+    _log("debug", "find_retryable_consent",
          userId=user_id, deviceId=device_id,
          packageName=package_name, version=version)
-    resp = dynamo.Table(CONSENTS_TABLE).query(
-        IndexName=CONSENTS_USER_INDEX,
-        KeyConditionExpression=Key("userId").eq(user_id) & Key("deviceId").eq(device_id),
-        FilterExpression=(
-            Attr("status").eq("PENDING") &
-            Attr("packageName").eq(package_name) &
-            Attr("version").eq(version)
-        ),
-    )
-    items = resp.get("Items", [])
-    if items:
-        _log("debug", "pending_consent_found",
+    try:
+        resp = dynamo.Table(CONSENTS_TABLE).query(
+            IndexName=CONSENTS_USER_INDEX,
+            KeyConditionExpression=Key("userId").eq(user_id) & Key("deviceId").eq(device_id),
+            FilterExpression=(
+                Attr("status").eq("ACCEPTED") &
+                Attr("packageName").eq(package_name) &
+                Attr("version").eq(version)
+            ),
+        )
+        candidates = resp.get("Items", [])
+        if not candidates:
+            return None
+
+        # Sort by createdAt descending — check most recent first
+        candidates.sort(key=lambda c: int(c.get("createdAt", 0)), reverse=True)
+
+        for consent in candidates:
+            job_id = consent.get("jobId")
+            if not job_id:
+                continue
+            # Check job status
+            try:
+                jitem = dynamo.Table(OTA_JOBS_TABLE).get_item(
+                    Key={"jobId": job_id}
+                ).get("Item")
+                if not jitem:
+                    continue
+                job_status = jitem.get("status", "")
+                if job_status in _RETRYABLE_JOB_STATUSES:
+                    _log("debug", "retryable_consent_found",
+                         userId=user_id, deviceId=device_id,
+                         consentId=consent["consentId"], jobId=job_id,
+                         jobStatus=job_status)
+                    consent["_retryJobStatus"] = job_status  # carry status for logging
+                    return consent
+            except Exception as e:
+                _log("warning", "job_status_check_for_retry_failed",
+                     jobId=job_id, error=str(e))
+
+        _log("debug", "no_retryable_consent_found",
              userId=user_id, deviceId=device_id,
-             consentId=items[0]["consentId"],
-             deploymentId=items[0].get("deploymentId"))
-    else:
-        _log("debug", "pending_consent_not_found",
-             userId=user_id, deviceId=device_id,
-             packageName=package_name, version=version,
-             detail="No admin-initiated PENDING consent — will try user-initiated path")
-    return items[0] if items else None
+             packageName=package_name, version=version)
+    except Exception as e:
+        _log("warning", "find_retryable_consent_failed",
+             userId=user_id, deviceId=device_id, error=str(e))
+    return None
 
 
 def _handle_consent(user_id: str, email: str, body: dict) -> dict:
@@ -638,170 +631,27 @@ def _handle_consent(user_id: str, email: str, body: dict) -> dict:
     now_ms      = int(time.time() * 1000)
     mac_address = dev.get("macAddress", "")
 
-    # Look for an admin-initiated PENDING consent record
-    consent = _find_pending_consent(user_id, device_id, package_name, version)
-
-    if consent:
-        consent_id    = consent["consentId"]
-        deployment_id = consent.get("deploymentId", "")
-        _log("info", "admin_initiated_consent_found",
-             userId=user_id, deviceId=device_id,
-             consentId=consent_id, deploymentId=deployment_id,
-             packageName=package_name, version=version,
-             accepted=accepted)
-
-        if not accepted:
-            # ── DECLINE ───────────────────────────────────────────────────────
-            _log("info", "consent_decline_start",
-                 userId=user_id, deviceId=device_id,
-                 consentId=consent_id, deploymentId=deployment_id)
-            dynamo.Table(CONSENTS_TABLE).update_item(
-                Key={"consentId": consent_id},
-                UpdateExpression="SET #s = :s, declinedAt = :ts",
-                ExpressionAttributeNames={"#s": "status"},
-                ExpressionAttributeValues={":s": "DECLINED", ":ts": now_ms},
-            )
-            _audit("CONSENT_DECLINED", user_id,
-                   {"consentId": consent_id, "deviceId": device_id,
-                    "packageName": package_name, "version": version},
-                   "SUCCESS", deploymentId=deployment_id)
-            _log("info", "consent_declined",
-                 userId=user_id, deviceId=device_id,
-                 consentId=consent_id, deploymentId=deployment_id,
-                 detail="Device will NOT receive firmware update")
-            user_email = _get_user_email(user_id) or email
-            _send_decline_email(user_email, package_name, version, device_id,
-                                reason="User declined the update")
-            return _resp(200, {
-                "status":  "DECLINED",
-                "message": "Update declined. No firmware changes will be made to your device.",
-            })
-
-        # ── ACCEPT — admin-initiated path ─────────────────────────────────────
-        thing_name = dev.get("thingName")
-        if not thing_name:
-            _log("warning", "accept_blocked_no_thing_name",
-                 userId=user_id, deviceId=device_id, consentId=consent_id,
-                 detail="OTA agent not yet registered — no thingName")
-            return _resp(409, {"error": "Device OTA agent has not started yet."})
-
-        pkg = _get_package(package_name, version)
-        if not pkg or pkg.get("status") != "ACTIVE":
-            _log("warning", "accept_blocked_package_unavailable",
-                 userId=user_id, deviceId=device_id, consentId=consent_id,
-                 packageName=package_name, version=version,
-                 packageStatus=pkg.get("status") if pkg else "NOT_FOUND")
-            return _resp(400, {"error": f"Package {package_name}@{version} is no longer available."})
-
-        if dev.get("pendingJobId"):
-            if _is_job_still_active(dev["pendingJobId"]):
-                _log("warning", "accept_blocked_pending_job",
-                     userId=user_id, deviceId=device_id, consentId=consent_id,
-                     existingJobId=dev["pendingJobId"],
-                     detail="Another update is already in progress on this device")
-                return _resp(409, {
-                    "error": "An update is already in progress on this device.",
-                    "pendingJobId": dev["pendingJobId"],
-                })
-            _clear_stale_pending_job(device_id, mac_address, dev["pendingJobId"])
-
-        artifact_size = pkg.get("artifactSize", 0)
-        if isinstance(artifact_size, Decimal):
-            artifact_size = int(artifact_size)
-        expiry_sec = _presign_expiry(artifact_size)
-        job_id     = f"digilux-ota-{package_name}-{version}-{int(time.time())}".replace(".", "-")
-
-        _log("info", "consent_accept_creating_iot_job",
-             userId=user_id, deviceId=device_id, consentId=consent_id,
-             deploymentId=deployment_id, jobId=job_id,
-             packageName=package_name, version=version,
-             thingName=thing_name, expirySeconds=expiry_sec,
-             artifactSizeBytes=artifact_size)
-
-        t_job = time.monotonic()
-        try:
-            iot_job_arn = _create_iot_job(pkg, package_name, version,
-                                           thing_name, device_id, user_id, job_id, expiry_sec)
-        except RuntimeError as exc:
-            _log("error", "key_server_failure_during_consent_accept",
-                 userId=user_id, deviceId=device_id, error=str(exc))
-            return _resp(500, {"error": "Key service unavailable — please try again"})
-        job_ms = int((time.monotonic() - t_job) * 1000)
-
-        # ── Write results to DynamoDB ─────────────────────────────────────────
-        _log("debug", "consent_accept_writing_dynamo",
-             consentId=consent_id, jobId=job_id, deploymentId=deployment_id)
-        dynamo.Table(CONSENTS_TABLE).update_item(
-            Key={"consentId": consent_id},
-            UpdateExpression="SET #s = :s, acceptedAt = :ts, jobId = :jid",
-            ExpressionAttributeNames={"#s": "status"},
-            ExpressionAttributeValues={":s": "ACCEPTED", ":ts": now_ms, ":jid": job_id},
-        )
-        dynamo.Table(OTA_JOBS_TABLE).put_item(Item={
-            "jobId":          job_id,
-            "iotJobArn":      iot_job_arn,
-            "packageName":    package_name,
-            "version":        version,
-            "deviceType":     pkg.get("deviceType", ""),
-            "targetType":     "THING",
-            "targetId":       device_id,
-            "rolloutStage":   "USER_CONSENTED",
-            "status":         "QUEUED",
-            "createdAt":      now_ms,
-            "createdBy":      f"user:{user_id}",
-            "initiatedBy":    "USER",
-            "consentId":      consent_id,
-            "deploymentId":   deployment_id,
-            "deviceStatuses": {},
-        })
-        dynamo.Table(DEVICE_DATA_TABLE).update_item(
-            Key={"deviceId": device_id, "macAddress": mac_address},
-            UpdateExpression="SET pendingJobId = :jid, lastUpdatedAt = :ts",
-            ExpressionAttributeValues={":jid": job_id, ":ts": now_ms},
-        )
-
-        _audit("CONSENT_ACCEPTED", user_id,
-               {"consentId": consent_id, "deviceId": device_id,
-                "packageName": package_name, "version": version},
-               "SUCCESS",
-               jobId=job_id, iotJobArn=iot_job_arn,
-               deploymentId=deployment_id, thingName=thing_name,
-               artifactSizeBytes=artifact_size, expirySeconds=expiry_sec,
-               jobCreateMs=job_ms)
-        _log("info", "consent_accepted_job_created",
-             userId=user_id, deviceId=device_id,
-             consentId=consent_id, deploymentId=deployment_id,
-             jobId=job_id, iotJobArn=iot_job_arn,
-             packageName=package_name, version=version,
-             jobCreateMs=job_ms)
-        return _resp(202, {
-            "jobId":       job_id,
-            "deviceId":    device_id,
-            "packageName": package_name,
-            "version":     version,
-            "status":      "QUEUED",
-            "message": (
-                "Update accepted. Your device will download and install the update shortly. "
-                "Use the status endpoint to track progress."
-            ),
-        })
-
-    # ── No admin-initiated consent found — user-initiated path ────────────────
-    _log("info", "user_initiated_consent_path",
-         userId=user_id, deviceId=device_id,
-         packageName=package_name, version=version, accepted=accepted)
-
+    # ── User taps NO → audit log only, nothing written ────────────────────────
     if not accepted:
-        _log("info", "user_initiated_decline_no_pending",
+        _log("info", "consent_declined_log_only",
              userId=user_id, deviceId=device_id,
-             packageName=package_name, version=version)
-        return _resp(404, {"error": "No pending update request found for this device."})
+             packageName=package_name, version=version,
+             detail="DECLINED: not written to DB per architecture — user will see update again next check")
+        _audit("CONSENT_DECLINED", user_id,
+               {"deviceId": device_id, "packageName": package_name, "version": version},
+               "DECLINED",
+               detail="User tapped NO — audit log only, no DB record written")
+        return _resp(200, {
+            "status":  "DECLINED",
+            "message": "Update declined. No firmware changes will be made to your device.",
+        })
 
     pkg = _get_package(package_name, version)
     if not pkg:
         _log("warning", "user_initiated_package_not_found",
              userId=user_id, packageName=package_name, version=version)
-        return _resp(404, {"status": "failed", "errorMessage": f"Package {package_name}@{version} not found"})
+        return _resp(404, {"status": "failed",
+                           "errorMessage": f"Package {package_name}@{version} not found"})
     if pkg.get("status") != "ACTIVE":
         _log("warning", "user_initiated_package_not_active",
              userId=user_id, packageName=package_name, version=version,
@@ -836,6 +686,110 @@ def _handle_consent(user_id: str, email: str, body: dict) -> dict:
             "error": f"Requested version {version} is not newer than installed version {installed_ver}."
         })
 
+    artifact_size = pkg.get("artifactSize", 0)
+    if isinstance(artifact_size, Decimal):
+        artifact_size = int(artifact_size)
+    expiry_sec = _presign_expiry(artifact_size)
+
+    # ── Retry path: ACCEPTED consent + TIMED_OUT / FAILED job ────────────────
+    # Per architecture: "no new consent needed — user already agreed"
+    retry_consent = _find_retryable_consent(user_id, device_id, package_name, version)
+    if retry_consent:
+        retry_consent_id = retry_consent["consentId"]
+        prev_job_status  = retry_consent.get("_retryJobStatus", "TIMED_OUT")
+        prev_job_id      = retry_consent.get("jobId", "")
+        deployment_id    = retry_consent.get("deploymentId", "")
+
+        _log("info", "retry_path_creating_new_job",
+             userId=user_id, deviceId=device_id,
+             retryConsentId=retry_consent_id, prevJobId=prev_job_id,
+             prevJobStatus=prev_job_status, deploymentId=deployment_id,
+             packageName=package_name, version=version,
+             detail="Retrying after TIMED_OUT/FAILED — no new consent needed, user already agreed")
+
+        new_job_id = f"digilux-ota-{package_name}-{version}-{int(time.time())}".replace(".", "-")
+
+        if dev.get("pendingJobId") and dev["pendingJobId"] != prev_job_id:
+            if _is_job_still_active(dev["pendingJobId"]):
+                _log("warning", "retry_blocked_by_another_pending_job",
+                     userId=user_id, deviceId=device_id,
+                     existingJobId=dev["pendingJobId"])
+                return _resp(409, {
+                    "error": "A different update is already in progress on this device.",
+                    "pendingJobId": dev["pendingJobId"],
+                })
+            _clear_stale_pending_job(device_id, mac_address, dev["pendingJobId"])
+
+        t_job = time.monotonic()
+        try:
+            iot_job_arn = _create_iot_job(pkg, package_name, version,
+                                           thing_name, device_id, user_id,
+                                           new_job_id, expiry_sec)
+        except RuntimeError as exc:
+            _log("error", "key_server_failure_during_retry",
+                 userId=user_id, deviceId=device_id, error=str(exc))
+            return _resp(500, {"error": "Key service unavailable — please try again"})
+        job_ms = int((time.monotonic() - t_job) * 1000)
+
+        # Update consent record with new jobId (consent itself stays ACCEPTED)
+        dynamo.Table(CONSENTS_TABLE).update_item(
+            Key={"consentId": retry_consent_id},
+            UpdateExpression="SET jobId = :jid, retriedAt = :ts",
+            ExpressionAttributeValues={":jid": new_job_id, ":ts": now_ms},
+        )
+        dynamo.Table(OTA_JOBS_TABLE).put_item(Item={
+            "jobId":          new_job_id,
+            "iotJobArn":      iot_job_arn,
+            "packageName":    package_name,
+            "version":        version,
+            "deviceType":     pkg.get("deviceType", ""),
+            "targetType":     "THING",
+            "targetId":       device_id,
+            "rolloutStage":   "USER_RETRY",
+            "status":         "QUEUED",
+            "createdAt":      now_ms,
+            "createdBy":      f"user:{user_id}",
+            "initiatedBy":    "USER_RETRY",
+            "consentId":      retry_consent_id,
+            "deploymentId":   deployment_id,
+            "previousJobId":  prev_job_id,
+            "deviceStatuses": {},
+        })
+        dynamo.Table(DEVICE_DATA_TABLE).update_item(
+            Key={"deviceId": device_id, "macAddress": mac_address},
+            UpdateExpression="SET pendingJobId = :jid, lastUpdatedAt = :ts",
+            ExpressionAttributeValues={":jid": new_job_id, ":ts": now_ms},
+        )
+
+        _audit("USER_CONSENT_RETRY_JOB_CREATED", user_id,
+               {"deviceId": device_id, "packageName": package_name, "version": version},
+               "SUCCESS",
+               newJobId=new_job_id, iotJobArn=iot_job_arn,
+               retryConsentId=retry_consent_id,
+               prevJobId=prev_job_id, prevJobStatus=prev_job_status,
+               deploymentId=deployment_id, thingName=thing_name,
+               artifactSizeBytes=artifact_size, jobCreateMs=job_ms)
+        _log("info", "retry_job_created",
+             userId=user_id, deviceId=device_id,
+             newJobId=new_job_id, iotJobArn=iot_job_arn,
+             retryConsentId=retry_consent_id,
+             prevJobId=prev_job_id, prevJobStatus=prev_job_status,
+             packageName=package_name, version=version, jobCreateMs=job_ms)
+
+        return _resp(202, {
+            "jobId":       new_job_id,
+            "deviceId":    device_id,
+            "packageName": package_name,
+            "version":     version,
+            "status":      "QUEUED",
+            "retried":     True,
+            "message": (
+                "Retry initiated. Your device will attempt to download and install the update. "
+                "Use the status endpoint to track progress."
+            ),
+        })
+
+    # ── User-initiated path (no pre-existing consent) ─────────────────────────
     if dev.get("pendingJobId"):
         if _is_job_still_active(dev["pendingJobId"]):
             _log("warning", "user_initiated_blocked_pending_job",
@@ -847,17 +801,18 @@ def _handle_consent(user_id: str, email: str, body: dict) -> dict:
             })
         _clear_stale_pending_job(device_id, mac_address, dev["pendingJobId"])
 
-    consent_id    = str(uuid.uuid4())
-    job_id        = f"digilux-ota-{package_name}-{version}-{int(time.time())}".replace(".", "-")
-    artifact_size = pkg.get("artifactSize", 0)
-    if isinstance(artifact_size, Decimal):
-        artifact_size = int(artifact_size)
-    expiry_sec = _presign_expiry(artifact_size)
+    # Look up the active deployment to link this consent to it
+    active_dep     = _find_active_deployment_for_consent(package_name, version)
+    deployment_id  = active_dep["deploymentId"] if active_dep else ""
+
+    consent_id     = str(uuid.uuid4())
+    job_id         = f"digilux-ota-{package_name}-{version}-{int(time.time())}".replace(".", "-")
 
     _log("info", "user_initiated_creating_iot_job",
          userId=user_id, deviceId=device_id, consentId=consent_id,
          jobId=job_id, packageName=package_name, version=version,
          thingName=thing_name, expirySeconds=expiry_sec,
+         deploymentId=deployment_id,
          installedVersion=installed_ver, artifactSizeBytes=artifact_size)
 
     t_job = time.monotonic()
@@ -870,10 +825,8 @@ def _handle_consent(user_id: str, email: str, body: dict) -> dict:
         return _resp(500, {"error": "Key service unavailable — please try again"})
     job_ms = int((time.monotonic() - t_job) * 1000)
 
-    # ── Write results to DynamoDB ─────────────────────────────────────────────
-    _log("debug", "user_initiated_writing_dynamo",
-         consentId=consent_id, jobId=job_id)
-    dynamo.Table(CONSENTS_TABLE).put_item(Item={
+    # Write consent + job records
+    consent_item = {
         "consentId":   consent_id,
         "userId":      user_id,
         "deviceId":    device_id,
@@ -882,8 +835,13 @@ def _handle_consent(user_id: str, email: str, body: dict) -> dict:
         "jobId":       job_id,
         "status":      "ACCEPTED",
         "consentedAt": now_ms,
-    })
-    dynamo.Table(OTA_JOBS_TABLE).put_item(Item={
+    }
+    if deployment_id:
+        consent_item["deploymentId"] = deployment_id
+
+    dynamo.Table(CONSENTS_TABLE).put_item(Item=consent_item)
+
+    job_item = {
         "jobId":          job_id,
         "iotJobArn":      iot_job_arn,
         "packageName":    package_name,
@@ -898,7 +856,11 @@ def _handle_consent(user_id: str, email: str, body: dict) -> dict:
         "initiatedBy":    "USER",
         "consentId":      consent_id,
         "deviceStatuses": {},
-    })
+    }
+    if deployment_id:
+        job_item["deploymentId"] = deployment_id
+
+    dynamo.Table(OTA_JOBS_TABLE).put_item(Item=job_item)
     dynamo.Table(DEVICE_DATA_TABLE).update_item(
         Key={"deviceId": device_id, "macAddress": mac_address},
         UpdateExpression="SET pendingJobId = :jid, lastUpdatedAt = :ts",
@@ -909,12 +871,14 @@ def _handle_consent(user_id: str, email: str, body: dict) -> dict:
            {"deviceId": device_id, "packageName": package_name, "version": version},
            "SUCCESS",
            consentId=consent_id, jobId=job_id, iotJobArn=iot_job_arn,
-           thingName=thing_name, artifactSizeBytes=artifact_size,
-           expirySeconds=expiry_sec, jobCreateMs=job_ms)
+           thingName=thing_name, deploymentId=deployment_id,
+           artifactSizeBytes=artifact_size, expirySeconds=expiry_sec,
+           jobCreateMs=job_ms)
     _log("info", "user_initiated_job_created",
          userId=user_id, deviceId=device_id,
          consentId=consent_id, jobId=job_id, iotJobArn=iot_job_arn,
-         packageName=package_name, version=version, jobCreateMs=job_ms)
+         packageName=package_name, version=version,
+         deploymentId=deployment_id, jobCreateMs=job_ms)
 
     return _resp(202, {
         "jobId":       job_id,
