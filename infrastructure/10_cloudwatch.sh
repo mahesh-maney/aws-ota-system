@@ -1,33 +1,41 @@
 #!/bin/bash
-# Phase 10 — CloudWatch log groups, alarms, and dashboard
+# Phase 10 — CloudWatch log groups and dashboard
 set -euo pipefail
+export AWS_PAGER="" PAGER=cat
 
-REGION="ap-south-1"
-ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
-SNS_TOPIC_ARN=""   # Optional: set to SNS ARN for alert notifications
+REGION="${REGION:-ap-south-1}"
+PREFIX="${PREFIX:-digilux}"
 
-echo "==> Creating Lambda log groups"
-for FUNC in \
-  digilux_ota_package_register \
-  digilux_ota_compatibility_check \
-  digilux_ota_job_create \
-  digilux_ota_status_handler \
-  digilux_ota_device_register; do
+ALL_FUNCS=(
+  "${PREFIX}_ota_upload_url"
+  "${PREFIX}_ota_package_activate"
+  "${PREFIX}_ota_artifact_processor"
+  "${PREFIX}_ota_package_register"
+  "${PREFIX}_ota_compatibility_check"
+  "${PREFIX}_ota_job_create"
+  "${PREFIX}_ota_status_handler"
+  "${PREFIX}_ota_device_register"
+  "${PREFIX}_ota_user_check_updates"
+  "${PREFIX}_ota_user_consent"
+  "${PREFIX}_ota_user_update_status"
+  "${PREFIX}_ota_user_get_download_link"
+)
+
+echo "==> CloudWatch log groups (30-day retention)"
+for FUNC in "${ALL_FUNCS[@]}"; do
+  LOG_GROUP="/aws/lambda/${FUNC}"
   aws logs create-log-group \
-    --log-group-name "/aws/lambda/$FUNC" \
-    --region "$REGION" 2>/dev/null || true
+    --log-group-name "$LOG_GROUP" --region "$REGION" 2>/dev/null || true
   aws logs put-retention-policy \
-    --log-group-name "/aws/lambda/$FUNC" \
+    --log-group-name "$LOG_GROUP" \
     --retention-in-days 30 \
     --region "$REGION"
-  echo "    /aws/lambda/$FUNC (30d retention)"
+  echo "    $LOG_GROUP"
 done
 
-echo "==> Creating CloudWatch Dashboard: digilux-ota-fleet"
-aws cloudwatch put-dashboard \
-  --dashboard-name "digilux-ota-fleet" \
-  --region "$REGION" \
-  --dashboard-body '{
+# Build dashboard JSON with dynamic PREFIX
+DASHBOARD_BODY=$(cat <<ENDDASH
+{
   "widgets": [
     {
       "type": "metric",
@@ -35,12 +43,15 @@ aws cloudwatch put-dashboard \
       "properties": {
         "title": "OTA Lambda Errors",
         "metrics": [
-          ["AWS/Lambda", "Errors", "FunctionName", "digilux_ota_job_create", {"stat": "Sum", "period": 300}],
-          ["AWS/Lambda", "Errors", "FunctionName", "digilux_ota_status_handler", {"stat": "Sum", "period": 300}],
-          ["AWS/Lambda", "Errors", "FunctionName", "digilux_ota_device_register", {"stat": "Sum", "period": 300}]
+          ["AWS/Lambda","Errors","FunctionName","${PREFIX}_ota_job_create",        {"stat":"Sum","period":300}],
+          ["AWS/Lambda","Errors","FunctionName","${PREFIX}_ota_artifact_processor",{"stat":"Sum","period":300}],
+          ["AWS/Lambda","Errors","FunctionName","${PREFIX}_ota_status_handler",    {"stat":"Sum","period":300}],
+          ["AWS/Lambda","Errors","FunctionName","${PREFIX}_ota_device_register",   {"stat":"Sum","period":300}],
+          ["AWS/Lambda","Errors","FunctionName","${PREFIX}_ota_user_consent",      {"stat":"Sum","period":300}],
+          ["AWS/Lambda","Errors","FunctionName","${PREFIX}_ota_user_check_updates",{"stat":"Sum","period":300}]
         ],
         "view": "timeSeries",
-        "region": "ap-south-1",
+        "region": "${REGION}",
         "period": 300
       }
     },
@@ -50,11 +61,13 @@ aws cloudwatch put-dashboard \
       "properties": {
         "title": "OTA Lambda Invocations",
         "metrics": [
-          ["AWS/Lambda", "Invocations", "FunctionName", "digilux_ota_status_handler", {"stat": "Sum", "period": 300}],
-          ["AWS/Lambda", "Invocations", "FunctionName", "digilux_ota_device_register", {"stat": "Sum", "period": 300}]
+          ["AWS/Lambda","Invocations","FunctionName","${PREFIX}_ota_status_handler",    {"stat":"Sum","period":300}],
+          ["AWS/Lambda","Invocations","FunctionName","${PREFIX}_ota_device_register",   {"stat":"Sum","period":300}],
+          ["AWS/Lambda","Invocations","FunctionName","${PREFIX}_ota_user_check_updates",{"stat":"Sum","period":300}],
+          ["AWS/Lambda","Invocations","FunctionName","${PREFIX}_ota_user_consent",      {"stat":"Sum","period":300}]
         ],
         "view": "timeSeries",
-        "region": "ap-south-1",
+        "region": "${REGION}",
         "period": 300
       }
     },
@@ -63,8 +76,8 @@ aws cloudwatch put-dashboard \
       "x": 0, "y": 6, "width": 24, "height": 6,
       "properties": {
         "title": "Recent OTA Status Events",
-        "query": "SOURCE \"/aws/lambda/digilux_ota_status_handler\" | fields @timestamp, @message | filter @message like /Job/ | sort @timestamp desc | limit 50",
-        "region": "ap-south-1",
+        "query": "SOURCE \"/aws/lambda/${PREFIX}_ota_status_handler\" | fields @timestamp, @message | filter @message like /Job/ | sort @timestamp desc | limit 50",
+        "region": "${REGION}",
         "view": "table"
       }
     },
@@ -72,51 +85,24 @@ aws cloudwatch put-dashboard \
       "type": "log",
       "x": 0, "y": 12, "width": 24, "height": 6,
       "properties": {
-        "title": "OTA Errors and Failures",
-        "query": "SOURCE \"/aws/lambda/digilux_ota_status_handler\" | SOURCE \"/aws/lambda/digilux_ota_job_create\" | fields @timestamp, @message | filter @message like /ERROR/ or @message like /FAILED/ | sort @timestamp desc | limit 50",
-        "region": "ap-south-1",
+        "title": "OTA Errors",
+        "query": "SOURCE \"/aws/lambda/${PREFIX}_ota_job_create\" | SOURCE \"/aws/lambda/${PREFIX}_ota_status_handler\" | SOURCE \"/aws/lambda/${PREFIX}_ota_artifact_processor\" | fields @timestamp, @message | filter @message like /ERROR/ or @message like /FAILED/ | sort @timestamp desc | limit 50",
+        "region": "${REGION}",
         "view": "table"
       }
     }
   ]
-}'
-echo "    Dashboard created: digilux-ota-fleet"
+}
+ENDDASH
+)
 
-echo "==> Creating CloudWatch Alarms"
-
-# Alarm: OTA Lambda errors spike
-aws cloudwatch put-metric-alarm \
-  --alarm-name "digilux-ota-lambda-errors" \
-  --alarm-description "OTA Lambda function errors — investigate immediately" \
-  --metric-name Errors \
-  --namespace AWS/Lambda \
-  --statistic Sum \
-  --period 300 \
-  --threshold 3 \
-  --comparison-operator GreaterThanOrEqualToThreshold \
-  --evaluation-periods 1 \
-  --dimensions Name=FunctionName,Value=digilux_ota_status_handler \
-  --treat-missing-data notBreaching \
+echo ""
+echo "==> CloudWatch Dashboard: ${PREFIX}-ota-fleet"
+aws cloudwatch put-dashboard \
+  --dashboard-name "${PREFIX}-ota-fleet" \
   --region "$REGION" \
-  ${SNS_TOPIC_ARN:+--alarm-actions "$SNS_TOPIC_ARN"}
-echo "    Alarm: digilux-ota-lambda-errors"
-
-# Alarm: IoT rule errors
-aws cloudwatch put-metric-alarm \
-  --alarm-name "digilux-ota-rule-errors" \
-  --alarm-description "OTA IoT rule failed to deliver messages to Lambda" \
-  --metric-name TopicMatch \
-  --namespace AWS/IoT \
-  --statistic Sum \
-  --period 300 \
-  --threshold 1 \
-  --comparison-operator GreaterThanOrEqualToThreshold \
-  --evaluation-periods 1 \
-  --treat-missing-data notBreaching \
-  --region "$REGION" \
-  ${SNS_TOPIC_ARN:+--alarm-actions "$SNS_TOPIC_ARN"} || true
-echo "    Alarm: digilux-ota-rule-errors"
+  --dashboard-body "$DASHBOARD_BODY"
+echo "    Dashboard created."
 
 echo ""
 echo "CloudWatch setup complete."
-echo "View dashboard: https://ap-south-1.console.aws.amazon.com/cloudwatch/home?region=ap-south-1#dashboards:name=digilux-ota-fleet"

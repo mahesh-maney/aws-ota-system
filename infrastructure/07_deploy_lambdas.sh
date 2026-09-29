@@ -1,133 +1,237 @@
 #!/bin/bash
-# Phase 7 — Package and deploy all OTA Lambda functions
+# Phase 7 — Deploy all OTA Lambda functions (admin + user)
 set -euo pipefail
+export AWS_PAGER="" PAGER=cat
+source "$(dirname "$0")/_lib.sh"
 
-REGION="ap-south-1"
-ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
-ROLE_ARN="arn:aws:iam::${ACCOUNT_ID}:role/digilux-ota-lambda-role"
-RUNTIME="python3.11"
+log_section "Phase 7: Deploy Lambda Functions"
+
+REGION="${REGION:-ap-south-1}"
+PREFIX="${PREFIX:-digilux}"
+ACCOUNT_ID="${ACCOUNT_ID:-$(aws sts get-caller-identity --query Account --output text)}"
+
+ADMIN_ROLE_ARN="arn:aws:iam::${ACCOUNT_ID}:role/${LAMBDA_ROLE_NAME:-${PREFIX}-ota-lambda-role}"
+USER_ROLE_ARN="arn:aws:iam::${ACCOUNT_ID}:role/${USER_LAMBDA_ROLE_NAME:-${PREFIX}-ota-user-lambda-role}"
+
+ARTIFACT_BUCKET="${ARTIFACT_BUCKET:-${PREFIX}-ota-artifacts}"
+SIGNING_SECRET="${SIGNING_SECRET:-${PREFIX}-ota-signing-key}"
+PACKAGES_TABLE="${PACKAGES_TABLE:-${PREFIX}_ota_packages}"
+OTA_JOBS_TABLE="${OTA_JOBS_TABLE:-${PREFIX}_ota_jobs}"
+COMPAT_TABLE="${COMPAT_TABLE:-${PREFIX}_ota_compatibility}"
+DEPLOYMENTS_TABLE="${DEPLOYMENTS_TABLE:-${PREFIX}_ota_deployments}"
+CONSENTS_TABLE="${CONSENTS_TABLE:-${PREFIX}_ota_user_consents}"
+BETA_USERS_TABLE="${BETA_USERS_TABLE:-${PREFIX}_ota_beta_users}"
+DEVICE_DATA_TABLE="${DEVICE_DATA_TABLE:-${PREFIX}_device_data}"
+USER_COGNITO_POOL_ID="${USER_COGNITO_POOL_ID:-}"
+SES_SENDER="${SES_SENDER_EMAIL:-noreply@example.com}"
+
+IOT_ROOT_GROUP="${IOT_ROOT_GROUP:-DIGILUX}"
+IOT_PRODUCTION_GROUP="${IOT_PRODUCTION_GROUP:-PRODUCTION}"
+IOT_GATEWAYS_GROUP="${IOT_GATEWAYS_GROUP:-GATEWAYS}"
+IOT_TOUCH_PANELS_GROUP="${IOT_TOUCH_PANELS_GROUP:-TOUCH-PANELS}"
+IOT_GATEWAY_MODELS="${IOT_GATEWAY_MODELS:-DGW-100,DGW-200}"
+IOT_TOUCH_PANEL_MODELS="${IOT_TOUCH_PANEL_MODELS:-TP-100,TP-200}"
+CLOUDFRONT_DOMAIN="${CLOUDFRONT_DOMAIN:-}"
+CLOUDFRONT_KEY_PAIR_ID="${CLOUDFRONT_KEY_PAIR_ID:-}"
+CLOUDFRONT_KEY_SECRET="${CLOUDFRONT_KEY_SECRET_NAME:-${PREFIX}-ota-cloudfront-key}"
+PRESIGN_EXPIRY_TIER1_MAX_MB="${PRESIGN_EXPIRY_TIER1_MAX_MB:-50}"
+PRESIGN_EXPIRY_TIER1_SEC="${PRESIGN_EXPIRY_TIER1_SEC:-3600}"
+PRESIGN_EXPIRY_TIER2_MAX_MB="${PRESIGN_EXPIRY_TIER2_MAX_MB:-200}"
+PRESIGN_EXPIRY_TIER2_SEC="${PRESIGN_EXPIRY_TIER2_SEC:-21600}"
+PRESIGN_EXPIRY_TIER3_MAX_MB="${PRESIGN_EXPIRY_TIER3_MAX_MB:-500}"
+PRESIGN_EXPIRY_TIER3_SEC="${PRESIGN_EXPIRY_TIER3_SEC:-86400}"
+PRESIGN_EXPIRY_TIER4_SEC="${PRESIGN_EXPIRY_TIER4_SEC:-172800}"
+IOT_JOB_TIMEOUT_MINUTES="${IOT_JOB_TIMEOUT_MINUTES:-1440}"
+CANARY_MAX="${CANARY_MAX:-5}"
+
 LAMBDA_DIR="$(cd "$(dirname "$0")/06_lambdas" && pwd)"
+RUNTIME="python3.11"
 
-# Load configurable values from ota.config
-ENV_FILE="$(dirname "$0")/ota.config"
-if [[ -f "${ENV_FILE}" ]]; then
-  source "${ENV_FILE}"
-  echo "Loaded config from ${ENV_FILE}"
-else
-  echo "WARNING: ${ENV_FILE} not found — using Lambda defaults"
-fi
+log_info "Prefix          : $PREFIX"
+log_info "Region          : $REGION"
+log_info "Account         : $ACCOUNT_ID"
+log_info "Admin role      : $ADMIN_ROLE_ARN"
+log_info "User role       : $USER_ROLE_ARN"
+log_info "Artifact bucket : $ARTIFACT_BUCKET"
+log_info "Lambda dir      : $LAMBDA_DIR"
 
-COMMON_ENV="Variables={
-  REGION=$REGION,
-  ACCOUNT_ID=$ACCOUNT_ID,
-  DEVICE_DATA_TABLE=digilux_device_data,
-  PACKAGES_TABLE=digilux_ota_packages,
-  OTA_JOBS_TABLE=digilux_ota_jobs,
-  COMPAT_TABLE=digilux_ota_compatibility,
-  ARTIFACT_BUCKET=digilux-ota-artifacts,
-  SIGNING_SECRET=digilux-ota-signing-key,
-  PRESIGN_EXPIRY_TIER1_MAX_MB=${PRESIGN_EXPIRY_TIER1_MAX_MB:-50},
-  PRESIGN_EXPIRY_TIER1_SEC=${PRESIGN_EXPIRY_TIER1_SEC:-3600},
-  PRESIGN_EXPIRY_TIER2_MAX_MB=${PRESIGN_EXPIRY_TIER2_MAX_MB:-200},
-  PRESIGN_EXPIRY_TIER2_SEC=${PRESIGN_EXPIRY_TIER2_SEC:-21600},
-  PRESIGN_EXPIRY_TIER3_MAX_MB=${PRESIGN_EXPIRY_TIER3_MAX_MB:-500},
-  PRESIGN_EXPIRY_TIER3_SEC=${PRESIGN_EXPIRY_TIER3_SEC:-86400},
-  PRESIGN_EXPIRY_TIER4_SEC=${PRESIGN_EXPIRY_TIER4_SEC:-172800},
-  IOT_JOB_TIMEOUT_MINUTES=${IOT_JOB_TIMEOUT_MINUTES:-1440},
-  CLOUDFRONT_DOMAIN=${CLOUDFRONT_DOMAIN:-},
-  CLOUDFRONT_KEY_PAIR_ID=${CLOUDFRONT_KEY_PAIR_ID:-},
-  CLOUDFRONT_PRIVATE_KEY_SECRET=${CLOUDFRONT_PRIVATE_KEY_SECRET:-digilux-ota-cloudfront-key},
-  COGNITO_POOL_ID=ap-south-1_h1o8s7257,
-  CANARY_GROUP=DGX-Canary,
-  CANARY_MAX=5
-}"
+require_cmd python3 pip zip
 
+# ── Build environment JSON file ────────────────────────────────────────────────
+# AWS CLI --environment accepts: {"Variables":{"KEY":"VALUE",...}}
+# We write this to a temp file to avoid all shell quoting issues.
+ENV_JSON_FILE="/tmp/${PREFIX}_ota_lambda_env.json"
+python3 -c "
+import json, sys
+env = {
+    'Variables': {
+        'REGION': '${REGION}',
+        'ACCOUNT_ID': '${ACCOUNT_ID}',
+        'DEVICE_DATA_TABLE': '${DEVICE_DATA_TABLE}',
+        'PACKAGES_TABLE': '${PACKAGES_TABLE}',
+        'OTA_JOBS_TABLE': '${OTA_JOBS_TABLE}',
+        'COMPAT_TABLE': '${COMPAT_TABLE}',
+        'CONSENTS_TABLE': '${CONSENTS_TABLE}',
+        'DEPLOYMENTS_TABLE': '${DEPLOYMENTS_TABLE}',
+        'DEPLOYMENTS_PKG_STATUS_INDEX': 'packageName-status-index',
+        'BETA_USERS_TABLE': '${BETA_USERS_TABLE}',
+        'ARTIFACT_BUCKET': '${ARTIFACT_BUCKET}',
+        'SIGNING_SECRET': '${SIGNING_SECRET}',
+        'CLOUDFRONT_DOMAIN': '${CLOUDFRONT_DOMAIN}',
+        'CLOUDFRONT_KEY_PAIR_ID': '${CLOUDFRONT_KEY_PAIR_ID}',
+        'CLOUDFRONT_PRIVATE_KEY_SECRET': '${CLOUDFRONT_KEY_SECRET}',
+        'COGNITO_POOL_ID': '${USER_COGNITO_POOL_ID}',
+        'COGNITO_USER_POOL_ID': '${USER_COGNITO_POOL_ID}',
+        'SES_SENDER': '${SES_SENDER}',
+        'PRESIGN_EXPIRY_TIER1_MAX_MB': '${PRESIGN_EXPIRY_TIER1_MAX_MB}',
+        'PRESIGN_EXPIRY_TIER1_SEC': '${PRESIGN_EXPIRY_TIER1_SEC}',
+        'PRESIGN_EXPIRY_TIER2_MAX_MB': '${PRESIGN_EXPIRY_TIER2_MAX_MB}',
+        'PRESIGN_EXPIRY_TIER2_SEC': '${PRESIGN_EXPIRY_TIER2_SEC}',
+        'PRESIGN_EXPIRY_TIER3_MAX_MB': '${PRESIGN_EXPIRY_TIER3_MAX_MB}',
+        'PRESIGN_EXPIRY_TIER3_SEC': '${PRESIGN_EXPIRY_TIER3_SEC}',
+        'PRESIGN_EXPIRY_TIER4_SEC': '${PRESIGN_EXPIRY_TIER4_SEC}',
+        'IOT_JOB_TIMEOUT_MINUTES': '${IOT_JOB_TIMEOUT_MINUTES}',
+        'CANARY_GROUP': '${IOT_ROOT_GROUP}',
+        'CANARY_MAX': '${CANARY_MAX}',
+        'ROOT_GROUP': '${IOT_ROOT_GROUP}',
+        'PRODUCTION_GROUP': '${IOT_PRODUCTION_GROUP}',
+        'GATEWAYS_GROUP': '${IOT_GATEWAYS_GROUP}',
+        'TOUCH_PANELS_GROUP': '${IOT_TOUCH_PANELS_GROUP}',
+        'GATEWAY_MODELS': '${IOT_GATEWAY_MODELS}',
+        'TOUCH_PANEL_MODELS': '${IOT_TOUCH_PANEL_MODELS}',
+        'DEVICE_DATA_USER_INDEX': 'userId-index',
+        'CONSENTS_USER_INDEX': 'userId-deviceId-index',
+        'CONSENTS_JOB_INDEX': 'jobId-index',
+        'CONSENTS_DEPLOYMENT_INDEX': 'deploymentId-index',
+        'LOG_LEVEL': 'INFO',
+    }
+}
+print(json.dumps(env))
+" > "$ENV_JSON_FILE"
+log_ok "Environment JSON written to $ENV_JSON_FILE  ($(wc -c < "$ENV_JSON_FILE") bytes)"
+
+# ── deploy_lambda ──────────────────────────────────────────────────────────────
+# Usage: deploy_lambda <src_suffix> <role_arn>
+#   src_suffix: the part after "digilux_ota_" in the source directory name
+#   Deployed function name: ${PREFIX}_ota_<src_suffix>
 deploy_lambda() {
-  local NAME="$1"
-  local HANDLER="$2"
-  local SRC_DIR="$LAMBDA_DIR/$NAME"
-  local ZIP_FILE="/tmp/${NAME}.zip"
+  local SRC_SUFFIX="$1"
+  local ROLE_ARN="$2"
+  local SRC_DIR_NAME="digilux_ota_${SRC_SUFFIX}"
+  local FUNC_NAME="${PREFIX}_ota_${SRC_SUFFIX}"
+  local SRC_DIR="${LAMBDA_DIR}/${SRC_DIR_NAME}"
+  local ZIP_FILE="/tmp/${FUNC_NAME}.zip"
 
-  echo ""
-  echo "==> Deploying: $NAME"
+  log_step "$FUNC_NAME"
 
-  # Install dependencies if requirements.txt exists
-  if [ -f "$SRC_DIR/requirements.txt" ]; then
-    echo "    Installing dependencies (Linux x86_64 platform)..."
-    PKG_DIR="$SRC_DIR/package"
-    rm -rf "$PKG_DIR" && mkdir -p "$PKG_DIR"
-    # Use --platform to get Linux-compatible binaries (needed for C-extension packages)
+  if [[ ! -d "$SRC_DIR" ]]; then
+    log_warn "Source directory not found: $SRC_DIR — skipping."
+    return
+  fi
+
+  # ── Build zip ────────────────────────────────────────────────────────────────
+  if [[ -f "${SRC_DIR}/requirements.txt" ]]; then
+    log_info "  Installing dependencies for $FUNC_NAME (linux/x86_64)..."
+    local PKG_TMP="/tmp/${FUNC_NAME}_pkg"
+    rm -rf "$PKG_TMP" && mkdir -p "$PKG_TMP"
     pip install -q \
       --platform manylinux2014_x86_64 \
       --python-version 3.11 \
       --only-binary=:all: \
       --implementation cp \
-      -r "$SRC_DIR/requirements.txt" \
-      -t "$PKG_DIR/" --upgrade
-    cp "$SRC_DIR/lambda_function.py" "$PKG_DIR/"
-    cd "$PKG_DIR" && zip -qr "$ZIP_FILE" . && cd - > /dev/null
+      --upgrade \
+      -r "${SRC_DIR}/requirements.txt" \
+      -t "$PKG_TMP/"
+    cp "${SRC_DIR}/lambda_function.py" "$PKG_TMP/"
+    cd "$PKG_TMP" && zip -qr "$ZIP_FILE" . && cd - > /dev/null
+    local ZIP_KB=$(( $(wc -c < "$ZIP_FILE") / 1024 ))
+    rm -rf "$PKG_TMP"
+    log_info "  Zip: $ZIP_FILE  (${ZIP_KB} KB with deps)"
   else
     cd "$SRC_DIR" && zip -q "$ZIP_FILE" lambda_function.py && cd - > /dev/null
+    log_info "  Zip: $ZIP_FILE  (no deps)"
   fi
 
-  if aws lambda get-function --function-name "$NAME" --region "$REGION" 2>/dev/null; then
-    echo "    Updating existing function..."
+  # ── Create or update ──────────────────────────────────────────────────────────
+  if aws lambda get-function --function-name "$FUNC_NAME" --region "$REGION" \
+       2>/dev/null | grep -q '"FunctionName"'; then
+    log_info "  Updating existing function..."
     aws lambda update-function-code \
-      --function-name "$NAME" \
+      --function-name "$FUNC_NAME" \
       --zip-file "fileb://$ZIP_FILE" \
       --region "$REGION" > /dev/null
-    aws lambda wait function-updated --function-name "$NAME" --region "$REGION"
+    aws lambda wait function-updated \
+      --function-name "$FUNC_NAME" --region "$REGION"
     aws lambda update-function-configuration \
-      --function-name "$NAME" \
+      --function-name "$FUNC_NAME" \
       --runtime "$RUNTIME" \
-      --handler "$HANDLER" \
+      --handler "lambda_function.lambda_handler" \
       --timeout 30 \
       --memory-size 256 \
-      --environment "$COMMON_ENV" \
+      --environment "file://${ENV_JSON_FILE}" \
       --region "$REGION" > /dev/null
+    aws lambda wait function-updated \
+      --function-name "$FUNC_NAME" --region "$REGION"
+    log_ok "  $FUNC_NAME — updated."
   else
-    echo "    Creating new function..."
+    log_info "  Creating new function (role: $ROLE_ARN)..."
     aws lambda create-function \
-      --function-name "$NAME" \
+      --function-name "$FUNC_NAME" \
       --runtime "$RUNTIME" \
       --role "$ROLE_ARN" \
-      --handler "$HANDLER" \
+      --handler "lambda_function.lambda_handler" \
       --zip-file "fileb://$ZIP_FILE" \
       --timeout 30 \
       --memory-size 256 \
-      --environment "$COMMON_ENV" \
-      --description "Digilux OTA — $NAME" \
+      --tracing-config Mode=Active \
+      --environment "file://${ENV_JSON_FILE}" \
+      --description "${PREFIX} OTA — ${FUNC_NAME}" \
       --region "$REGION" > /dev/null
-    aws lambda wait function-active --function-name "$NAME" --region "$REGION"
+    aws lambda wait function-active \
+      --function-name "$FUNC_NAME" --region "$REGION"
+    log_ok "  $FUNC_NAME — created."
   fi
 
-  echo "    $NAME deployed."
+  # ── CloudWatch log group with 30-day retention ────────────────────────────────
+  local LOG_GROUP="/aws/lambda/${FUNC_NAME}"
+  aws logs create-log-group \
+    --log-group-name "$LOG_GROUP" --region "$REGION" 2>/dev/null || true
+  aws logs put-retention-policy \
+    --log-group-name "$LOG_GROUP" \
+    --retention-in-days 30 \
+    --region "$REGION"
+  log_info "  Log group: $LOG_GROUP  (30-day retention)"
+
   rm -f "$ZIP_FILE"
 }
 
-# The cryptography package needed by package_register is a layer dependency.
-# Create a requirements.txt for it.
-cat > "$LAMBDA_DIR/digilux_ota_package_register/requirements.txt" << 'EOF'
-cryptography>=42.0.0
-EOF
+# ── Admin Lambdas ─────────────────────────────────────────────────────────────
+log_section "Admin Lambdas"
+deploy_lambda "upload_url"          "$ADMIN_ROLE_ARN"
+deploy_lambda "package_activate"    "$ADMIN_ROLE_ARN"
+deploy_lambda "artifact_processor"  "$ADMIN_ROLE_ARN"
+deploy_lambda "package_register"    "$ADMIN_ROLE_ARN"
+deploy_lambda "compatibility_check" "$ADMIN_ROLE_ARN"
+deploy_lambda "job_create"          "$ADMIN_ROLE_ARN"
+deploy_lambda "status_handler"      "$ADMIN_ROLE_ARN"
+deploy_lambda "device_register"     "$ADMIN_ROLE_ARN"
 
-deploy_lambda "digilux_ota_package_register"    "lambda_function.lambda_handler"
-deploy_lambda "digilux_ota_artifact_processor"  "lambda_function.lambda_handler"
-deploy_lambda "digilux_ota_compatibility_check" "lambda_function.lambda_handler"
-deploy_lambda "digilux_ota_job_create"          "lambda_function.lambda_handler"
-deploy_lambda "digilux_ota_status_handler"      "lambda_function.lambda_handler"
-deploy_lambda "digilux_ota_device_register"     "lambda_function.lambda_handler"
+# ── User Lambdas ──────────────────────────────────────────────────────────────
+log_section "User Lambdas"
+deploy_lambda "user_check_updates"     "$USER_ROLE_ARN"
+deploy_lambda "user_consent"           "$USER_ROLE_ARN"
+deploy_lambda "user_update_status"     "$USER_ROLE_ARN"
+deploy_lambda "user_get_download_link" "$USER_ROLE_ARN"
 
-# Grant IoT permission to invoke the rule-triggered Lambdas
-echo ""
-echo "==> Adding IoT invoke permissions to rule-triggered Lambdas"
-for FUNC in digilux_ota_status_handler digilux_ota_device_register; do
+# ── IoT invoke permissions ────────────────────────────────────────────────────
+log_section "IoT Invoke Permissions"
+for SUFFIX in status_handler device_register; do
+  FUNC="${PREFIX}_ota_${SUFFIX}"
   STMT_ID="iot-rule-invoke-${FUNC}"
   aws lambda remove-permission \
     --function-name "$FUNC" \
     --statement-id "$STMT_ID" \
     --region "$REGION" 2>/dev/null || true
-
   aws lambda add-permission \
     --function-name "$FUNC" \
     --statement-id "$STMT_ID" \
@@ -135,8 +239,11 @@ for FUNC in digilux_ota_status_handler digilux_ota_device_register; do
     --principal "iot.amazonaws.com" \
     --source-account "$ACCOUNT_ID" \
     --region "$REGION" > /dev/null
-  echo "    Permission added: $FUNC"
+  log_ok "IoT → $FUNC"
 done
 
-echo ""
-echo "All OTA Lambda functions deployed."
+# ── Cleanup ───────────────────────────────────────────────────────────────────
+rm -f "$ENV_JSON_FILE"
+
+log_phase_done
+log_ok "All 12 Lambda functions deployed successfully."

@@ -36,3 +36,9 @@ cdk/outputs-*.json
 
 # CDK test configs (contain real account IDs)
 cdk/config/digilux-test.json
+
+# Zero-touch deploy config (contains account IDs, authorizer IDs — customer-specific)
+infrastructure/deploy.config
+
+# Lambda zip artifacts created during deploy (rebuilt by 07_deploy_lambdas.sh)
+infrastructure/06_lambdas/**/*.zip

@@ -1,12 +1,17 @@
 #!/bin/bash
 # Phase 11 — S3 event notification → artifact processor Lambda
 set -euo pipefail
+export AWS_PAGER="" PAGER=cat
 
-REGION="ap-south-1"
-ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
-BUCKET="digilux-ota-artifacts"
-PROCESSOR_FUNC="digilux_ota_artifact_processor"
+REGION="${REGION:-ap-south-1}"
+PREFIX="${PREFIX:-digilux}"
+ACCOUNT_ID="${ACCOUNT_ID:-$(aws sts get-caller-identity --query Account --output text)}"
+
+BUCKET="${ARTIFACT_BUCKET:-${PREFIX}-ota-artifacts}"
+PROCESSOR_FUNC="${PREFIX}_ota_artifact_processor"
 PROCESSOR_ARN="arn:aws:lambda:${REGION}:${ACCOUNT_ID}:function:${PROCESSOR_FUNC}"
+
+echo "==> S3 → Lambda: $BUCKET → $PROCESSOR_FUNC"
 
 echo "==> Granting S3 permission to invoke $PROCESSOR_FUNC"
 aws lambda remove-permission \
@@ -24,86 +29,49 @@ aws lambda add-permission \
   --region "$REGION" > /dev/null
 echo "    Permission granted."
 
-echo "==> Configuring S3 event notification on $BUCKET"
+echo "==> Configuring S3 event notification"
 
-# Build notification config: trigger on PUT to all artifact prefixes
+# Trigger on uploads to the raw artifact prefixes.
+# The artifact_processor writes to enc/ and sig/ which do NOT match these prefixes,
+# so there is no risk of an infinite loop.
 cat > /tmp/s3_notification.json << EOF
 {
   "LambdaFunctionConfigurations": [
     {
-      "Id": "digilux-ota-artifact-created",
-      "LambdaFunctionArn": "$PROCESSOR_ARN",
-      "Events": ["s3:ObjectCreated:Put", "s3:ObjectCreated:CompleteMultipartUpload"],
-      "Filter": {
-        "Key": {
-          "FilterRules": [
-            {
-              "Name": "prefix",
-              "Value": "firmware/"
-            }
-          ]
-        }
-      }
+      "Id": "${PREFIX}-ota-artifact-firmware",
+      "LambdaFunctionArn": "${PROCESSOR_ARN}",
+      "Events": ["s3:ObjectCreated:Put","s3:ObjectCreated:CompleteMultipartUpload"],
+      "Filter": {"Key": {"FilterRules": [{"Name": "prefix","Value": "firmware/"}]}}
     },
     {
-      "Id": "digilux-ota-artifact-created-app",
-      "LambdaFunctionArn": "$PROCESSOR_ARN",
-      "Events": ["s3:ObjectCreated:Put", "s3:ObjectCreated:CompleteMultipartUpload"],
-      "Filter": {
-        "Key": {
-          "FilterRules": [
-            {"Name": "prefix", "Value": "application/"}
-          ]
-        }
-      }
+      "Id": "${PREFIX}-ota-artifact-application",
+      "LambdaFunctionArn": "${PROCESSOR_ARN}",
+      "Events": ["s3:ObjectCreated:Put","s3:ObjectCreated:CompleteMultipartUpload"],
+      "Filter": {"Key": {"FilterRules": [{"Name": "prefix","Value": "application/"}]}}
     },
     {
-      "Id": "digilux-ota-artifact-created-drivers",
-      "LambdaFunctionArn": "$PROCESSOR_ARN",
-      "Events": ["s3:ObjectCreated:Put", "s3:ObjectCreated:CompleteMultipartUpload"],
-      "Filter": {
-        "Key": {
-          "FilterRules": [
-            {"Name": "prefix", "Value": "drivers/"}
-          ]
-        }
-      }
+      "Id": "${PREFIX}-ota-artifact-drivers",
+      "LambdaFunctionArn": "${PROCESSOR_ARN}",
+      "Events": ["s3:ObjectCreated:Put","s3:ObjectCreated:CompleteMultipartUpload"],
+      "Filter": {"Key": {"FilterRules": [{"Name": "prefix","Value": "drivers/"}]}}
     },
     {
-      "Id": "digilux-ota-artifact-created-zigbee",
-      "LambdaFunctionArn": "$PROCESSOR_ARN",
-      "Events": ["s3:ObjectCreated:Put", "s3:ObjectCreated:CompleteMultipartUpload"],
-      "Filter": {
-        "Key": {
-          "FilterRules": [
-            {"Name": "prefix", "Value": "zigbee-devices/"}
-          ]
-        }
-      }
+      "Id": "${PREFIX}-ota-artifact-zigbee",
+      "LambdaFunctionArn": "${PROCESSOR_ARN}",
+      "Events": ["s3:ObjectCreated:Put","s3:ObjectCreated:CompleteMultipartUpload"],
+      "Filter": {"Key": {"FilterRules": [{"Name": "prefix","Value": "zigbee-devices/"}]}}
     },
     {
-      "Id": "digilux-ota-artifact-created-config",
-      "LambdaFunctionArn": "$PROCESSOR_ARN",
-      "Events": ["s3:ObjectCreated:Put", "s3:ObjectCreated:CompleteMultipartUpload"],
-      "Filter": {
-        "Key": {
-          "FilterRules": [
-            {"Name": "prefix", "Value": "config/"}
-          ]
-        }
-      }
+      "Id": "${PREFIX}-ota-artifact-config",
+      "LambdaFunctionArn": "${PROCESSOR_ARN}",
+      "Events": ["s3:ObjectCreated:Put","s3:ObjectCreated:CompleteMultipartUpload"],
+      "Filter": {"Key": {"FilterRules": [{"Name": "prefix","Value": "config/"}]}}
     },
     {
-      "Id": "digilux-ota-artifact-created-rules",
-      "LambdaFunctionArn": "$PROCESSOR_ARN",
-      "Events": ["s3:ObjectCreated:Put", "s3:ObjectCreated:CompleteMultipartUpload"],
-      "Filter": {
-        "Key": {
-          "FilterRules": [
-            {"Name": "prefix", "Value": "rules/"}
-          ]
-        }
-      }
+      "Id": "${PREFIX}-ota-artifact-rules",
+      "LambdaFunctionArn": "${PROCESSOR_ARN}",
+      "Events": ["s3:ObjectCreated:Put","s3:ObjectCreated:CompleteMultipartUpload"],
+      "Filter": {"Key": {"FilterRules": [{"Name": "prefix","Value": "rules/"}]}}
     }
   ]
 }
@@ -113,13 +81,9 @@ aws s3api put-bucket-notification-configuration \
   --bucket "$BUCKET" \
   --notification-configuration file:///tmp/s3_notification.json \
   --region "$REGION"
-
 echo "    S3 event notifications configured."
+
 echo ""
-echo "S3 → Lambda pipeline is ready."
-echo ""
-echo "Upload flow:"
-echo "  1. POST /api/v1/ota/packages/upload-artefact  →  get pre-signed PUT URL"
-echo "  2. PUT  <uploadUrl> with binary           →  S3 triggers processor Lambda"
-echo "  3. Processor computes SHA256, signs, marks package ACTIVE automatically"
-echo "  4. POST /api/v1/ota/deployments           →  deploy to devices"
+echo "S3 → Lambda pipeline ready."
+echo "  Bucket: $BUCKET"
+echo "  Processor: $PROCESSOR_FUNC"

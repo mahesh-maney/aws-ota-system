@@ -1,0 +1,161 @@
+#!/usr/bin/env bash
+# ─────────────────────────────────────────────────────────────────────────────
+# deploy.config.template — Zero-touch OTA deployment configuration
+#
+# INSTRUCTIONS:
+#   1. Copy this file:  cp deploy.config.template deploy.config
+#   2. Fill in all required values below (marked REQUIRED)
+#   3. Run:             ./deploy.sh
+#
+# All AWS resources will be named with the PREFIX you choose, e.g.:
+#   PREFIX=honeywell  →  honeywell_ota_job_create (Lambda)
+#                        honeywell-ota-artifacts  (S3 bucket)
+#                        honeywell_ota_packages   (DynamoDB table)
+# ─────────────────────────────────────────────────────────────────────────────
+
+# ── Identity ──────────────────────────────────────────────────────────────────
+
+# REQUIRED: Short lowercase identifier for your deployment.
+# Used as a prefix for all AWS resources created by this deployment.
+# Use only lowercase letters, numbers, and hyphens. No underscores.
+# Examples: honeywell  mycompany  acme
+PREFIX="honeywell"
+
+# REQUIRED: AWS region where all resources will be deployed.
+REGION="ap-south-1"
+
+# Optional: AWS account ID. Leave empty to auto-detect via aws sts.
+ACCOUNT_ID=""
+
+# ── API Gateway ───────────────────────────────────────────────────────────────
+
+# REQUIRED: The ID of your existing REST API Gateway.
+# Find it in the AWS Console → API Gateway → your API → top of page.
+# Example: ds6nxf8ac5
+API_GATEWAY_ID="YOUR_API_GATEWAY_ID"
+
+# REQUIRED: The name of the API Gateway stage to deploy to.
+# This is the path segment after your domain, e.g., smarthome → /smarthome/api/v1/...
+API_GATEWAY_STAGE="smarthome"
+
+# REQUIRED: ID of the Cognito authorizer attached to ADMIN routes.
+# Find it in API Gateway → Authorizers tab. Used for /ota/packages, /ota/deployments.
+ADMIN_COGNITO_AUTHORIZER_ID="YOUR_ADMIN_AUTHORIZER_ID"
+
+# REQUIRED: ID of the Cognito authorizer attached to USER/DEVICE routes.
+# Find it in API Gateway → Authorizers tab. Used for /ota/my/* and /ota/device/*.
+# Often the same as ADMIN_COGNITO_AUTHORIZER_ID, but can differ.
+USER_COGNITO_AUTHORIZER_ID="YOUR_USER_AUTHORIZER_ID"
+
+# ── Cognito ───────────────────────────────────────────────────────────────────
+
+# REQUIRED: The Cognito User Pool ID for device users (controllers).
+# This pool issues tokens that devices use to call the OTA update endpoint.
+# Format: REGION_XXXXXXXX  (e.g., ap-south-1_h1o8s7257)
+USER_COGNITO_POOL_ID="YOUR_COGNITO_USER_POOL_ID"
+
+# ── Existing tables ───────────────────────────────────────────────────────────
+
+# REQUIRED: Name of your existing DynamoDB device data table.
+# This table must have:  deviceId (HASH key)  +  macAddress (RANGE key)
+#                        GSI: userId-index (userId HASH key)
+# Each device item stores the user's Cognito sub under the `userId` attribute.
+DEVICE_DATA_TABLE="digilux_device_data"
+
+# ── Notifications ─────────────────────────────────────────────────────────────
+
+# REQUIRED: Email address for CloudWatch alarm notifications.
+# You will receive a confirmation email — click Confirm to activate alerts.
+ALERT_EMAIL="ops@yourcompany.com"
+
+# REQUIRED: Email address shown as the sender of OTA consent decline emails.
+# This address must be verified in AWS SES (or your account must be out of
+# sandbox mode) before consent-decline notifications will be delivered.
+SES_SENDER_EMAIL="noreply@yourcompany.com"
+
+# ── Admin UI ──────────────────────────────────────────────────────────────────
+
+# REQUIRED for UI deployment: S3 bucket name where the admin UI will be hosted.
+# The bucket must already exist and be configured for static website hosting.
+# Leave blank to skip admin UI deployment.
+ADMIN_UI_BUCKET="your-ota-admin-ui-bucket"
+
+# REQUIRED for UI deployment: Full base URL of your OTA API, as seen from the browser.
+# This is used for VITE_API_BASE in the admin UI build.
+# Example: https://api.yourcompany.com/smarthome/api/v1
+ADMIN_UI_API_BASE="https://${API_GATEWAY_ID}.execute-api.${REGION}.amazonaws.com/${API_GATEWAY_STAGE}/api/v1"
+
+# REQUIRED for UI deployment: Cognito hosted UI base URL for the ADMIN pool.
+# Used for VITE_COGNITO_URL in the admin UI build.
+# Example: https://cognito-idp.ap-south-1.amazonaws.com/
+ADMIN_UI_COGNITO_URL="https://cognito-idp.${REGION}.amazonaws.com/"
+
+# REQUIRED for UI deployment: Admin Cognito App Client ID.
+# Find it in Cognito → User Pools → your admin pool → App clients.
+ADMIN_UI_COGNITO_CLIENT="YOUR_ADMIN_COGNITO_CLIENT_ID"
+
+# Optional: Path to a logo image file (PNG, SVG, or JPG) to embed in the admin UI.
+# The file will be copied into the UI as /brand-logo.<ext> and served from S3.
+# Leave blank to use the default Digilux placeholder logo.
+LOGO_FILE=""
+
+# Optional: Brand name shown in the admin UI navbar and login page.
+BRAND_NAME="OTA Admin"
+
+# Optional: Path to the admin UI repo on disk.
+# Defaults to ../admin-web-interface relative to this file's directory.
+# Only needed if deploy_admin_ui.sh can't find it automatically.
+ADMIN_UI_REPO_PATH=""
+
+# ── IoT Thing Group Hierarchy ─────────────────────────────────────────────────
+# The OTA system organises devices into a hierarchy of IoT Thing Groups.
+# Devices are auto-assigned to the correct leaf group when they first register.
+#
+# Default hierarchy (these names match the factory defaults — change if your
+# account already has different group names):
+#
+#   ROOT_GROUP
+#   └── PRODUCTION_GROUP
+#       ├── GATEWAYS_GROUP
+#       │   ├── DGW-100          (leaf — one per gateway model)
+#       │   └── DGW-200
+#       └── TOUCH_PANELS_GROUP
+#           ├── TP-100           (leaf — one per panel model)
+#           └── TP-200
+
+IOT_ROOT_GROUP="DIGILUX"
+IOT_PRODUCTION_GROUP="PRODUCTION"
+IOT_GATEWAYS_GROUP="GATEWAYS"
+IOT_TOUCH_PANELS_GROUP="TOUCH-PANELS"
+IOT_GATEWAY_MODELS="DGW-100,DGW-200"
+IOT_TOUCH_PANEL_MODELS="TP-100,TP-200"
+
+# ── CloudFront (optional) ──────────────────────────────────────────────────────
+# Leave blank to deliver artifact download URLs via S3 presigned URLs (default).
+# Fill in to use CloudFront signed URLs for lower-latency / higher-security
+# artifact delivery.
+
+CLOUDFRONT_DOMAIN=""
+CLOUDFRONT_KEY_PAIR_ID=""
+CLOUDFRONT_KEY_SECRET_NAME=""
+
+# ── Presign URL expiry tiers ───────────────────────────────────────────────────
+# How long presigned download URLs remain valid, based on artifact size.
+# Tier 1: small artifacts (< TIER1_MAX_MB). Tier 4: anything larger than Tier 3.
+# Defaults shown — change only if your network conditions require longer windows.
+
+PRESIGN_EXPIRY_TIER1_MAX_MB=50
+PRESIGN_EXPIRY_TIER1_SEC=3600       # 1 hour
+PRESIGN_EXPIRY_TIER2_MAX_MB=200
+PRESIGN_EXPIRY_TIER2_SEC=21600      # 6 hours
+PRESIGN_EXPIRY_TIER3_MAX_MB=500
+PRESIGN_EXPIRY_TIER3_SEC=86400      # 24 hours
+PRESIGN_EXPIRY_TIER4_SEC=172800     # 48 hours
+
+# ── Misc ──────────────────────────────────────────────────────────────────────
+
+# Maximum number of devices in the canary group before BETA promotion.
+CANARY_MAX=5
+
+# How long (minutes) before an IoT Job times out. Default: 24 hours.
+IOT_JOB_TIMEOUT_MINUTES=1440

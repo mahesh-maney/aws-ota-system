@@ -1,42 +1,65 @@
 #!/bin/bash
-# Phase 9 — API Gateway routes for OTA admin endpoints
-# Adds routes to existing digilux gateway: ds6nxf8ac5 / stage: smarthome
+# Phase 9 — API Gateway routes for all OTA endpoints (admin + user)
+# Safe to re-run — all resource/method creation is idempotent.
 set -euo pipefail
+export AWS_PAGER="" PAGER=cat
+source "$(dirname "$0")/_lib.sh"
 
-REGION="ap-south-1"
-ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
-API_ID="ds6nxf8ac5"
-STAGE="smarthome"
-AUTHORIZER_ID="ddhsbg"
+log_section "Phase 9: API Gateway Routes"
 
-UPLOAD_URL_ARN="arn:aws:lambda:${REGION}:${ACCOUNT_ID}:function:digilux_ota_upload_url"
-COMPAT_CHECK_ARN="arn:aws:lambda:${REGION}:${ACCOUNT_ID}:function:digilux_ota_compatibility_check"
-JOB_ARN="arn:aws:lambda:${REGION}:${ACCOUNT_ID}:function:digilux_ota_job_create"
+REGION="${REGION:-ap-south-1}"
+PREFIX="${PREFIX:-digilux}"
+ACCOUNT_ID="${ACCOUNT_ID:-$(aws sts get-caller-identity --query Account --output text)}"
+
+API_ID="${API_GATEWAY_ID:?API_GATEWAY_ID not set in deploy.config}"
+STAGE="${API_GATEWAY_STAGE:-smarthome}"
+ADMIN_AUTH="${ADMIN_COGNITO_AUTHORIZER_ID:?ADMIN_COGNITO_AUTHORIZER_ID not set}"
+USER_AUTH="${USER_COGNITO_AUTHORIZER_ID:?USER_COGNITO_AUTHORIZER_ID not set}"
+
+log_info "API Gateway ID  : $API_ID"
+log_info "Stage           : $STAGE"
+log_info "Admin authorizer: $ADMIN_AUTH"
+log_info "User authorizer : $USER_AUTH"
+log_info "Region          : $REGION"
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 get_or_create_resource() {
-  local PARENT_ID="$1"
-  local PATH_PART="$2"
+  local PARENT_ID="$1" PATH_PART="$2"
   local EXISTING
   EXISTING=$(aws apigateway get-resources \
     --rest-api-id "$API_ID" --region "$REGION" \
-    --query "items[?parentId=='$PARENT_ID' && pathPart=='$PATH_PART'].id" \
-    --output text)
-  if [ -n "$EXISTING" ]; then
+    --query "items[?parentId=='${PARENT_ID}' && pathPart=='${PATH_PART}'].id" \
+    --output text 2>/dev/null)
+  if [[ -n "$EXISTING" ]]; then
     echo "$EXISTING"
   else
+    log_info "    Creating resource: /${PATH_PART}"
     aws apigateway create-resource \
-      --rest-api-id "$API_ID" --parent-id "$PARENT_ID" \
-      --path-part "$PATH_PART" --region "$REGION" \
+      --rest-api-id "$API_ID" \
+      --parent-id "$PARENT_ID" \
+      --path-part "$PATH_PART" \
+      --region "$REGION" \
       --query "id" --output text
   fi
 }
 
+# Add a Lambda-proxy method.  Skip if method already exists (idempotent).
 add_method() {
-  local RESOURCE_ID="$1"
-  local HTTP_METHOD="$2"
-  local LAMBDA_ARN="$3"
+  local RESOURCE_ID="$1" HTTP_METHOD="$2" FUNC_NAME="$3" AUTHORIZER_ID="$4"
+
+  # Check if method already exists — use if/then to avoid set -e trap on the check
+  local EXISTS
+  if aws apigateway get-method \
+       --rest-api-id "$API_ID" \
+       --resource-id "$RESOURCE_ID" \
+       --http-method "$HTTP_METHOD" \
+       --region "$REGION" 2>/dev/null | grep -q '"httpMethod"'; then
+    log_skip "    $HTTP_METHOD already exists on $RESOURCE_ID"
+    return 0
+  fi
+
+  local LAMBDA_ARN="arn:aws:lambda:${REGION}:${ACCOUNT_ID}:function:${FUNC_NAME}"
 
   aws apigateway put-method \
     --rest-api-id "$API_ID" \
@@ -44,7 +67,7 @@ add_method() {
     --http-method "$HTTP_METHOD" \
     --authorization-type "COGNITO_USER_POOLS" \
     --authorizer-id "$AUTHORIZER_ID" \
-    --region "$REGION" 2>/dev/null || true
+    --region "$REGION" > /dev/null
 
   aws apigateway put-integration \
     --rest-api-id "$API_ID" \
@@ -55,27 +78,42 @@ add_method() {
     --uri "arn:aws:apigateway:${REGION}:lambda:path/2015-03-31/functions/${LAMBDA_ARN}/invocations" \
     --region "$REGION" > /dev/null
 
-  # Lambda invoke permission — idempotent
-  local STMT_ID="apigw-ota-${RESOURCE_ID}-${HTTP_METHOD}"
+  # Lambda invoke permission — remove first (idempotent), then add
+  local STMT_ID="${FUNC_NAME}-apigw-${RESOURCE_ID}-${HTTP_METHOD}"
   aws lambda remove-permission \
-    --function-name "$LAMBDA_ARN" --statement-id "$STMT_ID" \
+    --function-name "$FUNC_NAME" \
+    --statement-id "$STMT_ID" \
     --region "$REGION" 2>/dev/null || true
   aws lambda add-permission \
-    --function-name "$LAMBDA_ARN" --statement-id "$STMT_ID" \
+    --function-name "$FUNC_NAME" \
+    --statement-id "$STMT_ID" \
     --action "lambda:InvokeFunction" \
     --principal "apigateway.amazonaws.com" \
     --source-arn "arn:aws:execute-api:${REGION}:${ACCOUNT_ID}:${API_ID}/*/${HTTP_METHOD}/*" \
     --region "$REGION" > /dev/null
 
-  echo "    ${HTTP_METHOD} wired to $(echo "$LAMBDA_ARN" | awk -F: '{print $NF}')"
+  log_ok "    $HTTP_METHOD → $FUNC_NAME"
 }
 
+# Add OPTIONS (CORS preflight).  Skip if already exists.
+# NOTE: uses if/then (NOT && return) to avoid set -e trap on the existence check.
 add_cors() {
   local RESOURCE_ID="$1"
+
+  # Idempotency check — always use if/then, never bare '&&' with set -euo pipefail
+  if aws apigateway get-method \
+       --rest-api-id "$API_ID" \
+       --resource-id "$RESOURCE_ID" \
+       --http-method OPTIONS \
+       --region "$REGION" 2>/dev/null | grep -q '"httpMethod"'; then
+    log_skip "    OPTIONS already exists on $RESOURCE_ID"
+    return 0
+  fi
+
   aws apigateway put-method \
     --rest-api-id "$API_ID" --resource-id "$RESOURCE_ID" \
     --http-method OPTIONS --authorization-type NONE \
-    --region "$REGION" 2>/dev/null || true
+    --region "$REGION" > /dev/null
 
   aws apigateway put-integration \
     --rest-api-id "$API_ID" --resource-id "$RESOURCE_ID" \
@@ -98,83 +136,101 @@ add_cors() {
     --response-parameters '{
       "method.response.header.Access-Control-Allow-Headers": "'"'"'Content-Type,Authorization'"'"'",
       "method.response.header.Access-Control-Allow-Methods": "'"'"'GET,POST,PATCH,OPTIONS'"'"'",
-      "method.response.header.Access-Control-Allow-Origin": "'"'"'*'"'"'"
+      "method.response.header.Access-Control-Allow-Origin":  "'"'"'*'"'"'"
     }' --region "$REGION" 2>/dev/null || true
+
+  log_ok "    OPTIONS (CORS) added to $RESOURCE_ID"
 }
 
-# ── Find /api/v1 root ─────────────────────────────────────────────────────────
+# Lambda function names (PREFIX-aware)
+U_UPLOAD="${PREFIX}_ota_upload_url"
+U_ACTIVATE="${PREFIX}_ota_package_activate"
+U_JOB="${PREFIX}_ota_job_create"
+U_CHECK="${PREFIX}_ota_user_check_updates"
+U_CONSENT="${PREFIX}_ota_user_consent"
+U_STATUS="${PREFIX}_ota_user_update_status"
+U_DOWNLOAD="${PREFIX}_ota_user_get_download_link"
+
+# ── Resolve /api/v1 root ──────────────────────────────────────────────────────
+log_step "Resolving /api/v1 resource"
 API_ROOT=$(aws apigateway get-resources \
   --rest-api-id "$API_ID" --region "$REGION" \
   --query "items[?path=='/api/v1'].id" --output text)
 
-if [ -z "$API_ROOT" ]; then
-  echo "ERROR: /api/v1 not found in API $API_ID"; exit 1
+if [[ -z "$API_ROOT" ]]; then
+  log_error "/api/v1 not found in API Gateway $API_ID"
+  log_error "The base /api/v1 path must already exist before OTA routes can be added."
+  log_error "Check API_GATEWAY_ID in deploy.config."
+  exit 1
 fi
-echo "==> /api/v1 resource ID: $API_ROOT"
+log_ok "/api/v1 resource ID: $API_ROOT"
 
 # ── /api/v1/ota ───────────────────────────────────────────────────────────────
-echo ""
-echo "==> /api/v1/ota"
-OTA_RES=$(get_or_create_resource "$API_ROOT" "ota")
+log_step "/api/v1/ota"
+OTA=$(get_or_create_resource "$API_ROOT" "ota")
 
-# ── /api/v1/ota/packages — GET list ──────────────────────────────────────────
-echo "==> /api/v1/ota/packages"
-PKGS_RES=$(get_or_create_resource "$OTA_RES" "packages")
-add_method "$PKGS_RES" "GET" "$UPLOAD_URL_ARN"
-add_cors   "$PKGS_RES"
+# ── /api/v1/ota/packages ──────────────────────────────────────────────────────
+log_step "/api/v1/ota/packages"
+PKGS=$(get_or_create_resource "$OTA" "packages")
+add_method "$PKGS" "GET" "$U_UPLOAD" "$ADMIN_AUTH"
+add_cors   "$PKGS"
 
-# ── /api/v1/ota/packages/upload-artefact — POST get pre-signed PUT URL ─────────────
-echo "==> /api/v1/ota/packages/upload-artefact"
-UPLOAD_RES=$(get_or_create_resource "$PKGS_RES" "upload-artefact")
-add_method "$UPLOAD_RES" "POST" "$UPLOAD_URL_ARN"
-add_cors   "$UPLOAD_RES"
+log_step "/api/v1/ota/packages/upload-artefact"
+UPLOAD=$(get_or_create_resource "$PKGS" "upload-artefact")
+add_method "$UPLOAD" "POST" "$U_UPLOAD" "$ADMIN_AUTH"
+add_cors   "$UPLOAD"
 
-# ── /api/v1/ota/deployments — POST create, GET list ──────────────────────────
-echo "==> /api/v1/ota/deployments"
-DEPLOY_RES=$(get_or_create_resource "$OTA_RES" "deployments")
-add_method "$DEPLOY_RES" "POST" "$JOB_ARN"
-add_method "$DEPLOY_RES" "GET"  "$JOB_ARN"
-add_cors   "$DEPLOY_RES"
+log_step "/api/v1/ota/packages/{packageName}/{version}/activate"
+PKG_NAME=$(get_or_create_resource "$PKGS"     "{packageName}")
+PKG_VER=$(get_or_create_resource  "$PKG_NAME" "{version}")
+PKG_ACT=$(get_or_create_resource  "$PKG_VER"  "activate")
+add_method "$PKG_ACT" "PATCH" "$U_ACTIVATE" "$ADMIN_AUTH"
+add_cors   "$PKG_ACT"
 
-# ── /api/v1/ota/deployments/{jobId} — GET status ─────────────────────────────
-echo "==> /api/v1/ota/deployments/{jobId}"
-DEPLOY_JOB_RES=$(get_or_create_resource "$DEPLOY_RES" "{jobId}")
-add_method "$DEPLOY_JOB_RES" "GET" "$JOB_ARN"
-add_cors   "$DEPLOY_JOB_RES"
+# ── /api/v1/ota/deployments ───────────────────────────────────────────────────
+log_step "/api/v1/ota/deployments"
+DEPLOY=$(get_or_create_resource "$OTA" "deployments")
+add_method "$DEPLOY" "POST" "$U_JOB" "$ADMIN_AUTH"
+add_method "$DEPLOY" "GET"  "$U_JOB" "$ADMIN_AUTH"
+add_cors   "$DEPLOY"
 
-# ── /api/v1/ota/deployments/{jobId}/abort — POST ─────────────────────────────
-echo "==> /api/v1/ota/deployments/{jobId}/abort"
-ABORT_RES=$(get_or_create_resource "$DEPLOY_JOB_RES" "abort")
-add_method "$ABORT_RES" "POST" "$JOB_ARN"
-add_cors   "$ABORT_RES"
+log_step "/api/v1/ota/deployments/{deploymentId}"
+DEPLOY_ID=$(get_or_create_resource "$DEPLOY" "{deploymentId}")
+add_method "$DEPLOY_ID" "GET" "$U_JOB" "$ADMIN_AUTH"
+add_cors   "$DEPLOY_ID"
 
-# ── /api/v1/ota/packages/{packageName}/{version}/activate — PATCH ────────────
-echo "==> /api/v1/ota/packages/{packageName}/{version}/activate"
-ACTIVATE_ARN="arn:aws:lambda:${REGION}:${ACCOUNT_ID}:function:digilux_ota_package_activate"
-PKG_NAME_RES=$(get_or_create_resource "$PKGS_RES"    "{packageName}")
-PKG_VER_RES=$(get_or_create_resource  "$PKG_NAME_RES" "{version}")
-PKG_ACT_RES=$(get_or_create_resource  "$PKG_VER_RES"  "activate")
-add_method "$PKG_ACT_RES" "PATCH" "$ACTIVATE_ARN"
-add_cors   "$PKG_ACT_RES"
+log_step "/api/v1/ota/deployments/{deploymentId}/abort"
+DEPLOY_ABORT=$(get_or_create_resource "$DEPLOY_ID" "abort")
+add_method "$DEPLOY_ABORT" "POST" "$U_JOB" "$ADMIN_AUTH"
+add_cors   "$DEPLOY_ABORT"
 
-# ── /api/v1/controllers/{deviceId}/updates/available — GET ───────────────────
-echo "==> /api/v1/controllers/{deviceId}/updates/available"
-CTRL_RES=$(aws apigateway get-resources \
-  --rest-api-id "$API_ID" --region "$REGION" \
-  --query "items[?pathPart=='controllers'].id" --output text)
-[ -z "$CTRL_RES" ] && CTRL_RES=$(get_or_create_resource "$API_ROOT" "controllers")
-CTRL_ID_RES=$(get_or_create_resource "$CTRL_RES"    "{deviceId}")
-UPDATES_RES=$(get_or_create_resource "$CTRL_ID_RES" "updates")
-AVAIL_RES=$(get_or_create_resource   "$UPDATES_RES" "available")
-add_method "$AVAIL_RES" "GET" "$COMPAT_CHECK_ARN"
-add_cors   "$AVAIL_RES"
+# ── /api/v1/ota/device/available-updates ─────────────────────────────────────
+log_step "/api/v1/ota/device/available-updates"
+OTA_DEVICE=$(get_or_create_resource "$OTA" "device")
+AVAIL=$(get_or_create_resource "$OTA_DEVICE" "available-updates")
+add_method "$AVAIL" "GET" "$U_CHECK" "$USER_AUTH"
+add_cors   "$AVAIL"
 
-# ── Gateway Responses — ensure CORS headers on auth errors (401/403/5xx) ─────
-# Without this, when API Gateway's Cognito authorizer rejects a request, the
-# 401/403 response has no Access-Control-Allow-Origin header and the browser
-# reports it as a CORS error instead of an auth error.
-echo ""
-echo "==> Configuring Gateway Responses (CORS on error responses)"
+# ── /api/v1/ota/my/updates/* ─────────────────────────────────────────────────
+log_step "/api/v1/ota/my/updates/*"
+MY=$(get_or_create_resource "$OTA" "my")
+UPDATES=$(get_or_create_resource "$MY" "updates")
+
+CONSENT_RES=$(get_or_create_resource "$UPDATES" "consent")
+add_method "$CONSENT_RES" "POST" "$U_CONSENT" "$USER_AUTH"
+add_cors   "$CONSENT_RES"
+
+DOWNLOAD_RES=$(get_or_create_resource "$UPDATES" "download-link")
+add_method "$DOWNLOAD_RES" "POST" "$U_DOWNLOAD" "$USER_AUTH"
+add_cors   "$DOWNLOAD_RES"
+
+JOB_PARAM=$(get_or_create_resource "$UPDATES" "{jobId}")
+STATUS_RES=$(get_or_create_resource "$JOB_PARAM" "status")
+add_method "$STATUS_RES" "GET" "$U_STATUS" "$USER_AUTH"
+add_cors   "$STATUS_RES"
+
+# ── CORS on auth error responses ──────────────────────────────────────────────
+log_step "Gateway Responses (CORS on 401/403/5xx)"
 for RESP_TYPE in DEFAULT_4XX DEFAULT_5XX UNAUTHORIZED ACCESS_DENIED EXPIRED_TOKEN; do
   aws apigateway put-gateway-response \
     --rest-api-id "$API_ID" \
@@ -184,28 +240,34 @@ for RESP_TYPE in DEFAULT_4XX DEFAULT_5XX UNAUTHORIZED ACCESS_DENIED EXPIRED_TOKE
       "gatewayresponse.header.Access-Control-Allow-Headers": "'"'"'Content-Type,Authorization'"'"'"
     }' \
     --region "$REGION" > /dev/null
-  echo "    $RESP_TYPE configured"
+  log_ok "  $RESP_TYPE configured"
 done
 
 # ── Deploy to stage ───────────────────────────────────────────────────────────
-echo ""
-echo "==> Deploying to stage: $STAGE"
+log_step "Deploying stage: $STAGE"
 aws apigateway create-deployment \
-  --rest-api-id "$API_ID" --stage-name "$STAGE" \
-  --description "OTA endpoints v2 — cleaner upload flow" \
+  --rest-api-id "$API_ID" \
+  --stage-name "$STAGE" \
+  --description "OTA endpoints — ${PREFIX} $(date -u +%Y-%m-%dT%H:%M:%SZ)" \
   --region "$REGION" > /dev/null
+log_ok "Stage deployed: $STAGE"
 
 BASE_URL="https://${API_ID}.execute-api.${REGION}.amazonaws.com/${STAGE}"
+
+log_phase_done
 echo ""
-echo "API Gateway deployed."
-echo "Base URL: $BASE_URL"
+log_ok "API Gateway configured.  Base URL: $BASE_URL"
 echo ""
-echo "Endpoints:"
-echo "  GET   /api/v1/ota/packages                                     List all packages"
-echo "  POST  /api/v1/ota/packages/upload-artefact                    Get pre-signed upload URL"
-echo "  PATCH /api/v1/ota/packages/{packageName}/{version}/activate   Publish / withdraw / recall"
-echo "  POST  /api/v1/ota/deployments                                 Create deployment"
-echo "  GET   /api/v1/ota/deployments                                 List deployments"
-echo "  GET   /api/v1/ota/deployments/{jobId}                         Job status + progress"
-echo "  POST  /api/v1/ota/deployments/{jobId}/abort                   Abort deployment"
-echo "  GET   /api/v1/controllers/{deviceId}/updates/available        Check device updates"
+echo "  Admin endpoints:"
+echo "    GET   ${BASE_URL}/api/v1/ota/packages"
+echo "    POST  ${BASE_URL}/api/v1/ota/packages/upload-artefact"
+echo "    PATCH ${BASE_URL}/api/v1/ota/packages/{packageName}/{version}/activate"
+echo "    POST  ${BASE_URL}/api/v1/ota/deployments"
+echo "    GET   ${BASE_URL}/api/v1/ota/deployments"
+echo "    GET   ${BASE_URL}/api/v1/ota/deployments/{deploymentId}"
+echo "    POST  ${BASE_URL}/api/v1/ota/deployments/{deploymentId}/abort"
+echo "  Device/User endpoints:"
+echo "    GET   ${BASE_URL}/api/v1/ota/device/available-updates"
+echo "    POST  ${BASE_URL}/api/v1/ota/my/updates/consent"
+echo "    POST  ${BASE_URL}/api/v1/ota/my/updates/download-link"
+echo "    GET   ${BASE_URL}/api/v1/ota/my/updates/{jobId}/status"
