@@ -21,6 +21,14 @@ Optimised architecture (pointer-based, zero per-device DB/IoT calls outside job 
     d. installedVersion == availableVersion        → no update (up to date).
     e. installedVersion >  availableVersion        → no update (never downgrade).
     f. installedVersion <  availableVersion        → entitlement check → offer update.
+
+Response envelope (client contract):
+  HTTP 200 + devices non-empty → { "status": "success", "message": "", "devices": [...] }
+                               → client reads devices only (do not show message)
+  HTTP 200 + devices empty     → { "status": "success", "message": "<no-update text>", "devices": [] }
+                               → client shows message
+  Non-200                      → { "status": "failed",  "message": "<error>", "devices": [] }
+                               → client shows message
 """
 from __future__ import annotations
 
@@ -63,6 +71,12 @@ OTA_TIMED_OUT_MSG = os.environ.get(
     "OTA_TIMED_OUT_MSG",
     "Your firmware update ver {version} timed out. Please retry.",
 )
+# Top-level envelope for available-updates (status is only "success" | "failed").
+# On HTTP 200 → always status=success. When devices is empty, client shows this message.
+NO_UPDATE_MSG = os.environ.get(
+    "NO_UPDATE_MSG",
+    "New Firmware update not available, please try again later.",
+)
 
 dynamo        = boto3.resource("dynamodb", region_name=REGION)
 iot           = boto3.client("iot",        region_name=REGION)
@@ -86,6 +100,28 @@ def _resp(status: int, body: dict) -> dict:
         "headers": {"Content-Type": "application/json"},
         "body": json.dumps(body, cls=_Dec),
     }
+
+
+def _success(devices: list) -> dict:
+    """
+    HTTP 200 envelope: status is always success.
+    - devices non-empty → message is empty (client reads devices only)
+    - devices empty     → message = NO_UPDATE_MSG (client shows message)
+    """
+    return _resp(200, {
+        "status":  "success",
+        "message": "" if devices else NO_UPDATE_MSG,
+        "devices": devices,
+    })
+
+
+def _failed(http_status: int, message: str) -> dict:
+    """Non-200 envelope: status=failed; client shows message."""
+    return _resp(http_status, {
+        "status":  "failed",
+        "message": message,
+        "devices": [],
+    })
 
 
 def _log(level: str, msg: str, **fields) -> None:
@@ -357,7 +393,7 @@ def lambda_handler(event, context):
         if not user_id:
             _log("warning", "missing_sub_claim",
                  detail="JWT sub claim absent — rejecting with 401")
-            return _resp(401, {"error": "Unauthorized — invalid token"})
+            return _failed(401, "Unauthorized — invalid token")
 
         email = claims.get("email", user_id)
         _log("info", "check_updates_request",
@@ -370,7 +406,7 @@ def lambda_handler(event, context):
             _log("info", "no_devices_for_user", userId=user_id)
             _audit("USER_CHECK_UPDATES", user_id, {"userId": user_id}, "SUCCESS",
                    devicesFound=0, updatesAvailable=0)
-            return _resp(200, {"devices": []})
+            return _success([])
 
         # ── Pre-loop I/O: beta check + package pointer cache ──────────────────
         # All DB reads for package availability happen here, before the device
@@ -584,15 +620,15 @@ def lambda_handler(event, context):
              jobActive=job_active_count,
              handlerMs=handler_ms)
 
-        return _resp(200, {"devices": result_devices})
+        return _success(result_devices)
 
     except ClientError as e:
         code = e.response["Error"]["Code"]
         msg  = e.response["Error"]["Message"]
         _log("error", "aws_client_error", awsError=code, awsMessage=msg)
-        return _resp(500, {"error": "Internal server error"})
+        return _failed(500, "Internal server error")
     except Exception as e:
         _log("error", "unhandled_exception",
              error=str(e), excType=type(e).__name__)
         log.exception(f"Unhandled error in user_check_updates: {e}")
-        return _resp(500, {"error": "Internal server error"})
+        return _failed(500, "Internal server error")
