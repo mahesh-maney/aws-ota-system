@@ -47,6 +47,9 @@ CANARY_MAX="${CANARY_MAX:-5}"
 LAMBDA_DIR="$(cd "$(dirname "$0")/06_lambdas" && pwd)"
 RUNTIME="python3.11"
 
+# Short git SHA for version description (falls back to timestamp if not in a repo)
+GIT_SHA="$(git -C "$(dirname "$0")" rev-parse --short HEAD 2>/dev/null || date -u +%Y%m%d%H%M%S)"
+
 log_info "Prefix          : $PREFIX"
 log_info "Region          : $REGION"
 log_info "Account         : $ACCOUNT_ID"
@@ -202,6 +205,33 @@ deploy_lambda() {
     --region "$REGION"
   log_info "  Log group: $LOG_GROUP  (30-day retention)"
 
+  # ── Publish an immutable version snapshot ────────────────────────────────────
+  local VERSION
+  VERSION=$(aws lambda publish-version \
+    --function-name "$FUNC_NAME" \
+    --description "git:${GIT_SHA} deployed:$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    --region "$REGION" \
+    --query 'Version' --output text)
+  log_info "  Published version: $VERSION  (git:${GIT_SHA})"
+
+  # ── Create or update 'prod' alias ────────────────────────────────────────────
+  if aws lambda get-alias --function-name "$FUNC_NAME" --name prod \
+       --region "$REGION" &>/dev/null; then
+    aws lambda update-alias \
+      --function-name "$FUNC_NAME" \
+      --name prod \
+      --function-version "$VERSION" \
+      --region "$REGION" > /dev/null
+    log_ok "  Alias 'prod' → v${VERSION}"
+  else
+    aws lambda create-alias \
+      --function-name "$FUNC_NAME" \
+      --name prod \
+      --function-version "$VERSION" \
+      --region "$REGION" > /dev/null
+    log_ok "  Alias 'prod' created → v${VERSION}"
+  fi
+
   rm -f "$ZIP_FILE"
 }
 
@@ -224,9 +254,11 @@ deploy_lambda "user_update_status"     "$USER_ROLE_ARN"
 deploy_lambda "user_get_download_link" "$USER_ROLE_ARN"
 
 # ── IoT invoke permissions ────────────────────────────────────────────────────
+# Grant IoT rules permission to invoke both $LATEST and the 'prod' alias.
 log_section "IoT Invoke Permissions"
 for SUFFIX in status_handler device_register; do
   FUNC="${PREFIX}_ota_${SUFFIX}"
+  # Permission on the unqualified function (covers $LATEST)
   STMT_ID="iot-rule-invoke-${FUNC}"
   aws lambda remove-permission \
     --function-name "$FUNC" \
@@ -240,6 +272,22 @@ for SUFFIX in status_handler device_register; do
     --source-account "$ACCOUNT_ID" \
     --region "$REGION" > /dev/null
   log_ok "IoT → $FUNC"
+  # Permission on the 'prod' alias
+  ALIAS_STMT_ID="iot-rule-invoke-${FUNC}-prod"
+  aws lambda remove-permission \
+    --function-name "$FUNC" \
+    --qualifier prod \
+    --statement-id "$ALIAS_STMT_ID" \
+    --region "$REGION" 2>/dev/null || true
+  aws lambda add-permission \
+    --function-name "$FUNC" \
+    --qualifier prod \
+    --statement-id "$ALIAS_STMT_ID" \
+    --action "lambda:InvokeFunction" \
+    --principal "iot.amazonaws.com" \
+    --source-account "$ACCOUNT_ID" \
+    --region "$REGION" > /dev/null
+  log_ok "IoT → ${FUNC}:prod"
 done
 
 # ── Cleanup ───────────────────────────────────────────────────────────────────

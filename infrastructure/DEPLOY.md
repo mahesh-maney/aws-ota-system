@@ -110,3 +110,79 @@ All phases are **idempotent** — safe to re-run against a partially deployed ac
 2. Copy the signing public key printed at the end of deploy to each controller at `/etc/digilux/ota-signing.pub`.
 3. Deploy the OTA agent to controllers.
 4. Open the admin UI and upload a test package.
+
+---
+
+## Lambda Versioning
+
+Every Lambda function is versioned on every deploy. Understanding the model:
+
+| Concept | What it is |
+|---------|------------|
+| `$LATEST` | Mutable working copy — updated on every `update-function-code` |
+| **Version** (1, 2, 3…) | Immutable snapshot of `$LATEST` at the moment of publish — code + env vars frozen |
+| **Alias `prod`** | Named pointer that always points to the latest published version |
+
+### How it works in `07_deploy_lambdas.sh`
+
+After every Lambda update, the script automatically:
+1. Calls `publish-version` — freezes the current code + config as an immutable version number, tagged with the git SHA and deploy timestamp.
+2. Calls `update-alias prod` — moves the `prod` alias to point at the new version.
+
+The version description contains the git SHA so you can trace any deployed version back to its exact commit:
+
+```
+git:a1b2c3d deployed:2026-09-29T10:30:00Z
+```
+
+### Checking what's deployed
+
+```bash
+# See the current prod alias for a function (shows version number + description)
+aws lambda get-alias \
+  --function-name digilux_ota_job_create \
+  --name prod \
+  --region ap-south-1
+
+# List all published versions with their descriptions
+aws lambda list-versions-by-function \
+  --function-name digilux_ota_job_create \
+  --region ap-south-1 \
+  --query 'Versions[*].{Version:Version,Description:Description,Modified:LastModified}' \
+  --output table
+```
+
+### Rolling back
+
+If a deploy causes issues, point `prod` back to the previous version — no redeployment needed:
+
+```bash
+# Roll back to version 3
+aws lambda update-alias \
+  --function-name digilux_ota_job_create \
+  --name prod \
+  --function-version 3 \
+  --region ap-south-1
+
+# Roll back ALL core OTA Lambdas to version N in one shot
+for FN in \
+  digilux_ota_artifact_processor \
+  digilux_ota_user_check_updates \
+  digilux_ota_job_create \
+  digilux_ota_user_consent \
+  digilux_ota_package_register \
+  digilux_ota_device_register \
+  digilux_ota_status_handler \
+  digilux_ota_user_update_status \
+  digilux_ota_user_get_download_link; do
+  aws lambda update-alias \
+    --function-name "$FN" --name prod \
+    --function-version <TARGET_VERSION> \
+    --region ap-south-1
+  echo "Rolled back $FN → v<TARGET_VERSION>"
+done
+```
+
+### Initial baseline (version 1)
+
+All 18 Lambdas were bootstrapped with version 1 on 2026-09-29 using description `"Initial versioning baseline — 2026-09-29"`. Every deploy from `07_deploy_lambdas.sh` onwards increments the version number automatically.
