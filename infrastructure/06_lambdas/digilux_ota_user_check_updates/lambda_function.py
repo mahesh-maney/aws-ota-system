@@ -4,12 +4,23 @@ Returns available OTA updates for all controller devices owned by the calling us
 
 GET /api/v1/ota/my/updates
 
-Auth: Cognito ID token (any authenticated user — NOT admin only).
+Auth: Cognito ID token (any authenticated user).
 The userId is extracted from the JWT `sub` claim.
 Only devices registered under that userId are returned.
 
-OTA state (installedVersions, pendingJobId, thingName, model, hwRevision) is stored
-directly on digilux_device_data items — no separate inventory table lookup needed.
+Optimised architecture (pointer-based, zero per-device DB/IoT calls outside job checks):
+  All DB I/O for package availability is done BEFORE the device loop:
+    1. Fetch all user devices (one GSI query).
+    2. Check if user is a beta user (one GetItem on digilux_ota_beta_users).
+    3. Pre-fetch LATEST#BETA / LATEST#PROD pointer items for each unique package
+       name (up to 2 GetItem calls per unique package name, outside the loop).
+  Device loop is then in-memory (no IoT group calls, no deployment queries):
+    a. If device has QUEUED or IN_PROGRESS job    → return JOB_ACTIVE (blocked).
+    b. If device has FAILED or TIMED_OUT job      → note as lastFailedJob, continue.
+    c. Pointer cache lookup: BETA (beta users) → PROD fallback.
+    d. installedVersion == availableVersion        → no update (up to date).
+    e. installedVersion >  availableVersion        → no update (never downgrade).
+    f. installedVersion <  availableVersion        → entitlement check → offer update.
 """
 from __future__ import annotations
 
@@ -32,23 +43,30 @@ ACTOR = "check_updates"
 REGION                 = os.environ["REGION"]
 DEVICE_DATA_TABLE      = os.environ.get("DEVICE_DATA_TABLE",      "digilux_device_data")
 PACKAGES_TABLE         = os.environ.get("PACKAGES_TABLE",         "digilux_ota_packages")
-DEVICE_DATA_USER_INDEX = os.environ.get("DEVICE_DATA_USER_INDEX", "userId-index")
-CANARY_GROUP           = os.environ.get("CANARY_GROUP",           "DGX-Canary")
-ENTITLEMENT_FUNCTION   = os.environ.get("ENTITLEMENT_FUNCTION",   "digilux_entitlement_check")
 OTA_JOBS_TABLE         = os.environ.get("OTA_JOBS_TABLE",         "digilux_ota_jobs")
-OTA_IN_PROGRESS_MSG    = os.environ.get(
+CONSENTS_TABLE         = os.environ.get("CONSENTS_TABLE",         "digilux_ota_user_consents")
+BETA_USERS_TABLE       = os.environ.get("BETA_USERS_TABLE",       "digilux_ota_beta_users")
+DEVICE_DATA_USER_INDEX = os.environ.get("DEVICE_DATA_USER_INDEX", "userId-index")
+CONSENTS_USER_INDEX    = os.environ.get("CONSENTS_USER_INDEX",    "userId-deviceId-index")
+ENTITLEMENT_FUNCTION   = os.environ.get("ENTITLEMENT_FUNCTION",   "digilux_entitlement_check")
+
+OTA_IN_PROGRESS_MSG = os.environ.get(
     "OTA_IN_PROGRESS_MSG",
     "Your Firmware update ver {version} is in progress, please check after some time for status. "
     "Note: Please ensure the controller is Powered on.",
 )
-OTA_FAILED_MSG         = os.environ.get(
+OTA_FAILED_MSG = os.environ.get(
     "OTA_FAILED_MSG",
     "Your last firmware ver {version} update failed. Please contact support.",
 )
+OTA_TIMED_OUT_MSG = os.environ.get(
+    "OTA_TIMED_OUT_MSG",
+    "Your firmware update ver {version} timed out. Please retry.",
+)
 
-dynamo         = boto3.resource("dynamodb", region_name=REGION)
-iot            = boto3.client("iot",        region_name=REGION)
-lambda_client  = boto3.client("lambda",     region_name=REGION)
+dynamo        = boto3.resource("dynamodb", region_name=REGION)
+iot           = boto3.client("iot",        region_name=REGION)
+lambda_client = boto3.client("lambda",     region_name=REGION)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -71,7 +89,6 @@ def _resp(status: int, body: dict) -> dict:
 
 
 def _log(level: str, msg: str, **fields) -> None:
-    """Emit a structured JSON log line at the given level."""
     record = {"msg": msg, **fields}
     getattr(log, level)(json.dumps(record, default=str))
 
@@ -85,11 +102,10 @@ def _audit(event: str, actor: str, resource: dict, result: str, **extra) -> None
         "resource": resource,
         "result":   result,
         **extra,
-    }))
+    }, default=str))
 
 
 def _version_tuple(v: str):
-    """Parse '4.2.0' → (4, 2, 0). Non-numeric segments use their numeric prefix (e.g. '28188-rc1' → 28188)."""
     result = []
     for part in str(v).split("."):
         try:
@@ -103,18 +119,39 @@ def _is_newer(candidate: str, installed: str) -> bool:
     return _version_tuple(candidate) > _version_tuple(installed)
 
 
-def _invoke_entitlement_check(controller_id: str, firmware_category: str,
+# ──────────────────────────────────────────────────────────────────────────────
+# Beta-user check
+# ──────────────────────────────────────────────────────────────────────────────
+
+def _is_beta_user(user_id: str) -> bool:
+    """Check if the user is enrolled in the beta programme (single GetItem)."""
+    try:
+        item   = dynamo.Table(BETA_USERS_TABLE).get_item(
+            Key={"userId": user_id}
+        ).get("Item")
+        result = item is not None
+        _log("debug", "beta_user_check", userId=user_id, isBeta=result)
+        return result
+    except Exception as e:
+        _log("warning", "beta_user_check_failed",
+             userId=user_id, error=str(e),
+             detail="Defaulting to non-beta")
+        return False
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Entitlement check
+# ──────────────────────────────────────────────────────────────────────────────
+
+def _invoke_entitlement_check(controller_id: str, firmware_category: str | None,
                                tier_override: str | None) -> dict:
     """
     Invoke digilux_entitlement_check (internal Lambda-to-Lambda).
-    Returns the entitlement response dict.
-    Fails open on any error — existing OTA behaviour is never blocked by
-    an entitlement service outage.
+    Fails open on any error — OTA is never blocked by entitlement service outage.
     """
     if not controller_id or not firmware_category:
         _log("debug", "entitlement_check_skipped",
-             controllerId=controller_id, firmwareCategory=firmware_category,
-             detail="Missing input — defaulting to eligible=True")
+             controllerId=controller_id, firmwareCategory=firmware_category)
         return {"eligible": True, "reason": "missing_input"}
 
     payload = json.dumps({
@@ -123,197 +160,198 @@ def _invoke_entitlement_check(controller_id: str, firmware_category: str,
         "tierOverride":     tier_override,
     }).encode()
 
-    _log("debug", "entitlement_invoke_start",
-         controllerId=controller_id, firmwareCategory=firmware_category,
-         function=ENTITLEMENT_FUNCTION)
-
     t_start = time.monotonic()
     try:
-        resp = lambda_client.invoke(
-            FunctionName   = ENTITLEMENT_FUNCTION,
-            InvocationType = "RequestResponse",
-            Payload        = payload,
+        resp    = lambda_client.invoke(
+            FunctionName=ENTITLEMENT_FUNCTION, InvocationType="RequestResponse", Payload=payload
         )
         result  = json.loads(resp["Payload"].read())
         elapsed = int((time.monotonic() - t_start) * 1000)
 
-        # Lambda invocation errors surface as FunctionError key
         if resp.get("FunctionError"):
             _log("warning", "entitlement_function_error",
-                 controllerId=controller_id, firmwareCategory=firmware_category,
-                 functionError=resp["FunctionError"], elapsedMs=elapsed,
-                 detail="Failing open — returning eligible=True")
+                 controllerId=controller_id, elapsedMs=elapsed,
+                 detail="Failing open")
             return {"eligible": True, "reason": "entitlement_function_error"}
 
         _log("debug", "entitlement_invoke_complete",
-             controllerId=controller_id, firmwareCategory=firmware_category,
+             controllerId=controller_id,
              eligible=result.get("eligible"), reason=result.get("reason"),
-             subscriptionTier=result.get("subscriptionTier"),
              elapsedMs=elapsed)
         return result
     except Exception as exc:
         elapsed = int((time.monotonic() - t_start) * 1000)
         _log("warning", "entitlement_invoke_failed",
-             controllerId=controller_id, firmwareCategory=firmware_category,
-             error=str(exc), excType=type(exc).__name__, elapsedMs=elapsed,
+             controllerId=controller_id, error=str(exc), elapsedMs=elapsed,
              detail="Failing open — never block legitimate OTA delivery")
         return {"eligible": True, "reason": "entitlement_invoke_failed"}
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Core logic
+# Active job check
 # ──────────────────────────────────────────────────────────────────────────────
 
-def _get_user_devices(user_id: str) -> list[dict]:
-    """Query digilux_device_data by userId-index GSI. Returns list of device items."""
-    _log("debug", "user_device_query_start",
-         userId=user_id, table=DEVICE_DATA_TABLE, index=DEVICE_DATA_USER_INDEX)
-    t_start = time.monotonic()
-    tbl  = dynamo.Table(DEVICE_DATA_TABLE)
-    resp = tbl.query(
-        IndexName=DEVICE_DATA_USER_INDEX,
-        KeyConditionExpression=Key("userId").eq(user_id),
-    )
-    items = resp.get("Items", [])
-    elapsed = int((time.monotonic() - t_start) * 1000)
-    _log("debug", "user_device_query_complete",
-         userId=user_id, deviceCount=len(items), elapsedMs=elapsed)
-    return items
+_BLOCKING_JOB_STATUSES  = {"QUEUED", "IN_PROGRESS"}
+_RETRYABLE_JOB_STATUSES = {"FAILED", "TIMED_OUT"}
 
 
-def _is_beta_device(thing_name: str) -> bool:
-    """Return True if the device's IoT thing is in the canary group."""
-    if not thing_name:
-        _log("debug", "beta_check_skipped_no_thing_name")
-        return False
-    _log("debug", "beta_check_start",
-         thingName=thing_name, canaryGroup=CANARY_GROUP)
-    t_start = time.monotonic()
+def _get_job_live_status(job_id: str, thing_name: str | None) -> str | None:
+    """
+    Look up a job in OTA_JOBS_TABLE, optionally refresh via IoT live status.
+    Returns the status string or None if job not found.
+    """
     try:
-        resp   = iot.list_thing_groups_for_thing(thingName=thing_name)
-        groups = [g.get("groupName", "") for g in resp.get("thingGroups", [])]
-        result = CANARY_GROUP in groups
-        elapsed = int((time.monotonic() - t_start) * 1000)
-        _log("debug", "beta_check_complete",
-             thingName=thing_name, groups=groups,
-             isBeta=result, elapsedMs=elapsed)
-        return result
-    except Exception as e:
-        elapsed = int((time.monotonic() - t_start) * 1000)
-        _log("warning", "beta_check_failed",
-             thingName=thing_name, error=str(e), elapsedMs=elapsed,
-             detail="Could not check canary group — defaulting to non-beta")
-        return False
-
-
-def _get_latest_available_version(package_name: str, include_beta: bool) -> dict | None:
-    """
-    Query packages for packageName where:
-      - status = ACTIVE  (binary has been processed by artifact_processor)
-      - activated = True (admin has explicitly published this version)
-      - releaseType = PROD always; also UAT if device is in the canary group
-    Returns the highest semver version that matches, or None.
-    """
-    _log("debug", "package_lookup_start",
-         packageName=package_name, includeBeta=include_beta)
-    t_start = time.monotonic()
-
-    tbl = dynamo.Table(PACKAGES_TABLE)
-
-    filter_expr = (
-        Attr("status").eq("ACTIVE") &
-        Attr("activated").eq(True)
-    )
-    if not include_beta:
-        filter_expr = filter_expr & Attr("releaseType").eq("PROD")
-
-    resp  = tbl.query(
-        KeyConditionExpression=Key("packageName").eq(package_name),
-        FilterExpression=filter_expr,
-    )
-    items = resp.get("Items", [])
-    elapsed = int((time.monotonic() - t_start) * 1000)
-
-    _log("debug", "package_lookup_complete",
-         packageName=package_name, includeBeta=include_beta,
-         candidateCount=len(items), elapsedMs=elapsed,
-         versions=[i.get("version") for i in items])
-
-    if not items:
-        return None
-    best = max(items, key=lambda i: _version_tuple(i.get("version", "0.0.0")))
-    _log("debug", "package_best_version_selected",
-         packageName=package_name, selectedVersion=best.get("version"),
-         releaseType=best.get("releaseType"))
-    return best
-
-
-def _get_active_job(job_id: str, thing_name: str | None) -> dict | None:
-    """
-    Look up a job in digilux_ota_jobs, then refresh its status via IoT if possible.
-    Returns the job record dict, or None if not found / on error.
-    """
-    t_start = time.monotonic()
-    _log("debug", "active_job_lookup_start", jobId=job_id, thingName=thing_name)
-    try:
-        resp = dynamo.Table(OTA_JOBS_TABLE).get_item(Key={"jobId": job_id})
-        job  = resp.get("Item")
+        job = dynamo.Table(OTA_JOBS_TABLE).get_item(
+            Key={"jobId": job_id}
+        ).get("Item")
         if not job:
-            _log("warning", "active_job_not_found", jobId=job_id,
-                 detail="pendingJobId set on device but no job record in OTA_JOBS_TABLE")
+            _log("warning", "job_not_found_in_table",
+                 jobId=job_id,
+                 detail="pendingJobId set but no record in OTA_JOBS_TABLE")
             return None
 
-        # Refresh status from IoT for the most up-to-date execution state
-        if thing_name:
+        status = job.get("status", "")
+
+        # Refresh live status from IoT Core for active jobs
+        if thing_name and status in _BLOCKING_JOB_STATUSES:
             try:
                 iot_resp   = iot.describe_job_execution(jobId=job_id, thingName=thing_name)
                 iot_status = iot_resp.get("execution", {}).get("status")
                 if iot_status:
-                    _log("debug", "active_job_live_status_refreshed",
-                         jobId=job_id, thingName=thing_name,
-                         dbStatus=job.get("status"), iotStatus=iot_status)
-                    job["status"] = iot_status
+                    _log("debug", "job_live_status_refreshed",
+                         jobId=job_id, dbStatus=status, iotStatus=iot_status)
+                    status = iot_status
             except Exception as exc:
-                _log("warning", "active_job_iot_refresh_failed",
-                     jobId=job_id, thingName=thing_name, error=str(exc),
+                _log("warning", "job_live_status_refresh_failed",
+                     jobId=job_id, error=str(exc),
                      detail="Using DynamoDB status as fallback")
-
-        elapsed = int((time.monotonic() - t_start) * 1000)
-        _log("debug", "active_job_lookup_complete",
-             jobId=job_id, status=job.get("status"),
-             packageName=job.get("packageName"), version=job.get("version"),
-             elapsedMs=elapsed)
-        return job
+        return status
 
     except Exception as exc:
-        elapsed = int((time.monotonic() - t_start) * 1000)
-        _log("warning", "active_job_lookup_failed",
-             jobId=job_id, error=str(exc), excType=type(exc).__name__, elapsedMs=elapsed)
+        _log("warning", "job_status_lookup_failed",
+             jobId=job_id, error=str(exc))
         return None
 
 
-_IN_PROGRESS_JOB_STATUSES = {"AWAITING_CONSENT", "QUEUED", "IN_PROGRESS"}
+def _check_active_job(user_id: str, device_id: str, pkg_name: str,
+                       thing_name: str | None, pending_job_id: str | None) -> tuple:
+    """
+    Check if there is an active (blocking) or retryable job for this device+package.
 
+    Uses device.pendingJobId as the quick path.
+    Falls back to querying the consents table for ACCEPTED consents.
 
-def _job_user_message(status: str, version: str) -> str | None:
-    """Return the user-facing message for a job status, or None if no message needed."""
-    if status in _IN_PROGRESS_JOB_STATUSES:
-        return OTA_IN_PROGRESS_MSG.format(version=version)
-    if status in ("FAILED", "TIMED_OUT"):
-        return OTA_FAILED_MSG.format(version=version)
-    return None  # SUCCEEDED or unknown — let normal flow handle
+    Returns: (blocking: bool, job_info: dict | None, last_failed: dict | None)
+      - blocking=True  → device has QUEUED or IN_PROGRESS job; do not offer update
+      - blocking=False + job_info=None → device is free for new update
+      - blocking=False + last_failed   → previous job failed/timed out; note for retry
+    """
+    job_id_to_check = None
+    job_version     = None
+
+    # Quick path: pendingJobId on device record
+    if pending_job_id and not pending_job_id.startswith("digilux-ota-dev-"):
+        job_id_to_check = pending_job_id
+        # Get version from job record
+        try:
+            jitem = dynamo.Table(OTA_JOBS_TABLE).get_item(
+                Key={"jobId": pending_job_id}
+            ).get("Item") or {}
+            job_version = jitem.get("version", "")
+        except Exception:
+            pass
+
+    # If no pendingJobId, check consents table for ACCEPTED + active job
+    if not job_id_to_check:
+        try:
+            resp = dynamo.Table(CONSENTS_TABLE).query(
+                IndexName=CONSENTS_USER_INDEX,
+                KeyConditionExpression=(
+                    Key("userId").eq(user_id) & Key("deviceId").eq(device_id)
+                ),
+                FilterExpression=(
+                    Attr("status").eq("ACCEPTED") &
+                    Attr("packageName").eq(pkg_name)
+                ),
+            )
+            accepted = resp.get("Items", [])
+            if accepted:
+                # Sort by createdAt descending — use most recent
+                accepted.sort(key=lambda c: int(c.get("createdAt", 0)), reverse=True)
+                c = accepted[0]
+                job_id_to_check = c.get("jobId")
+                job_version     = c.get("version", "")
+                _log("debug", "active_job_check_via_consent",
+                     userId=user_id, deviceId=device_id,
+                     consentId=c.get("consentId"), jobId=job_id_to_check)
+        except Exception as e:
+            _log("warning", "consent_query_for_active_job_failed",
+                 userId=user_id, deviceId=device_id, error=str(e))
+
+    if not job_id_to_check:
+        return False, None, None
+
+    status = _get_job_live_status(job_id_to_check, thing_name)
+    if not status:
+        return False, None, None
+
+    _log("debug", "active_job_status_found",
+         jobId=job_id_to_check, status=status,
+         deviceId=device_id, packageName=pkg_name)
+
+    if status in _BLOCKING_JOB_STATUSES:
+        job_info = {
+            "jobId":   job_id_to_check,
+            "status":  status,
+            "version": job_version or "",
+            "message": OTA_IN_PROGRESS_MSG.format(version=job_version or ""),
+        }
+        _log("info", "device_blocked_by_active_job",
+             deviceId=device_id, jobId=job_id_to_check, status=status,
+             jobVersion=job_version)
+        return True, job_info, None
+
+    if status in _RETRYABLE_JOB_STATUSES:
+        msg = (OTA_TIMED_OUT_MSG if status == "TIMED_OUT" else OTA_FAILED_MSG)
+        last_failed = {
+            "jobId":   job_id_to_check,
+            "status":  status,
+            "version": job_version or "",
+            "message": msg.format(version=job_version or ""),
+        }
+        _log("info", "device_has_retryable_job",
+             deviceId=device_id, jobId=job_id_to_check, status=status,
+             detail="FAILED/TIMED_OUT job — will continue to offer update")
+        return False, None, last_failed
+
+    # SUCCEEDED, CANCELLED, or unknown — device is free
+    _log("debug", "job_terminal_device_free",
+         jobId=job_id_to_check, status=status, deviceId=device_id)
+    return False, None, None
 
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Handler
 # ──────────────────────────────────────────────────────────────────────────────
 
+def _get_user_devices(user_id: str) -> list[dict]:
+    t_start = time.monotonic()
+    resp    = dynamo.Table(DEVICE_DATA_TABLE).query(
+        IndexName=DEVICE_DATA_USER_INDEX,
+        KeyConditionExpression=Key("userId").eq(user_id),
+    )
+    items   = resp.get("Items", [])
+    elapsed = int((time.monotonic() - t_start) * 1000)
+    _log("debug", "user_devices_fetched",
+         userId=user_id, count=len(items), elapsedMs=elapsed)
+    return items
+
+
 def lambda_handler(event, context):
     handler_start = time.monotonic()
     request_id    = context.aws_request_id if context else None
 
     try:
-        # ── Auth: extract userId from Cognito JWT claims ─────────────────────
         claims  = event.get("requestContext", {}).get("authorizer", {}).get("claims", {})
         user_id = claims.get("sub")
         if not user_id:
@@ -325,48 +363,100 @@ def lambda_handler(event, context):
         _log("info", "check_updates_request",
              userId=user_id, email=email, requestId=request_id)
 
-        # ── Fetch devices owned by this user ─────────────────────────────────
         device_items = _get_user_devices(user_id)
-        _log("info", "user_devices_fetched",
-             userId=user_id, deviceCount=len(device_items))
+        _log("info", "user_devices_fetched", userId=user_id, deviceCount=len(device_items))
 
         if not device_items:
-            _log("info", "no_devices_for_user",
-                 userId=user_id, detail="User has no registered devices")
+            _log("info", "no_devices_for_user", userId=user_id)
             _audit("USER_CHECK_UPDATES", user_id, {"userId": user_id}, "SUCCESS",
                    devicesFound=0, updatesAvailable=0)
             return _resp(200, {"devices": []})
 
-        result_devices      = []
+        # ── Pre-loop I/O: beta check + package pointer cache ──────────────────
+        # All DB reads for package availability happen here, before the device
+        # loop.  The loop itself makes no deployment or package table queries.
+        include_beta = _is_beta_user(user_id)
+
+        unique_pkg_names = {
+            (dev.get("package") or {}).get("name", "")
+            for dev in device_items
+            if (dev.get("package") or {}).get("name", "")
+        }
+        _log("debug", "pre_fetching_package_pointers",
+             userId=user_id, packages=list(unique_pkg_names), includeBeta=include_beta)
+
+        tbl = dynamo.Table(PACKAGES_TABLE)
+        # pkg_cache: packageName → pointer item (or None if no active package)
+        # Each pointer item has: targetVersion, releaseType, releaseNotes, fileName,
+        #   deviceType, firmwareCategory (from full record), tierOverride (from full record)
+        pkg_cache: dict = {}
+        for pname in unique_pkg_names:
+            ptr = None
+            if include_beta:
+                try:
+                    ptr = tbl.get_item(
+                        Key={"packageName": pname, "version": "LATEST#BETA"}
+                    ).get("Item")
+                except Exception as e:
+                    _log("warning", "beta_pointer_fetch_failed",
+                         packageName=pname, error=str(e))
+            if not ptr:
+                try:
+                    ptr = tbl.get_item(
+                        Key={"packageName": pname, "version": "LATEST#PROD"}
+                    ).get("Item")
+                except Exception as e:
+                    _log("warning", "prod_pointer_fetch_failed",
+                         packageName=pname, error=str(e))
+            if ptr:
+                # Merge entitlement fields from the full package record
+                target_ver = ptr.get("targetVersion", "")
+                if target_ver:
+                    try:
+                        full = tbl.get_item(
+                            Key={"packageName": pname, "version": target_ver}
+                        ).get("Item") or {}
+                        ptr["firmwareCategory"] = full.get("firmwareCategory")
+                        ptr["tierOverride"]     = full.get("tierOverride")
+                    except Exception as e:
+                        _log("warning", "full_package_fetch_failed",
+                             packageName=pname, version=target_ver, error=str(e))
+            pkg_cache[pname] = ptr
+            _log("debug", "pkg_cache_entry",
+                 packageName=pname, found=bool(ptr),
+                 targetVersion=ptr.get("targetVersion") if ptr else None,
+                 releaseType=ptr.get("releaseType") if ptr else None)
+
+        result_devices       = []
         not_registered_count = 0
-        up_to_date_count    = 0
-        blocked_count       = 0
-        job_active_count    = 0
+        up_to_date_count     = 0
+        blocked_count        = 0
+        job_active_count     = 0
 
         for dev in device_items:
             device_id = dev.get("deviceId")
             if not device_id:
                 _log("warning", "device_record_missing_deviceid",
-                     userId=user_id, record=str(dev)[:200],
-                     detail="Device record has no deviceId — skipping")
+                     userId=user_id, detail="Device record has no deviceId — skipping")
                 continue
 
-            # ── OTA fields come directly from device_data item ────────────────
             installed_version = dev.get("globalInstalledVersion", "")
             pkg_info          = dev.get("package") or {}
             pkg_name          = pkg_info.get("name", "")
             thing_name        = dev.get("thingName")
+            pending_job_id    = dev.get("pendingJobId")
 
             _log("debug", "processing_device",
                  userId=user_id, deviceId=device_id, thingName=thing_name,
-                 packageName=pkg_name, installedVersion=installed_version)
+                 packageName=pkg_name, installedVersion=installed_version,
+                 hasPendingJob=bool(pending_job_id))
 
+            # ── Skip unregistered devices ─────────────────────────────────────
             if not installed_version or not pkg_name:
                 _log("info", "device_not_registered_for_ota",
-                     userId=user_id, deviceId=device_id, thingName=thing_name,
+                     userId=user_id, deviceId=device_id,
                      hasInstalledVersion=bool(installed_version),
-                     hasPackageName=bool(pkg_name),
-                     detail="OTA agent not yet started or registration incomplete")
+                     hasPackageName=bool(pkg_name))
                 not_registered_count += 1
                 result_devices.append({
                     "deviceId":  device_id,
@@ -374,169 +464,104 @@ def lambda_handler(event, context):
                 })
                 continue
 
-            # ── Active job check — if a job exists, report its status ─────────
-            # Only surface jobs that follow the OTA production naming convention
-            # ("digilux-ota-<pkg>-<ver>-<ts>").  Dev/simulate jobs use the prefix
-            # "digilux-ota-dev-" and must never affect this status response.
-            # Any future non-OTA IoT jobs should also use a different prefix so
-            # they are automatically ignored here.
-            pending_job_id = dev.get("pendingJobId")
-            if pending_job_id and pending_job_id.startswith("digilux-ota-dev-"):
-                _log("debug", "pending_job_id_skipped_non_ota",
-                     userId=user_id, deviceId=device_id, jobId=pending_job_id,
-                     detail="Dev/simulate job — not surfaced in available-updates")
-                pending_job_id = None
-            last_failed_job: dict | None = None
-            if pending_job_id:
-                _log("info", "device_has_pending_job",
-                     userId=user_id, deviceId=device_id,
-                     jobId=pending_job_id, thingName=thing_name)
-                job = _get_active_job(pending_job_id, thing_name)
-                if job:
-                    job_status  = job.get("status", "")
-                    job_version = job.get("version", "")
+            # ── Check for active / failed jobs ────────────────────────────────
+            blocking, job_info, last_failed_job = _check_active_job(
+                user_id, device_id, pkg_name, thing_name, pending_job_id
+            )
 
-                    if job_status in _IN_PROGRESS_JOB_STATUSES:
-                        # Job is actively in progress — block version comparison
-                        message = OTA_IN_PROGRESS_MSG.format(version=job_version)
-                        _log("info", "active_job_reported",
-                             userId=user_id, deviceId=device_id,
-                             jobId=pending_job_id, jobStatus=job_status,
-                             jobVersion=job_version, packageName=job.get("packageName"),
-                             messageTemplate="in_progress")
-                        _audit("ACTIVE_JOB_REPORTED", user_id,
-                               {"deviceId": device_id, "jobId": pending_job_id,
-                                "packageName": job.get("packageName"), "version": job_version},
-                               "SUCCESS", jobStatus=job_status,
-                               installedVersion=installed_version)
-                        job_active_count += 1
-                        result_devices.append({
-                            "deviceId":         device_id,
-                            "otaStatus":        "JOB_ACTIVE",
-                            "package":          job.get("packageName", pkg_name),
-                            "installedVersion": installed_version,
-                            "activeJob": {
-                                "jobId":   pending_job_id,
-                                "status":  job_status,
-                                "version": job_version,
-                                "message": message,
-                            },
-                        })
-                        continue
+            if blocking:
+                # Device has QUEUED or IN_PROGRESS job — do not offer new version
+                job_active_count += 1
+                _audit("ACTIVE_JOB_REPORTED", user_id,
+                       {"deviceId": device_id, "jobId": job_info["jobId"],
+                        "packageName": pkg_name, "version": job_info["version"]},
+                       "SUCCESS", jobStatus=job_info["status"],
+                       installedVersion=installed_version)
+                result_devices.append({
+                    "deviceId":         device_id,
+                    "otaStatus":        "JOB_ACTIVE",
+                    "package":          pkg_name,
+                    "installedVersion": installed_version,
+                    "activeJob":        job_info,
+                })
+                continue
 
-                    if job_status in ("FAILED", "TIMED_OUT"):
-                        # Failed/timed-out job — do NOT block version comparison.
-                        # Carry the failure info so it can be attached to the
-                        # UPDATE_AVAILABLE response, letting the user see the
-                        # new version while also showing what failed last time.
-                        last_failed_job = {
-                            "jobId":   pending_job_id,
-                            "status":  job_status,
-                            "version": job_version,
-                            "message": OTA_FAILED_MSG.format(version=job_version),
-                        }
-                        _log("info", "failed_job_fall_through",
-                             userId=user_id, deviceId=device_id,
-                             jobId=pending_job_id, jobVersion=job_version, jobStatus=job_status,
-                             detail="FAILED/TIMED_OUT job — continuing version check so user can see new available update")
-                    else:
-                        # SUCCEEDED (or unknown) — fall through to normal version check
-                        _log("debug", "active_job_succeeded_fall_through",
-                             userId=user_id, deviceId=device_id,
-                             jobId=pending_job_id, jobStatus=job_status,
-                             detail="Job succeeded — continuing with normal update check")
-                else:
-                    # Job record missing in OTA_JOBS_TABLE despite pendingJobId being set
-                    _log("warning", "pending_job_record_missing_fall_through",
-                         userId=user_id, deviceId=device_id,
-                         jobId=pending_job_id,
-                         detail="No job record found — treating device as normal update candidate")
-
-            # ── Determine if this device sees UAT packages ───────────────────
-            include_beta = _is_beta_device(thing_name)
-            _log("info", "device_beta_status",
-                 userId=user_id, deviceId=device_id,
-                 thingName=thing_name, includeBeta=include_beta)
-
-            # ── Compare installed package with latest available version ───────
-            latest_pkg = _get_latest_available_version(pkg_name, include_beta)
-            if not latest_pkg:
-                _log("info", "no_available_package",
+            # ── Package pointer lookup (in-memory, no DB call) ────────────────
+            ptr = pkg_cache.get(pkg_name)
+            if not ptr:
+                _log("info", "no_active_package_pointer",
                      userId=user_id, deviceId=device_id, packageName=pkg_name,
-                     includeBeta=include_beta,
-                     detail="No ACTIVE+activated package found — device is up to date or package not released")
+                     detail="No LATEST#PROD or LATEST#BETA pointer — no update available")
                 up_to_date_count += 1
                 continue
 
-            latest_ver = latest_pkg.get("version", "")
-            _log("debug", "version_comparison",
-                 userId=user_id, deviceId=device_id, packageName=pkg_name,
-                 installedVersion=installed_version, latestVersion=latest_ver,
-                 installedTuple=list(_version_tuple(installed_version)),
-                 latestTuple=list(_version_tuple(latest_ver)))
+            available_version = ptr.get("targetVersion", "")
+            release_type      = ptr.get("releaseType", "")
 
-            if not _is_newer(latest_ver, installed_version):
+            if not _is_newer(available_version, installed_version):
+                # installedVersion >= available — no update (never downgrade)
                 _log("info", "device_up_to_date",
-                     userId=user_id, deviceId=device_id, packageName=pkg_name,
-                     installedVersion=installed_version, latestVersion=latest_ver)
-                up_to_date_count += 1
-                continue
-
-            # ── Entitlement check — gate on subscription tier ─────────────────
-            firmware_category = latest_pkg.get("firmwareCategory") or None
-            tier_override     = latest_pkg.get("tierOverride")     or None
-            _log("debug", "entitlement_check_required",
-                 userId=user_id, deviceId=device_id, packageName=pkg_name,
-                 availableVersion=latest_ver, firmwareCategory=firmware_category,
-                 tierOverride=tier_override)
-
-            entitlement = _invoke_entitlement_check(thing_name, firmware_category, tier_override)
-
-            if not entitlement.get("eligible", True):
-                _log("info", "update_blocked_by_entitlement",
                      userId=user_id, deviceId=device_id,
                      packageName=pkg_name,
                      installedVersion=installed_version,
-                     availableVersion=latest_ver,
-                     firmwareCategory=firmware_category,
+                     availableVersion=available_version)
+                up_to_date_count += 1
+                continue
+
+            # ── Entitlement check ─────────────────────────────────────────────
+            firmware_category = ptr.get("firmwareCategory") or None
+            tier_override     = ptr.get("tierOverride")     or None
+
+            entitlement = _invoke_entitlement_check(
+                thing_name, firmware_category, tier_override
+            )
+            if not entitlement.get("eligible", True):
+                _log("info", "update_blocked_by_entitlement",
+                     userId=user_id, deviceId=device_id,
+                     packageName=pkg_name, availableVersion=available_version,
                      reason=entitlement.get("reason"),
-                     subscriptionTier=entitlement.get("subscriptionTier"),
-                     minimumTier=entitlement.get("minimumTier"))
+                     subscriptionTier=entitlement.get("subscriptionTier"))
                 _audit("UPDATE_BLOCKED_ENTITLEMENT", user_id,
-                       {"deviceId": device_id, "packageName": pkg_name, "version": latest_ver},
+                       {"deviceId": device_id, "packageName": pkg_name,
+                        "version": available_version},
                        "BLOCKED",
                        reason=entitlement.get("reason"),
                        subscriptionTier=entitlement.get("subscriptionTier"),
                        minimumTier=entitlement.get("minimumTier"),
                        firmwareCategory=firmware_category)
                 blocked_count += 1
-            else:
-                entry: dict = {
-                    "deviceId":         device_id,
-                    "otaStatus":        "REGISTERED",
-                    "package":          pkg_name,
-                    "installedVersion": installed_version,
-                    "availableVersion": latest_ver,
-                    "fileName":         latest_pkg.get("fileName", ""),
-                    "releaseNotes":     latest_pkg.get("releaseNotes", ""),
-                }
-                if last_failed_job:
-                    entry["lastFailedJob"] = last_failed_job
-                result_devices.append(entry)
-                _log("info", "update_available",
-                     userId=user_id, deviceId=device_id,
-                     packageName=pkg_name,
-                     installedVersion=installed_version,
-                     availableVersion=latest_ver,
-                     fileName=latest_pkg.get("fileName", ""),
-                     releaseNotesLength=len(latest_pkg.get("releaseNotes", "")))
-                _audit("UPDATE_AVAILABLE", user_id,
-                       {"deviceId": device_id, "packageName": pkg_name, "version": latest_ver},
-                       "SUCCESS",
-                       installedVersion=installed_version,
-                       availableVersion=latest_ver,
-                       fileName=latest_pkg.get("fileName", ""),
-                       isBeta=include_beta)
+                continue
+
+            # ── Build update-available entry ───────────────────────────────────
+            entry: dict = {
+                "deviceId":         device_id,
+                "otaStatus":        "REGISTERED",
+                "package":          pkg_name,
+                "installedVersion": installed_version,
+                "availableVersion": available_version,
+                "fileName":         ptr.get("fileName", ""),
+                "releaseNotes":     ptr.get("releaseNotes", ""),
+                "releaseType":      release_type,
+            }
+            if last_failed_job:
+                entry["lastFailedJob"] = last_failed_job
+
+            result_devices.append(entry)
+            _log("info", "update_available",
+                 userId=user_id, deviceId=device_id,
+                 packageName=pkg_name,
+                 installedVersion=installed_version,
+                 availableVersion=available_version,
+                 releaseType=release_type,
+                 hasLastFailedJob=bool(last_failed_job))
+            _audit("UPDATE_AVAILABLE", user_id,
+                   {"deviceId": device_id, "packageName": pkg_name,
+                    "version": available_version},
+                   "SUCCESS",
+                   installedVersion=installed_version,
+                   availableVersion=available_version,
+                   releaseType=release_type,
+                   fileName=ptr.get("fileName", ""))
 
         handler_ms = int((time.monotonic() - handler_start) * 1000)
 
@@ -564,8 +589,7 @@ def lambda_handler(event, context):
     except ClientError as e:
         code = e.response["Error"]["Code"]
         msg  = e.response["Error"]["Message"]
-        _log("error", "aws_client_error",
-             awsError=code, awsMessage=msg)
+        _log("error", "aws_client_error", awsError=code, awsMessage=msg)
         return _resp(500, {"error": "Internal server error"})
     except Exception as e:
         _log("error", "unhandled_exception",

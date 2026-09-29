@@ -42,8 +42,10 @@ import datetime
 import json
 import logging
 import os
+import threading
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from decimal import Decimal
 
 import boto3
@@ -69,6 +71,8 @@ PRODUCTION_GROUP   = os.environ.get("PRODUCTION_GROUP",   "DGX-Production")
 DEPLOYMENTS_PKG_STATUS_INDEX = os.environ.get("DEPLOYMENTS_PKG_STATUS_INDEX", "packageName-status-index")
 DEPLOYMENTS_STATUS_INDEX     = os.environ.get("DEPLOYMENTS_STATUS_INDEX",     "status-createdAt-index")
 CONSENTS_DEPLOYMENT_INDEX    = os.environ.get("CONSENTS_DEPLOYMENT_INDEX",    "deploymentId-index")
+
+MAX_DEVICES = int(os.environ.get("MAX_DEVICES", "200"))
 
 dynamo = boto3.resource("dynamodb", region_name=REGION)
 iot    = boto3.client("iot",       region_name=REGION)
@@ -209,14 +213,17 @@ def _resolve_device_list(device_ids: list[str], rollout_stage: str,
                           caller: str) -> list[dict]:
     """
     Resolve a list of device IDs to {deviceId, userId, thingName, macAddress}.
+    Resolves devices in parallel using ThreadPoolExecutor (max 20 workers).
     Skips devices not found or without userId (logs warning for each).
+    Hard limit: MAX_DEVICES devices per deployment.
     """
     _log("info", "resolve_device_list_start",
          rolloutStage=rollout_stage, idCount=len(device_ids))
     device_table = dynamo.Table(DEVICE_DATA_TABLE)
-    devices = []
+    devices: list[dict] = []
+    lock = threading.Lock()
 
-    for device_id in device_ids:
+    def _resolve_one(device_id: str) -> None:
         items = device_table.query(
             KeyConditionExpression=Key("deviceId").eq(device_id)
         ).get("Items", [])
@@ -227,9 +234,9 @@ def _resolve_device_list(device_ids: list[str], rollout_stage: str,
                  detail="DeviceId not found in device_data — skipping")
             _audit("DEVICE_SKIPPED_NOT_FOUND", caller,
                    {"deviceId": device_id}, "WARN", rolloutStage=rollout_stage)
-            continue
+            return
 
-        item = items[0]
+        item    = items[0]
         user_id = item.get("userId")
 
         if not user_id:
@@ -239,16 +246,22 @@ def _resolve_device_list(device_ids: list[str], rollout_stage: str,
                  detail="Device has no userId — cannot associate consent")
             _audit("DEVICE_SKIPPED_NO_USERID", caller,
                    {"deviceId": device_id}, "WARN", rolloutStage=rollout_stage)
-            continue
+            return
 
-        devices.append({
-            "deviceId":   device_id,
-            "userId":     user_id,
-            "thingName":  item.get("thingName", ""),
-            "macAddress": item.get("macAddress", ""),
-        })
         _log("debug", "device_resolved",
              deviceId=device_id, userId=user_id, rolloutStage=rollout_stage)
+        with lock:
+            devices.append({
+                "deviceId":   device_id,
+                "userId":     user_id,
+                "thingName":  item.get("thingName", ""),
+                "macAddress": item.get("macAddress", ""),
+            })
+
+    with ThreadPoolExecutor(max_workers=20) as executor:
+        futures = [executor.submit(_resolve_one, did) for did in device_ids]
+        for future in as_completed(futures):
+            future.result()  # propagate exceptions
 
     _log("info", "resolve_device_list_complete",
          rolloutStage=rollout_stage, requested=len(device_ids),
@@ -261,25 +274,46 @@ def _resolve_device_list(device_ids: list[str], rollout_stage: str,
 # ──────────────────────────────────────────────────────────────────────────────
 
 def _list_jobs(event: dict) -> dict:
-    """GET /ota/deployments — list deployments, newest first."""
-    params = event.get("queryStringParameters") or {}
-    limit  = min(int(params.get("limit", 50)), 200)
-    _log("debug", "list_deployments_start", limit=limit)
+    """
+    GET /ota/deployments — list deployments, newest first.
+    Uses status-createdAt-index GSI to avoid a full table Scan.
+    Supports optional ?status= query param to filter by a single status.
+    Without ?status=, queries all four known statuses and merges the results.
+    """
+    params        = event.get("queryStringParameters") or {}
+    limit         = min(int(params.get("limit", 50)), 200)
+    status_filter = (params.get("status") or "").upper() or None
 
-    result = dynamo.Table(DEPLOYMENTS_TABLE).scan()
-    items  = result.get("Items", [])
+    _log("debug", "list_deployments_start", limit=limit, statusFilter=status_filter)
 
-    # Handle pagination if needed
-    while "LastEvaluatedKey" in result:
-        result = dynamo.Table(DEPLOYMENTS_TABLE).scan(
-            ExclusiveStartKey=result["LastEvaluatedKey"]
-        )
-        items.extend(result.get("Items", []))
+    tbl = dynamo.Table(DEPLOYMENTS_TABLE)
+    items: list[dict] = []
 
+    statuses_to_query = (
+        [status_filter]
+        if status_filter
+        else ["ACTIVE", "COMPLETED", "CANCELLED", "FAILED"]
+    )
+
+    for status in statuses_to_query:
+        try:
+            resp = tbl.query(
+                IndexName=DEPLOYMENTS_STATUS_INDEX,
+                KeyConditionExpression=Key("status").eq(status),
+                ScanIndexForward=False,  # newest first within each status
+                Limit=limit,             # cap per-status to avoid over-fetching
+            )
+            items.extend(resp.get("Items", []))
+        except Exception as e:
+            _log("warning", "list_deployments_gsi_query_failed",
+                 status=status, error=str(e))
+
+    # Merge all statuses, sort newest-first, then trim to final limit
     items.sort(key=lambda x: int(x.get("createdAt", 0)), reverse=True)
     items = items[:limit]
 
-    _log("info", "list_deployments_complete", returnedCount=len(items), limit=limit)
+    _log("info", "list_deployments_complete",
+         returnedCount=len(items), limit=limit, statusFilter=status_filter)
 
     jobs = []
     for i in items:
@@ -523,6 +557,15 @@ def lambda_handler(event, context):
                 return _response(400, {
                     "error": f"No device IDs provided for {rollout_stage} deployment. "
                              "Set targetIds array in request body."
+                })
+
+            if len(raw_ids) > MAX_DEVICES:
+                _log("warning", "too_many_devices",
+                     requested=len(raw_ids), limit=MAX_DEVICES,
+                     rolloutStage=rollout_stage, caller=caller)
+                return _response(400, {
+                    "error": f"Too many devices: {len(raw_ids)} exceeds the limit of {MAX_DEVICES}. "
+                             "Split into multiple deployments."
                 })
 
             t_resolve = time.monotonic()

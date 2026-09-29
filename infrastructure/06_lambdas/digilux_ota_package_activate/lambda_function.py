@@ -55,6 +55,58 @@ s3     = boto3.client("s3",  region_name=REGION)
 iot    = boto3.client("iot", region_name=REGION)
 
 
+def _write_latest_pointer(table, pkg_name: str, release_type: str,
+                           item: dict, now_ms: int) -> None:
+    """
+    Upsert the LATEST#<release_type> pointer row for pkg_name.
+    check_updates uses GetItem on this key instead of querying deployments.
+    """
+    try:
+        table.put_item(Item={
+            "packageName":   pkg_name,
+            "version":       f"LATEST#{release_type}",
+            "targetVersion": item["version"],
+            "releaseNotes":  item.get("releaseNotes", ""),
+            "fileName":      item.get("fileName", ""),
+            "deviceType":    item.get("deviceType", ""),
+            "releaseType":   release_type,
+            "updatedAt":     now_ms,
+        })
+        log.info(json.dumps({
+            "msg":           "latest_pointer_written",
+            "packageName":   pkg_name,
+            "releaseType":   release_type,
+            "targetVersion": item["version"],
+        }))
+    except Exception as e:
+        log.warning(json.dumps({
+            "msg":         "latest_pointer_write_failed",
+            "packageName": pkg_name,
+            "releaseType": release_type,
+            "error":       str(e),
+        }))
+
+
+def _delete_latest_pointer(table, pkg_name: str, release_type: str) -> None:
+    """Delete the LATEST#<release_type> pointer row for pkg_name."""
+    try:
+        table.delete_item(
+            Key={"packageName": pkg_name, "version": f"LATEST#{release_type}"}
+        )
+        log.info(json.dumps({
+            "msg":         "latest_pointer_deleted",
+            "packageName": pkg_name,
+            "releaseType": release_type,
+        }))
+    except Exception as e:
+        log.warning(json.dumps({
+            "msg":         "latest_pointer_delete_failed",
+            "packageName": pkg_name,
+            "releaseType": release_type,
+            "error":       str(e),
+        }))
+
+
 def _audit(event: str, actor: str, resource: dict, result: str, **extra) -> None:
     print(json.dumps({
         "audit":    True,
@@ -139,6 +191,9 @@ def lambda_handler(event, context):
                 },
             )
 
+            # Remove the LATEST pointer so check_updates stops offering this package
+            _delete_latest_pointer(table, package_name, item.get("releaseType", ""))
+
             # Auto-cancel QUEUED deployments; collect IN_PROGRESS for warning
             cancelled_jobs, in_progress_jobs = _cancel_queued_deployments(
                 package_name, version, caller, recall_reason, now_ms
@@ -204,6 +259,10 @@ def lambda_handler(event, context):
             # Supersede lower PROD versions
             _supersede_lower_versions(table, package_name, version, "PROD", now_ms)
 
+            # Update pointers: this is now the latest PROD; retire the BETA pointer
+            _write_latest_pointer(table, package_name, "PROD", item, now_ms)
+            _delete_latest_pointer(table, package_name, "BETA")
+
             log.info(json.dumps({
                 "msg": "package_promoted", "packageName": package_name,
                 "version": version, "actor": caller,
@@ -254,6 +313,9 @@ def lambda_handler(event, context):
                 ExpressionAttributeValues={":active": "ACTIVE", ":by": caller, ":ts": now_ms},
             )
 
+            # Update pointer: this restored version is now the latest for its type
+            _write_latest_pointer(table, package_name, release_type, item, now_ms)
+
             log.info(json.dumps({
                 "msg": "package_restored", "packageName": package_name,
                 "version": version, "actor": caller, "releaseType": release_type,
@@ -292,6 +354,12 @@ def lambda_handler(event, context):
                 ":ts": now_ms,
             },
         )
+
+        # Maintain the LATEST pointer so check_updates reflects the new state
+        if activated:
+            _write_latest_pointer(table, package_name, item.get("releaseType", ""), item, now_ms)
+        else:
+            _delete_latest_pointer(table, package_name, item.get("releaseType", ""))
 
         action = "ACTIVATED" if activated else "DEACTIVATED"
         log.info(json.dumps({
