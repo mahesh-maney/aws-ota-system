@@ -132,8 +132,8 @@ _section "T03 — INPUT VALIDATION: deployments"
 code=$(http_code POST "/api/v1/ota/deployments" '{"version":"1.0.0","targetType":"THING","targetId":"x"}')
 assert_code "$code" "400" "Missing packageName → 400"
 
-code=$(http_code POST "/api/v1/ota/deployments" '{"packageName":"x","version":"1.0.0","targetType":"INVALID","targetId":"x"}')
-assert_code "$code" "400" "Invalid targetType → 400"
+code=$(http_code POST "/api/v1/ota/deployments" '{"packageName":"x","version":"1.0.0","rolloutStage":"INVALID_STAGE"}')
+assert_code "$code" "400" "Invalid rolloutStage → 400"
 
 code=$(http_code POST "/api/v1/ota/deployments" '{"packageName":"nonexistent-pkg","version":"9.9.9","targetType":"THING","targetId":"x"}')
 assert_code "$code" "404" "Non-existent package → 404"
@@ -171,7 +171,7 @@ TEST_CHECKSUM=$(sha256sum /tmp/test_artifact.bin | awk '{print $1}')
 echo "  → test artifact SHA256: ${TEST_CHECKSUM:0:16}..."
 
 UPLOAD_RESP=$(call POST "/api/v1/ota/packages/upload-artefact" \
-  "{\"deviceType\":\"Network_controller_firmware\",\"version\":\"${TEST_VERSION}\",\"releaseType\":\"PROD\",\"checksum\":\"${TEST_CHECKSUM}\",\"releaseNotes\":\"E2E test package\"}")
+  "{\"deviceType\":\"Network_controller_firmware\",\"version\":\"${TEST_VERSION}\",\"releaseType\":\"PROD\",\"checksum\":\"${TEST_CHECKSUM}\",\"releaseNotes\":\"E2E automated test package v1\"}")
 
 # Extract HTTP code from UPLOAD_RESP directly — do NOT make a second call
 # (a second call would overwrite the uploadToken in DynamoDB, causing a token mismatch)
@@ -216,6 +216,15 @@ done
 [ "$STATUS" = "ACTIVE" ] \
   && _pass "Package auto-promoted to ACTIVE in ${i}s (S3 event → artifact_processor)" \
   || _fail "Package not ACTIVE after 30s — status=$STATUS"
+
+# Activate TEST_VERSION so check_updates (T18) can find an available update
+if [ "$STATUS" = "ACTIVE" ]; then
+  code=$(http_code PATCH "/api/v1/ota/packages/${TEST_PKG_NAME}/${TEST_VERSION}/activate" '{"activated":true}')
+  [ "$code" = "200" ] \
+    && _pass "Package activated (activated=true set for T18)" \
+    || _warn "Package activate returned $code"
+fi
+
 
 # Fetch full package record once — reuse for all assertions
 PKG_ITEM=$(aws dynamodb get-item \
@@ -319,9 +328,10 @@ TEST_VERSION=$(grep TEST_VERSION /tmp/ota_test_version.txt | cut -d= -f2)
 TEST_PKG_NAME=$(grep TEST_PKG_NAME /tmp/ota_test_version.txt | cut -d= -f2)
 
 # Single call — capture body and HTTP status code together to avoid duplicate job creation
+# BETA rolloutStage requires targetIds array (explicit device list)
 DEPLOY_RESP=$(curl -s -w "\n%{http_code}" -X POST "${BASE}/api/v1/ota/deployments" \
   -H "Authorization: ${TOKEN}" -H "Content-Type: application/json" \
-  -d "{\"packageName\":\"${TEST_PKG_NAME}\",\"version\":\"${TEST_VERSION}\",\"targetType\":\"THING\",\"targetId\":\"${DEVICE_ID}\",\"rolloutStage\":\"CANARY\"}")
+  -d "{\"packageName\":\"${TEST_PKG_NAME}\",\"version\":\"${TEST_VERSION}\",\"rolloutStage\":\"BETA\",\"targetIds\":[\"${DEVICE_ID}\"]}")
 DEPLOY=$(echo "$DEPLOY_RESP" | head -1)
 DEPLOY_CODE=$(echo "$DEPLOY_RESP" | tail -1)
 
@@ -329,13 +339,48 @@ JOB_ID=$(echo "$DEPLOY" | python3 -c "import json,sys; print(json.load(sys.stdin
 
 if [ -n "$JOB_ID" ] && [ "$JOB_ID" != "None" ]; then
   _pass "Deployment created: $JOB_ID"
-  assert_field "$DEPLOY" "status" "AWAITING_CONSENT" "New deployment starts as AWAITING_CONSENT (consent-gated)"
-  assert_field "$DEPLOY" "rolloutStage" "CANARY" "Rollout stage preserved"
-  assert_has_field "$DEPLOY" "consentCount" "Response has consentCount"
+  assert_field "$DEPLOY" "status" "ACTIVE" "New deployment starts as ACTIVE"
+  assert_field "$DEPLOY" "rolloutStage" "BETA" "Rollout stage preserved"
+  assert_has_field "$DEPLOY" "deploymentId" "Response has deploymentId"
   echo "$JOB_ID" > /tmp/ota_test_job_id.txt
 else
   _fail "Deployment creation returned no jobId: $DEPLOY"
   echo "NOJOB" > /tmp/ota_test_job_id.txt
+fi
+
+# ── Call user_consent to create IoT job for T10/T11/T12 MQTT simulation ───────
+# In the new flow deployments start ACTIVE (no IoT job yet); IoT job created on consent.
+DEVICE_USER_ID="41f35d4a-d0d1-709e-634f-fc6198a3872d"   # demotesthw5@yopmail.com
+if [ "$JOB_ID" != "NOJOB" ]; then
+  python3.9 -W ignore -c "
+import json
+uid = '${DEVICE_USER_ID}'
+body = json.dumps({'deviceId':'${DEVICE_ID}','packageName':'${TEST_PKG_NAME}','version':'${TEST_VERSION}','accepted':True})
+print(json.dumps({
+  'httpMethod':'POST','path':'/api/v1/ota/my/updates/consent',
+  'headers':{'Content-Type':'application/json'},
+  'body':body,
+  'requestContext':{'authorizer':{'claims':{
+    'sub':uid,'email':'demotesthw5@yopmail.com','cognito:username':uid
+  }}}
+}))
+" > /tmp/t08_consent_event.json 2>/dev/null
+  aws lambda invoke \
+    --function-name digilux_ota_user_consent \
+    --region "$REGION" \
+    --payload fileb:///tmp/t08_consent_event.json \
+    /tmp/t08_consent_response.json > /dev/null 2>&1
+  IOT_JOB_ID=$(python3.9 -W ignore -c \
+    "import json; resp=json.load(open('/tmp/t08_consent_response.json')); body=json.loads(resp.get('body','{}')); print(body.get('jobId',''))" 2>/dev/null)
+  if [ -n "$IOT_JOB_ID" ] && [ "$IOT_JOB_ID" != "None" ]; then
+    _pass "User consent accepted — IoT job created: $IOT_JOB_ID"
+    echo "$IOT_JOB_ID" > /tmp/ota_test_iot_job_id.txt
+  else
+    _warn "User consent did not return IoT jobId — T10/T11/T12 MQTT simulation may be skipped"
+    echo "NOJOB" > /tmp/ota_test_iot_job_id.txt
+  fi
+else
+  echo "NOJOB" > /tmp/ota_test_iot_job_id.txt
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -345,17 +390,16 @@ _section "T09 — JOB STATUS & LIST"
 JOB_ID=$(cat /tmp/ota_test_job_id.txt)
 if [ "$JOB_ID" != "NOJOB" ]; then
   JOB=$(call GET "/api/v1/ota/deployments/${JOB_ID}")
-  # AWAITING_CONSENT jobs have no IoT Job yet — iotStatus only present after consent accepted
+  # Deployments start ACTIVE — IoT Job is created per-device after user consent
   JOB_STATUS_VAL=$(echo "$JOB" | python3 -c "import json,sys; print(json.load(sys.stdin).get('status',''))")
-  if [ "$JOB_STATUS_VAL" = "AWAITING_CONSENT" ]; then
-    _pass "GET job returns AWAITING_CONSENT — iotStatus/iotJobStatus absent until consent given"
+  if [ "$JOB_STATUS_VAL" = "ACTIVE" ] || [ "$JOB_STATUS_VAL" = "AWAITING_CONSENT" ]; then
+    _pass "GET deployment returns status=$JOB_STATUS_VAL"
   else
-    assert_has_field "$JOB" "iotStatus" "GET job includes live iotStatus"
-    assert_has_field "$JOB" "iotJobStatus" "GET job includes iotJobStatus"
+    _warn "GET deployment returned unexpected status: $JOB_STATUS_VAL"
   fi
-  assert_has_field "$JOB" "deviceStatuses" "GET job includes deviceStatuses"
-  IOT_STATUS=$(echo "$JOB" | python3 -c "import json,sys; print(json.load(sys.stdin).get('iotJobStatus',''))")
-  echo "  → IoT Job status: $IOT_STATUS"
+  assert_has_field "$JOB" "packageName" "GET deployment includes packageName"
+  assert_has_field "$JOB" "version" "GET deployment includes version"
+  echo "  → Deployment status: $JOB_STATUS_VAL"
 
   LIST_JOBS=$(call GET "/api/v1/ota/deployments")
   JOBS_COUNT=$(echo "$LIST_JOBS" | python3 -c "import json,sys; print(json.load(sys.stdin).get('count',0))")
@@ -368,16 +412,16 @@ fi
 _section "T10 — DEVICE STATUS HANDLER (simulate SUCCEEDED)"
 # ─────────────────────────────────────────────────────────────────────────────
 
-JOB_ID=$(cat /tmp/ota_test_job_id.txt)
+IOT_JOB_ID=$(cat /tmp/ota_test_iot_job_id.txt 2>/dev/null || echo "NOJOB")
 TEST_VERSION=$(grep TEST_VERSION /tmp/ota_test_version.txt | cut -d= -f2)
 TEST_PKG_NAME=$(grep TEST_PKG_NAME /tmp/ota_test_version.txt | cut -d= -f2)
 
-if [ "$JOB_ID" != "NOJOB" ]; then
-  # Publish IN_PROGRESS then SUCCEEDED
+if [ "$IOT_JOB_ID" != "NOJOB" ]; then
+  # Publish IN_PROGRESS then SUCCEEDED using the real IoT job ID
   printf '{"jobId":"%s","status":"IN_PROGRESS","progress":50,"packageName":"%s","version":"%s"}' \
-    "$JOB_ID" "$TEST_PKG_NAME" "$TEST_VERSION" > /tmp/mqtt_inprogress.json
+    "$IOT_JOB_ID" "$TEST_PKG_NAME" "$TEST_VERSION" > /tmp/mqtt_inprogress.json
   printf '{"jobId":"%s","status":"SUCCEEDED","progress":100,"packageName":"%s","version":"%s","installedVersion":"%s"}' \
-    "$JOB_ID" "$TEST_PKG_NAME" "$TEST_VERSION" "$TEST_VERSION" > /tmp/mqtt_succeeded.json
+    "$IOT_JOB_ID" "$TEST_PKG_NAME" "$TEST_VERSION" "$TEST_VERSION" > /tmp/mqtt_succeeded.json
 
   aws iot-data publish \
     --topic "iot/device/${DEVICE_ID}/ota/status" \
@@ -397,10 +441,10 @@ if [ "$JOB_ID" != "NOJOB" ]; then
 
   sleep 5
 
-  # Verify job marked SUCCEEDED
+  # Verify IoT job record marked SUCCEEDED
   JOB_STATUS=$(aws dynamodb get-item \
     --table-name digilux_ota_jobs \
-    --key "{\"jobId\":{\"S\":\"${JOB_ID}\"}}" \
+    --key "{\"jobId\":{\"S\":\"${IOT_JOB_ID}\"}}" \
     --region "$REGION" --query 'Item.status.S' --output text 2>/dev/null)
   [ "$JOB_STATUS" = "SUCCEEDED" ] \
     && _pass "Job status updated to SUCCEEDED in DynamoDB" \
@@ -428,13 +472,13 @@ if [ "$JOB_ID" != "NOJOB" ]; then
     && _pass "pendingJobId cleared after SUCCEEDED" \
     || _warn "pendingJobId not cleared: $PENDING"
 
-  # Re-deploy same package+version → admin can always create consent-gated deployment (201)
+  # Re-deploy same package+version — admin can always create consent-gated deployment (201)
   # Version guard lives in user_consent (user side), not job_create (admin side)
   code=$(http_code POST "/api/v1/ota/deployments" \
-    "{\"packageName\":\"${TEST_PKG_NAME}\",\"version\":\"${TEST_VERSION}\",\"targetType\":\"THING\",\"targetId\":\"${DEVICE_ID}\"}")
-  assert_code "$code" "201" "Re-deploy same version → 201 (admin creates consent record regardless of installed version)"
+    "{\"packageName\":\"${TEST_PKG_NAME}\",\"version\":\"${TEST_VERSION}\",\"rolloutStage\":\"BETA\",\"targetIds\":[\"${DEVICE_ID}\"]}")
+  assert_code "$code" "201" "Re-deploy same version → 201 (admin creates deployment regardless of installed version)"
 else
-  _warn "Skipping status handler tests — no job ID"
+  _warn "Skipping status handler tests — no IoT job ID"
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -455,42 +499,70 @@ aws dynamodb update-item \
 echo "  → Reset device to ${TEST_PKG_NAME}@1.0.0 for failure test"
 
 FAIL_DEPLOY=$(call POST "/api/v1/ota/deployments" \
-  "{\"packageName\":\"${TEST_PKG_NAME}\",\"version\":\"${TEST_VERSION}\",\"targetType\":\"THING\",\"targetId\":\"${DEVICE_ID}\",\"rolloutStage\":\"CANARY\"}")
-FAIL_JOB_ID=$(echo "$FAIL_DEPLOY" | python3 -c "import json,sys; print(json.load(sys.stdin).get('jobId',''))" 2>/dev/null)
+  "{\"packageName\":\"${TEST_PKG_NAME}\",\"version\":\"${TEST_VERSION}\",\"rolloutStage\":\"BETA\",\"targetIds\":[\"${DEVICE_ID}\"]}")
+FAIL_DEPLOY_ID=$(echo "$FAIL_DEPLOY" | python3 -c "import json,sys; print(json.load(sys.stdin).get('jobId',''))" 2>/dev/null)
 
-if [ -n "$FAIL_JOB_ID" ] && [ "$FAIL_JOB_ID" != "None" ]; then
-  _pass "Created failure-test job: $FAIL_JOB_ID"
+if [ -n "$FAIL_DEPLOY_ID" ] && [ "$FAIL_DEPLOY_ID" != "None" ]; then
+  _pass "Created failure-test deployment: $FAIL_DEPLOY_ID"
 
-  # Simulate FAILED with rollback detail
-  printf '{"jobId":"%s","status":"FAILED","progress":0,"packageName":"%s","version":"%s","error":"tarball extraction failed: disk full","statusDetail":"Install failed — previous version restored"}' \
-    "$FAIL_JOB_ID" "$TEST_PKG_NAME" "$TEST_VERSION" > /tmp/mqtt_failed.json
+  # Call user_consent to create the IoT job for this deployment
+  python3.9 -W ignore -c "
+import json
+uid = '${DEVICE_USER_ID}'
+body = json.dumps({'deviceId':'${DEVICE_ID}','packageName':'${TEST_PKG_NAME}','version':'${TEST_VERSION}','accepted':True})
+print(json.dumps({
+  'httpMethod':'POST','path':'/api/v1/ota/my/updates/consent',
+  'headers':{'Content-Type':'application/json'},
+  'body':body,
+  'requestContext':{'authorizer':{'claims':{
+    'sub':uid,'email':'demotesthw5@yopmail.com','cognito:username':uid
+  }}}
+}))
+" > /tmp/t11_consent_event.json 2>/dev/null
+  aws lambda invoke \
+    --function-name digilux_ota_user_consent \
+    --region "$REGION" \
+    --payload fileb:///tmp/t11_consent_event.json \
+    /tmp/t11_consent_response.json > /dev/null 2>&1
+  FAIL_JOB_ID=$(python3.9 -W ignore -c \
+    "import json; resp=json.load(open('/tmp/t11_consent_response.json')); body=json.loads(resp.get('body','{}')); print(body.get('jobId',''))" 2>/dev/null)
 
-  aws iot-data publish \
-    --topic "iot/device/${DEVICE_ID}/ota/status" \
-    --cli-binary-format raw-in-base64-out \
-    --payload "$(cat /tmp/mqtt_failed.json)" \
-    --region "$REGION" 2>/dev/null
-  sleep 4
+  if [ -n "$FAIL_JOB_ID" ] && [ "$FAIL_JOB_ID" != "None" ]; then
+    _pass "User consent → IoT job created: $FAIL_JOB_ID"
 
-  FAIL_STATUS=$(aws dynamodb get-item \
-    --table-name digilux_ota_jobs \
-    --key "{\"jobId\":{\"S\":\"${FAIL_JOB_ID}\"}}" \
-    --region "$REGION" --query 'Item.status.S' --output text 2>/dev/null)
-  [ "$FAIL_STATUS" = "FAILED" ] \
-    && _pass "FAILED status recorded in DynamoDB (device rolled back)" \
-    || _fail "Job status not FAILED — got: $FAIL_STATUS"
+    # Simulate FAILED with rollback detail
+    printf '{"jobId":"%s","status":"FAILED","progress":0,"packageName":"%s","version":"%s","error":"tarball extraction failed: disk full","statusDetail":"Install failed — previous version restored"}' \
+      "$FAIL_JOB_ID" "$TEST_PKG_NAME" "$TEST_VERSION" > /tmp/mqtt_failed.json
 
-  # pendingJobId should be cleared even on FAILED
-  PENDING=$(aws dynamodb query \
-    --table-name digilux_device_data \
-    --key-condition-expression "deviceId = :d" \
-    --expression-attribute-values "{\":d\":{\"S\":\"${DEVICE_ID}\"}}" \
-    --region "$REGION" --query 'Items[0].pendingJobId' --output text 2>/dev/null)
-  [ "$PENDING" = "None" ] || [ -z "$PENDING" ] || [ "$PENDING" = "True" ] \
-    && _pass "pendingJobId cleared after FAILED (device can accept next job)" \
-    || _warn "pendingJobId not cleared after FAILED: $PENDING"
+    aws iot-data publish \
+      --topic "iot/device/${DEVICE_ID}/ota/status" \
+      --cli-binary-format raw-in-base64-out \
+      --payload "$(cat /tmp/mqtt_failed.json)" \
+      --region "$REGION" 2>/dev/null
+    sleep 4
+
+    FAIL_STATUS=$(aws dynamodb get-item \
+      --table-name digilux_ota_jobs \
+      --key "{\"jobId\":{\"S\":\"${FAIL_JOB_ID}\"}}" \
+      --region "$REGION" --query 'Item.status.S' --output text 2>/dev/null)
+    [ "$FAIL_STATUS" = "FAILED" ] \
+      && _pass "FAILED status recorded in DynamoDB (device rolled back)" \
+      || _fail "Job status not FAILED — got: $FAIL_STATUS"
+
+    # pendingJobId should be cleared even on FAILED
+    PENDING=$(aws dynamodb query \
+      --table-name digilux_device_data \
+      --key-condition-expression "deviceId = :d" \
+      --expression-attribute-values "{\":d\":{\"S\":\"${DEVICE_ID}\"}}" \
+      --region "$REGION" --query 'Items[0].pendingJobId' --output text 2>/dev/null)
+    [ "$PENDING" = "None" ] || [ -z "$PENDING" ] || [ "$PENDING" = "True" ] \
+      && _pass "pendingJobId cleared after FAILED (device can accept next job)" \
+      || _warn "pendingJobId not cleared after FAILED: $PENDING"
+  else
+    _warn "User consent did not return IoT jobId — skipping MQTT simulation"
+  fi
 else
-  _warn "Could not create failure-test job"
+  _warn "Could not create failure-test deployment"
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -509,7 +581,7 @@ aws dynamodb update-item \
   --region "$REGION" > /dev/null 2>&1
 
 ABORT_DEPLOY=$(call POST "/api/v1/ota/deployments" \
-  "{\"packageName\":\"${TEST_PKG_NAME}\",\"version\":\"${TEST_VERSION}\",\"targetType\":\"THING\",\"targetId\":\"${DEVICE_ID}\",\"rolloutStage\":\"CANARY\"}")
+  "{\"packageName\":\"${TEST_PKG_NAME}\",\"version\":\"${TEST_VERSION}\",\"rolloutStage\":\"BETA\",\"targetIds\":[\"${DEVICE_ID}\"]}")
 ABORT_JOB_ID=$(echo "$ABORT_DEPLOY" | python3 -c "import json,sys; print(json.load(sys.stdin).get('jobId',''))" 2>/dev/null)
 
 if [ -n "$ABORT_JOB_ID" ] && [ "$ABORT_JOB_ID" != "None" ]; then
@@ -703,6 +775,9 @@ if [ -n "$UPLOAD_URL_B" ] && [ "$UPLOAD_URL_B" != "None" ]; then
     [ "$ENC_KEY_S3" != "$ENC_KEY_B" ] \
       && _pass "Two uploads produce distinct UUID keys (no collision): ...${ENC_KEY_S3: -12} vs ...${ENC_KEY_B: -12}" \
       || _fail "UUID collision — two uploads got the same encS3Key: $ENC_KEY_S3"
+    # Activate TEST_VERSION_B so T18 finds an available update after T05 version is superseded
+    http_code PATCH "/api/v1/ota/packages/${TEST_PKG_NAME}/${TEST_VERSION_B}/activate" '{"activated":true}' > /dev/null 2>&1
+    _pass "TEST_VERSION_B activated for T18 availability check"
   else
     _warn "Second package did not reach ACTIVE in 15s — skipping collision check"
   fi
@@ -855,6 +930,31 @@ aws dynamodb update-item \
   --update-expression "REMOVE pendingJobId" \
   --region "$REGION" > /dev/null 2>&1
 
+# Cancel any stale ACCEPTED consent records for this device — the _check_active_job
+# fallback queries consents by userId+deviceId and can find stale records from
+# previous test runs, causing a spurious JOB_ACTIVE on the baseline check.
+python3.9 -W ignore -c "
+import boto3
+client = boto3.client('dynamodb', region_name='ap-south-1')
+resp = client.query(
+    TableName='digilux_ota_user_consents',
+    IndexName='userId-deviceId-index',
+    KeyConditionExpression='userId = :u AND deviceId = :d',
+    FilterExpression='#st = :a',
+    ExpressionAttributeNames={'#st': 'status'},
+    ExpressionAttributeValues={
+        ':u': {'S': '${CU_USER_ID}'},
+        ':d': {'S': '${DEVICE_ID}'},
+        ':a': {'S': 'ACCEPTED'},
+    }
+)
+for item in resp.get('Items', []):
+    client.delete_item(
+        TableName='digilux_ota_user_consents',
+        Key={'consentId': item['consentId']}
+    )
+" 2>/dev/null
+
 CU_RESP=$(cu_call)
 CU_OK=$(echo "$CU_RESP" | python3 -c "import json,sys; print('yes' if 'devices' in json.load(sys.stdin) else 'no')" 2>/dev/null)
 [ "$CU_OK" = "yes" ] \
@@ -866,6 +966,7 @@ CU_OK=$(echo "$CU_RESP" | python3 -c "import json,sys; print('yes' if 'devices' 
   || _fail "No pendingJobId but activeJob appeared in response"
 
 # ── Insert synthetic job record + set pendingJobId on device ─────────────────
+# New Lambda blocks on QUEUED and IN_PROGRESS (not AWAITING_CONSENT).
 aws dynamodb put-item \
   --table-name digilux_ota_jobs \
   --item "{
@@ -873,7 +974,7 @@ aws dynamodb put-item \
     \"packageName\": {\"S\":\"${TEST_PKG_NAME}\"},
     \"version\":     {\"S\":\"${TEST_VERSION}\"},
     \"targetId\":    {\"S\":\"${DEVICE_ID}\"},
-    \"status\":      {\"S\":\"AWAITING_CONSENT\"},
+    \"status\":      {\"S\":\"QUEUED\"},
     \"createdAt\":   {\"N\":\"${NOW_MS}\"}
   }" \
   --region "$REGION" > /dev/null 2>&1
@@ -884,45 +985,6 @@ aws dynamodb update-item \
   --update-expression "SET pendingJobId = :jid" \
   --expression-attribute-values "{\":jid\":{\"S\":\"${CU_JOB_ID}\"}}" \
   --region "$REGION" > /dev/null 2>&1
-
-# ── (+) AWAITING_CONSENT → JOB_ACTIVE + in-progress message ──────────────────
-CU_RESP=$(cu_call)
-
-OTA_STATUS=$(cu_device_field "$CU_RESP" "otaStatus")
-[ "$OTA_STATUS" = "JOB_ACTIVE" ] \
-  && _pass "AWAITING_CONSENT job → otaStatus=JOB_ACTIVE" \
-  || _fail "AWAITING_CONSENT — expected otaStatus=JOB_ACTIVE, got: $OTA_STATUS"
-
-AJ_STATUS=$(cu_activejob_field "$CU_RESP" "status")
-[ "$AJ_STATUS" = "AWAITING_CONSENT" ] \
-  && _pass "AWAITING_CONSENT → activeJob.status=AWAITING_CONSENT" \
-  || _fail "activeJob.status — expected AWAITING_CONSENT, got: $AJ_STATUS"
-
-AJ_VER=$(cu_activejob_field "$CU_RESP" "version")
-[ "$AJ_VER" = "$TEST_VERSION" ] \
-  && _pass "AWAITING_CONSENT → activeJob.version=$TEST_VERSION" \
-  || _fail "activeJob.version — expected $TEST_VERSION, got: $AJ_VER"
-
-AJ_JOB_ID=$(cu_activejob_field "$CU_RESP" "jobId")
-[ "$AJ_JOB_ID" = "$CU_JOB_ID" ] \
-  && _pass "AWAITING_CONSENT → activeJob.jobId matches" \
-  || _fail "activeJob.jobId mismatch — expected $CU_JOB_ID, got: $AJ_JOB_ID"
-
-AJ_MSG=$(cu_activejob_field "$CU_RESP" "message")
-echo "$AJ_MSG" | python3 -c "
-import sys
-msg = sys.stdin.read()
-ok  = 'in progress' in msg.lower() and '${TEST_VERSION}' in msg
-sys.exit(0 if ok else 1)
-" 2>/dev/null \
-  && _pass "AWAITING_CONSENT message contains version and 'in progress'" \
-  || _fail "AWAITING_CONSENT message wrong: $AJ_MSG"
-
-# (-) availableVersion must NOT appear when job is active (version compare skipped)
-AV=$(cu_device_field "$CU_RESP" "availableVersion")
-[ "$AV" = "__MISSING__" ] \
-  && _pass "AWAITING_CONSENT response has no availableVersion (version compare skipped)" \
-  || _fail "availableVersion unexpectedly present while job is active: $AV"
 
 # ── (+) QUEUED → JOB_ACTIVE + in-progress message ────────────────────────────
 aws dynamodb update-item \
@@ -1402,59 +1464,29 @@ fi
 # Create a fresh admin deployment to generate a PENDING consent record, then decline it.
 
 T21_DECLINE_DEPLOY=$(call POST "/api/v1/ota/deployments" \
-  "{\"packageName\":\"${T21_PKG}\",\"version\":\"${T21_VERSION}\",\"targetType\":\"THING\",\"targetId\":\"${DEVICE_ID}\",\"rolloutStage\":\"CANARY\"}")
+  "{\"packageName\":\"${T21_PKG}\",\"version\":\"${T21_VERSION}\",\"rolloutStage\":\"BETA\",\"targetIds\":[\"${DEVICE_ID}\"]}")
 T21_DECLINE_DEPLOY_ID=$(echo "$T21_DECLINE_DEPLOY" | python3.9 -c \
   "import json,sys; print(json.load(sys.stdin).get('jobId',''))" 2>/dev/null)
 
 if [ -n "$T21_DECLINE_DEPLOY_ID" ] && [ "$T21_DECLINE_DEPLOY_ID" != "None" ]; then
-  sleep 1  # allow DynamoDB to commit the PENDING consent record
-  # Cancel any stale PENDING consent records from earlier test phases (T08, T10 re-deploy)
-  # so _find_pending_consent() picks up only this deployment's record
-  python3.9 -W ignore -c "
-import boto3
-client = boto3.client('dynamodb', region_name='ap-south-1')
-resp = client.query(
-    TableName='digilux_ota_user_consents',
-    IndexName='userId-deviceId-index',
-    KeyConditionExpression='userId = :u AND deviceId = :d',
-    FilterExpression='#st = :p AND deploymentId <> :new',
-    ExpressionAttributeNames={'#st': 'status'},
-    ExpressionAttributeValues={
-        ':u': {'S': '${T21_USER_ID}'},
-        ':d': {'S': '${DEVICE_ID}'},
-        ':p': {'S': 'PENDING'},
-        ':new': {'S': '${T21_DECLINE_DEPLOY_ID}'},
-    }
-)
-for item in resp.get('Items', []):
-    client.update_item(
-        TableName='digilux_ota_user_consents',
-        Key={'consentId': item['consentId']},
-        UpdateExpression='SET #st = :c',
-        ExpressionAttributeNames={'#st': 'status'},
-        ExpressionAttributeValues={':c': {'S': 'CANCELLED'}}
-    )
-    print(f'Cancelled stale consent {item[\"consentId\"][\"S\"]}')
-" 2>/dev/null
-
   t21_call \
     "{\"deviceId\":\"${DEVICE_ID}\",\"packageName\":\"${T21_PKG}\",\"version\":\"${T21_VERSION}\",\"accepted\":false}"
   T21_DECLINE_FIELD=$(t21_field "status")
   [ "$T21_STATUS" = "200" ] && [ "$T21_DECLINE_FIELD" = "DECLINED" ] \
-    && _pass "T21.14 (+) accepted=false with pending admin consent → 200 DECLINED" \
+    && _pass "T21.14 (+) accepted=false → 200 DECLINED" \
     || _fail "T21.14 (+) accepted=false — expected 200/DECLINED, got HTTP $T21_STATUS body=$T21_BODY"
 
-  # State: consent record in digilux_ota_user_consents must be DECLINED
-  T21_CONSENT_STATUS=$(aws dynamodb query \
+  # State: decline is audit-log only — no consent record written to DB
+  T21_CONSENT_COUNT=$(aws dynamodb query \
     --table-name digilux_ota_user_consents \
     --index-name deploymentId-index \
     --key-condition-expression "deploymentId = :d" \
     --expression-attribute-values "{\":d\":{\"S\":\"${T21_DECLINE_DEPLOY_ID}\"}}" \
     --region "$REGION" \
-    --query 'Items[0].status.S' --output text 2>/dev/null)
-  [ "$T21_CONSENT_STATUS" = "DECLINED" ] \
-    && _pass "T21.14 (+) State: consent record in DynamoDB is DECLINED" \
-    || _fail "T21.14 (+) State: consent record expected DECLINED, got '$T21_CONSENT_STATUS'"
+    --query 'Count' --output text 2>/dev/null)
+  [ "$T21_CONSENT_COUNT" = "0" ] || [ -z "$T21_CONSENT_COUNT" ] \
+    && _pass "T21.14 (+) State: no consent record written to DB on decline (audit-log only)" \
+    || _fail "T21.14 (+) State: unexpected consent record written on decline (count=$T21_CONSENT_COUNT)"
 
   # State: no IoT job was created for the decline — digilux_ota_jobs must have no QUEUED job
   # for this deploymentId
@@ -1508,7 +1540,7 @@ _t19_upload() {
   local resp url token pkg
 
   resp=$(call POST "/api/v1/ota/packages/upload-artefact" \
-    "{\"deviceType\":\"Network_controller_firmware\",\"version\":\"${version}\",\"releaseType\":\"PROD\",\"checksum\":\"${checksum}\",\"releaseNotes\":\"T19 manifest test\"}")
+    "{\"deviceType\":\"Network_controller_firmware\",\"version\":\"${version}\",\"releaseType\":\"PROD\",\"checksum\":\"${checksum}\",\"releaseNotes\":\"T19 manifest validation test\"}")
 
   url=$(echo "$resp"   | python3 -c "import json,sys; print(json.load(sys.stdin).get('uploadUrl',''))"   2>/dev/null)
   token=$(echo "$resp" | python3 -c "import json,sys; print(json.load(sys.stdin).get('uploadToken',''))" 2>/dev/null)

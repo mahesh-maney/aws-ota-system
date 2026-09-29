@@ -99,6 +99,39 @@ class StorageStack(cdk.Stack):
             partition_key=dynamodb.Attribute(name="jobId", type=dynamodb.AttributeType.STRING),
             projection_type=dynamodb.ProjectionType.ALL,
         )
+        # GSI3: deploymentId — used by job_create (supersede) and status_handler (counter updates)
+        self.consents_table.add_global_secondary_index(
+            index_name="deploymentId-index",
+            partition_key=dynamodb.Attribute(name="deploymentId", type=dynamodb.AttributeType.STRING),
+            projection_type=dynamodb.ProjectionType.ALL,
+        )
+
+        # ── DynamoDB: deployments ─────────────────────────────────────────────
+        # Campaign-level records: one per admin-created OTA rollout.
+        # Replaces the AWAITING_CONSENT status that was incorrectly stored on digilux_ota_jobs.
+        # PK:   deploymentId (S) — digilux-ota-<pkg>-<ver>-<timestamp>
+        # GSI1: packageName-status-index — find active deployments per package (used by check_updates)
+        # GSI2: status-createdAt-index   — admin UI listing by status
+        self.deployments_table = dynamodb.Table(
+            self, "DeploymentsTable",
+            table_name=f"{prefix}_ota_deployments",
+            partition_key=dynamodb.Attribute(name="deploymentId", type=dynamodb.AttributeType.STRING),
+            billing_mode=dynamodb.BillingMode.PAY_PER_REQUEST,
+            point_in_time_recovery_specification=dynamodb.PointInTimeRecoverySpecification(point_in_time_recovery_enabled=True),
+            removal_policy=cdk.RemovalPolicy.RETAIN,
+        )
+        self.deployments_table.add_global_secondary_index(
+            index_name="packageName-status-index",
+            partition_key=dynamodb.Attribute(name="packageName", type=dynamodb.AttributeType.STRING),
+            sort_key=dynamodb.Attribute(name="status", type=dynamodb.AttributeType.STRING),
+            projection_type=dynamodb.ProjectionType.ALL,
+        )
+        self.deployments_table.add_global_secondary_index(
+            index_name="status-createdAt-index",
+            partition_key=dynamodb.Attribute(name="status", type=dynamodb.AttributeType.STRING),
+            sort_key=dynamodb.Attribute(name="createdAt", type=dynamodb.AttributeType.NUMBER),
+            projection_type=dynamodb.ProjectionType.ALL,
+        )
 
         # ── device_data: pre-existing, imported by name ───────────────────────
         # Managed by the device platform team; OTA fields are attributes on this table.
@@ -116,3 +149,5 @@ class StorageStack(cdk.Stack):
                       description="DynamoDB table for OTA job tracking")
         cdk.CfnOutput(self, "ConsentsTableName", value=self.consents_table.table_name,
                       description="DynamoDB table for user OTA consents")
+        cdk.CfnOutput(self, "DeploymentsTableName", value=self.deployments_table.table_name,
+                      description="DynamoDB table for OTA deployment campaigns")

@@ -23,16 +23,19 @@ import json
 import logging
 import os
 import time
+from decimal import Decimal
 
 import boto3
 from boto3.dynamodb.conditions import Attr, Key
+from botocore.exceptions import ClientError
 
 log = logging.getLogger()
 log.setLevel(logging.INFO)
 
-REGION            = os.environ["REGION"]
-DEVICE_DATA_TABLE = os.environ.get("DEVICE_DATA_TABLE", "digilux_device_data")
-OTA_JOBS_TABLE    = os.environ.get("OTA_JOBS_TABLE",    "digilux_ota_jobs")
+REGION             = os.environ["REGION"]
+DEVICE_DATA_TABLE  = os.environ.get("DEVICE_DATA_TABLE",  "digilux_device_data")
+OTA_JOBS_TABLE     = os.environ.get("OTA_JOBS_TABLE",     "digilux_ota_jobs")
+DEPLOYMENTS_TABLE  = os.environ.get("DEPLOYMENTS_TABLE",  "digilux_ota_deployments")
 
 dynamo = boto3.resource("dynamodb", region_name=REGION)
 iot    = boto3.client("iot", region_name=REGION)
@@ -91,6 +94,64 @@ def _audit(event: str, actor: str, resource: dict, result: str, **extra) -> None
         "result": result,
         **extra,
     }))
+
+
+def _update_deployment_counter(job_id: str, counter_key: str) -> None:
+    """
+    Atomically increment a named counter on the deployment record linked to this job.
+    counter_key: one of 'succeeded', 'failed', 'cancelled', 'timedOut'
+    Best-effort: logs warnings but never raises — status_handler must not fail.
+    """
+    if not DEPLOYMENTS_TABLE:
+        return
+    try:
+        # Look up the deploymentId from the job record
+        job = dynamo.Table(OTA_JOBS_TABLE).get_item(Key={"jobId": job_id}).get("Item")
+        if not job:
+            log.warning(json.dumps({
+                "msg": "deployment_counter_skip_no_job",
+                "jobId": job_id, "counter": counter_key,
+                "detail": "Job record not found — cannot update deployment counter",
+            }))
+            return
+
+        deployment_id = job.get("deploymentId")
+        if not deployment_id:
+            log.debug(json.dumps({
+                "msg": "deployment_counter_skip_no_deployment_id",
+                "jobId": job_id, "counter": counter_key,
+                "detail": "Job has no deploymentId — legacy job or user-initiated without deployment",
+            }))
+            return
+
+        # Atomic increment using if_not_exists to handle missing counter fields
+        dynamo.Table(DEPLOYMENTS_TABLE).update_item(
+            Key={"deploymentId": deployment_id},
+            UpdateExpression=(
+                "SET #c.#k = if_not_exists(#c.#k, :zero) + :inc, "
+                "lastUpdatedAt = :ts"
+            ),
+            ExpressionAttributeNames={"#c": "counters", "#k": counter_key},
+            ExpressionAttributeValues={":zero": 0, ":inc": 1, ":ts": int(time.time() * 1000)},
+            ConditionExpression="attribute_exists(deploymentId)",
+        )
+        log.info(json.dumps({
+            "msg": "deployment_counter_updated",
+            "deploymentId": deployment_id, "jobId": job_id,
+            "counter": counter_key,
+        }))
+    except dynamo.meta.client.exceptions.ConditionalCheckFailedException:
+        log.warning(json.dumps({
+            "msg": "deployment_counter_skip_deployment_not_found",
+            "jobId": job_id, "counter": counter_key,
+            "detail": "Deployment record not found in deployments table",
+        }))
+    except Exception as e:
+        log.warning(json.dumps({
+            "msg": "deployment_counter_update_failed",
+            "jobId": job_id, "counter": counter_key, "error": str(e),
+            "detail": "Non-critical: counter update failed — job status was still recorded",
+        }))
 
 
 # Statuses accepted by IoT Jobs UpdateJobExecution
@@ -286,6 +347,7 @@ def lambda_handler(event, context):
                    {"deviceId": device_id, "jobId": job_id},
                    "FAILURE",
                    packageName=pkg_name, version=version, thingName=thing_name)
+            _update_deployment_counter(job_id, "timedOut")
 
         elif status in ("SUCCEEDED", "FAILED", "REJECTED"):
             # Look up macAddress for the composite key update
@@ -305,18 +367,36 @@ def lambda_handler(event, context):
                         "deviceId": device_id, "jobId": job_id,
                         "packageName": pkg_name, "version": version,
                     }))
-                    data_table.update_item(
-                        Key={"deviceId": device_id, "macAddress": mac_address},
-                        UpdateExpression=(
-                            "SET installedVersions.#pkg = :ver, "
-                            "pendingJobId = :null, "
-                            "lastUpdatedAt = :ts"
-                        ),
-                        ExpressionAttributeNames={"#pkg": pkg_name},
-                        ExpressionAttributeValues={
-                            ":ver": version, ":null": None, ":ts": now_ms,
-                        },
-                    )
+                    try:
+                        data_table.update_item(
+                            Key={"deviceId": device_id, "macAddress": mac_address},
+                            UpdateExpression=(
+                                "SET installedVersions.#pkg = :ver, "
+                                "pendingJobId = :null, "
+                                "lastUpdatedAt = :ts"
+                            ),
+                            ExpressionAttributeNames={"#pkg": pkg_name},
+                            ExpressionAttributeValues={
+                                ":ver": version, ":null": None, ":ts": now_ms,
+                            },
+                        )
+                    except ClientError as exc:
+                        if exc.response["Error"]["Code"] == "ValidationException":
+                            # installedVersions map doesn't exist yet — create it
+                            data_table.update_item(
+                                Key={"deviceId": device_id, "macAddress": mac_address},
+                                UpdateExpression=(
+                                    "SET installedVersions = :iv_map, "
+                                    "pendingJobId = :null, "
+                                    "lastUpdatedAt = :ts"
+                                ),
+                                ExpressionAttributeValues={
+                                    ":iv_map": {pkg_name: version},
+                                    ":null": None, ":ts": now_ms,
+                                },
+                            )
+                        else:
+                            raise
                     log.info(f"device_data updated: device={device_id} {pkg_name}={version}, pendingJobId cleared")
 
                     _audit("DEVICE_UPDATE_SUCCEEDED",
@@ -324,6 +404,7 @@ def lambda_handler(event, context):
                            {"deviceId": device_id, "jobId": job_id},
                            "SUCCESS",
                            packageName=pkg_name, version=version, thingName=thing_name)
+                    _update_deployment_counter(job_id, "succeeded")
 
                 elif status == "FAILED":
                     log.warning(json.dumps({
@@ -349,6 +430,7 @@ def lambda_handler(event, context):
                            needsRecovery="NEEDS_RECOVERY" in (status_detail or ""),
                            **({"errorCode": error_code, "errorReason": error_reason}
                               if error_code is not None else {}))
+                    _update_deployment_counter(job_id, "failed")
 
                     # Authenticity failures after start-next are reported as FAILED;
                     # still raise SECURITY_ALERT for the same codes as REJECTED.
@@ -388,6 +470,7 @@ def lambda_handler(event, context):
                            packageName=pkg_name, version=version,
                            thingName=thing_name,
                            errorCode=error_code, errorReason=error_reason)
+                    _update_deployment_counter(job_id, "failed")
 
                     if error_code in SECURITY_ERROR_CODES:
                         log.error(json.dumps({

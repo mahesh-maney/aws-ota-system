@@ -134,6 +134,19 @@ class LambdaStack(cdk.Stack):
             "DEVICE_DATA_USER_INDEX": "userId-index",
             "CONSENTS_USER_INDEX": "userId-deviceId-index",
             "CONSENTS_JOB_INDEX": "jobId-index",
+            "CONSENTS_DEPLOYMENT_INDEX": "deploymentId-index",
+            # Deployments table (new schema: campaign-level records)
+            "DEPLOYMENTS_TABLE": storage.deployments_table.table_name,
+            "DEPLOYMENTS_PKG_STATUS_INDEX": "packageName-status-index",
+            # IoT Thing Group Hierarchy
+            # DIGILUX → PRODUCTION → GATEWAYS → DGW-100/DGW-200
+            #                      → TOUCH-PANELS → TP-100/TP-200
+            "ROOT_GROUP":          config.get("rootGroup",         "DIGILUX"),
+            "PRODUCTION_GROUP":    config.get("productionGroup",   "PRODUCTION"),
+            "GATEWAYS_GROUP":      config.get("gatewaysGroup",     "GATEWAYS"),
+            "TOUCH_PANELS_GROUP":  config.get("touchPanelsGroup",  "TOUCH-PANELS"),
+            "GATEWAY_MODELS":      config.get("gatewayModels",     "DGW-100,DGW-200"),
+            "TOUCH_PANEL_MODELS":  config.get("touchPanelModels",  "TP-100,TP-200"),
             "LOG_LEVEL": "INFO",
         }
 
