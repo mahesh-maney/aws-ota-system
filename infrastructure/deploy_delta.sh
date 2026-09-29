@@ -246,10 +246,17 @@ deploy_one_lambda() {
       -r "$src/requirements.txt" \
       -t "$pkg/" --upgrade
     cp "$src/lambda_function.py" "$pkg/"
+    # Bundle sidecar config (user-facing copy, etc.)
+    shopt -s nullglob
+    for f in "$src"/*.json "$src"/messages.py; do
+      [[ -f "$f" ]] && cp "$f" "$pkg/"
+    done
+    shopt -u nullglob
     (cd "$pkg" && zip -qr "$zip" .)
     rm -rf "$pkg"
   else
-    (cd "$src" && zip -q "$zip" lambda_function.py)
+    (cd "$src" && zip -q "$zip" lambda_function.py messages.py messages.json 2>/dev/null) \
+      || (cd "$src" && zip -q "$zip" lambda_function.py)
   fi
 
   run aws lambda update-function-code \
