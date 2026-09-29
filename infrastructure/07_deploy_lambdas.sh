@@ -146,12 +146,20 @@ deploy_lambda() {
       -r "${SRC_DIR}/requirements.txt" \
       -t "$PKG_TMP/"
     cp "${SRC_DIR}/lambda_function.py" "$PKG_TMP/"
+    # Bundle sidecar config (user-facing copy, etc.)
+    shopt -s nullglob
+    for f in "${SRC_DIR}"/*.json "${SRC_DIR}"/messages.py; do
+      [[ -f "$f" ]] && cp "$f" "$PKG_TMP/"
+    done
+    shopt -u nullglob
     cd "$PKG_TMP" && zip -qr "$ZIP_FILE" . && cd - > /dev/null
     local ZIP_KB=$(( $(wc -c < "$ZIP_FILE") / 1024 ))
     rm -rf "$PKG_TMP"
     log_info "  Zip: $ZIP_FILE  (${ZIP_KB} KB with deps)"
   else
-    cd "$SRC_DIR" && zip -q "$ZIP_FILE" lambda_function.py && cd - > /dev/null
+    cd "$SRC_DIR" && zip -q "$ZIP_FILE" lambda_function.py messages.py messages.json 2>/dev/null \
+      || zip -q "$ZIP_FILE" lambda_function.py
+    cd - > /dev/null
     log_info "  Zip: $ZIP_FILE  (no deps)"
   fi
 

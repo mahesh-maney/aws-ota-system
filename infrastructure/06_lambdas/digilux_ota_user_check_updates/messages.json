@@ -1,0 +1,9 @@
+{
+  "no_update": "New Firmware update not available, please try again later.",
+  "not_registered": "Your device is not compatible for OTA upgrades.",
+  "in_progress": "Your Firmware update ver {version} is in progress, please check after some time for status. Note: Please ensure the controller is Powered on.",
+  "failed": "Your last firmware ver {version} update failed. Please contact support.",
+  "timed_out": "Your firmware update ver {version} timed out. Please retry.",
+  "unauthorized": "Unauthorized — invalid token",
+  "internal_error": "Internal server error"
+}

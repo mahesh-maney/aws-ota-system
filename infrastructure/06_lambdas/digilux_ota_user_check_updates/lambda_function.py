@@ -23,12 +23,12 @@ Optimised architecture (pointer-based, zero per-device DB/IoT calls outside job 
     f. installedVersion <  availableVersion        → entitlement check → offer update.
 
 Response envelope (client contract):
-  HTTP 200 + devices non-empty → { "status": "success", "message": "", "devices": [...] }
-                               → client reads devices only (do not show message)
-  HTTP 200 + devices empty     → { "status": "success", "message": "<no-update text>", "devices": [] }
-                               → client shows message
-  Non-200                      → { "status": "failed",  "message": "<error>", "devices": [] }
-                               → client shows message
+  HTTP 200 + devices empty             → success + NO_UPDATE_MSG
+  HTTP 200 + only NOT_REGISTERED       → success + NOT_REGISTERED_MSG + devices
+                                         (otaStatus remains NOT_REGISTERED)
+  HTTP 200 + REGISTERED / JOB_ACTIVE   → success + message "" + devices
+                                         (client reads devices only)
+  Non-200                              → failed + error message + devices []
 """
 from __future__ import annotations
 
@@ -42,6 +42,16 @@ from decimal import Decimal
 import boto3
 from boto3.dynamodb.conditions import Attr, Key
 from botocore.exceptions import ClientError
+
+from messages import (
+    INTERNAL_ERROR_MSG,
+    NO_UPDATE_MSG,
+    NOT_REGISTERED_MSG,
+    OTA_FAILED_MSG,
+    OTA_IN_PROGRESS_MSG,
+    OTA_TIMED_OUT_MSG,
+    UNAUTHORIZED_MSG,
+)
 
 log = logging.getLogger()
 log.setLevel(os.environ.get("LOG_LEVEL", "INFO"))
@@ -57,26 +67,6 @@ BETA_USERS_TABLE       = os.environ.get("BETA_USERS_TABLE",       "digilux_ota_b
 DEVICE_DATA_USER_INDEX = os.environ.get("DEVICE_DATA_USER_INDEX", "userId-index")
 CONSENTS_USER_INDEX    = os.environ.get("CONSENTS_USER_INDEX",    "userId-deviceId-index")
 ENTITLEMENT_FUNCTION   = os.environ.get("ENTITLEMENT_FUNCTION",   "digilux_entitlement_check")
-
-OTA_IN_PROGRESS_MSG = os.environ.get(
-    "OTA_IN_PROGRESS_MSG",
-    "Your Firmware update ver {version} is in progress, please check after some time for status. "
-    "Note: Please ensure the controller is Powered on.",
-)
-OTA_FAILED_MSG = os.environ.get(
-    "OTA_FAILED_MSG",
-    "Your last firmware ver {version} update failed. Please contact support.",
-)
-OTA_TIMED_OUT_MSG = os.environ.get(
-    "OTA_TIMED_OUT_MSG",
-    "Your firmware update ver {version} timed out. Please retry.",
-)
-# Top-level envelope for available-updates (status is only "success" | "failed").
-# On HTTP 200 → always status=success. When devices is empty, client shows this message.
-NO_UPDATE_MSG = os.environ.get(
-    "NO_UPDATE_MSG",
-    "New Firmware update not available, please try again later.",
-)
 
 dynamo        = boto3.resource("dynamodb", region_name=REGION)
 iot           = boto3.client("iot",        region_name=REGION)
@@ -105,12 +95,21 @@ def _resp(status: int, body: dict) -> dict:
 def _success(devices: list) -> dict:
     """
     HTTP 200 envelope: status is always success.
-    - devices non-empty → message is empty (client reads devices only)
-    - devices empty     → message = NO_UPDATE_MSG (client shows message)
+    - devices empty                              → NO_UPDATE_MSG (client shows message)
+    - all entries otaStatus=NOT_REGISTERED       → NOT_REGISTERED_MSG (client shows message;
+                                                   otaStatus stays NOT_REGISTERED on each device)
+    - otherwise (REGISTERED / JOB_ACTIVE / mix)  → message "" (client reads devices only)
     """
+    if not devices:
+        message = NO_UPDATE_MSG
+    elif all(d.get("otaStatus") == "NOT_REGISTERED" for d in devices):
+        message = NOT_REGISTERED_MSG
+    else:
+        message = ""
+
     return _resp(200, {
         "status":  "success",
-        "message": "" if devices else NO_UPDATE_MSG,
+        "message": message,
         "devices": devices,
     })
 
@@ -393,7 +392,7 @@ def lambda_handler(event, context):
         if not user_id:
             _log("warning", "missing_sub_claim",
                  detail="JWT sub claim absent — rejecting with 401")
-            return _failed(401, "Unauthorized — invalid token")
+            return _failed(401, UNAUTHORIZED_MSG)
 
         email = claims.get("email", user_id)
         _log("info", "check_updates_request",
@@ -626,9 +625,9 @@ def lambda_handler(event, context):
         code = e.response["Error"]["Code"]
         msg  = e.response["Error"]["Message"]
         _log("error", "aws_client_error", awsError=code, awsMessage=msg)
-        return _failed(500, "Internal server error")
+        return _failed(500, INTERNAL_ERROR_MSG)
     except Exception as e:
         _log("error", "unhandled_exception",
              error=str(e), excType=type(e).__name__)
         log.exception(f"Unhandled error in user_check_updates: {e}")
-        return _failed(500, "Internal server error")
+        return _failed(500, INTERNAL_ERROR_MSG)
