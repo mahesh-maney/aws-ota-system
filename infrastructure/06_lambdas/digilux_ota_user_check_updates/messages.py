@@ -32,6 +32,9 @@ _DEFAULTS = {
     "timed_out": (
         "Your firmware update ver {version} timed out. Please retry."
     ),
+    "job_completed": (
+        "Your firmware ver {version} update was successful."
+    ),
     "unauthorized": "Unauthorized — invalid token",
     "internal_error": "Internal server error",
 }
@@ -43,6 +46,7 @@ _ENV_OVERRIDES = {
     "OTA_IN_PROGRESS_MSG": "in_progress",
     "OTA_FAILED_MSG": "failed",
     "OTA_TIMED_OUT_MSG": "timed_out",
+    "OTA_COMPLETED_MSG": "job_completed",
 }
 
 
@@ -92,5 +96,6 @@ NOT_REGISTERED_MSG = MESSAGES["not_registered"]
 OTA_IN_PROGRESS_MSG = MESSAGES["in_progress"]
 OTA_FAILED_MSG = MESSAGES["failed"]
 OTA_TIMED_OUT_MSG = MESSAGES["timed_out"]
+OTA_COMPLETED_MSG = MESSAGES["job_completed"]
 UNAUTHORIZED_MSG = MESSAGES["unauthorized"]
 INTERNAL_ERROR_MSG = MESSAGES["internal_error"]

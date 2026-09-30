@@ -500,21 +500,21 @@ def _delete_package(package_name: str, version: str, caller: str, body: dict) ->
     if not reason:
         return _resp(400, {"error": "A deletion reason is required."})
 
-    # ── 3. Block if active deployments reference this version ─────────────────
+    # ── 3. Block if any jobs for this version are QUEUED, IN_PROGRESS or COMPLETED ──
     jobs_table = dynamo.Table(OTA_JOBS_TABLE)
-    active_jobs = jobs_table.scan(
+    blocking_jobs = jobs_table.scan(
         FilterExpression=(
             Attr("packageName").eq(package_name) &
             Attr("version").eq(version) &
-            Attr("status").is_in(["QUEUED", "IN_PROGRESS"])
+            Attr("status").is_in(["QUEUED", "IN_PROGRESS", "COMPLETED"])
         )
     ).get("Items", [])
-    if active_jobs:
-        job_ids = [j.get("jobId") for j in active_jobs]
+    if blocking_jobs:
+        job_ids = [j.get("jobId") for j in blocking_jobs]
         return _resp(409, {
             "error": (
-                f"Cannot delete: {len(active_jobs)} active deployment(s) are currently "
-                "using this package version. Cancel them first."
+                f"Cannot delete: {len(blocking_jobs)} job(s) for this package version are "
+                "in QUEUED, IN_PROGRESS, or COMPLETED state. Cancel or wait for them to finish."
             ),
             "activeJobs": job_ids,
         })

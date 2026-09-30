@@ -1897,7 +1897,7 @@
                   }
                 ],
                 "url": {
-                  "raw": "{{base_url}}/api/v1/ota/device/available-updates",
+                  "raw": "{{base_url}}/api/v1/ota/my/updates",
                   "host": [
                     "{{base_url}}"
                   ],
@@ -1905,8 +1905,8 @@
                     "api",
                     "v1",
                     "ota",
-                    "device",
-                    "available-updates"
+                    "my",
+                    "updates"
                   ]
                 }
               },
@@ -2049,7 +2049,7 @@
                   }
                 ],
                 "url": {
-                  "raw": "{{base_url}}/api/v1/ota/device/available-updates",
+                  "raw": "{{base_url}}/api/v1/ota/my/updates",
                   "host": [
                     "{{base_url}}"
                   ],
@@ -2057,8 +2057,8 @@
                     "api",
                     "v1",
                     "ota",
-                    "device",
-                    "available-updates"
+                    "my",
+                    "updates"
                   ]
                 }
               },
@@ -2152,7 +2152,7 @@
               }
             ],
             "url": {
-              "raw": "{{base_url}}/api/v1/ota/device/available-updates",
+              "raw": "{{base_url}}/api/v1/ota/my/updates",
               "host": [
                 "{{base_url}}"
               ],
@@ -2160,8 +2160,8 @@
                 "api",
                 "v1",
                 "ota",
-                "device",
-                "available-updates"
+                "my",
+                "updates"
               ]
             },
             "description": "Returns all controller devices owned by the calling user and any available updates for each.\n\n- Ownership determined by `userId` (`sub` claim) in the Cognito JWT\n- Only devices in `digilux_device_data` under this `userId` are returned\n- `otaStatus: NOT_REGISTERED` \u2014 device has never run the OTA agent\n- Version comparison uses semver integer tuples \u2014 `4.10.0 > 4.2.0`\n- `pendingJobId` non-null means an update is already in progress",

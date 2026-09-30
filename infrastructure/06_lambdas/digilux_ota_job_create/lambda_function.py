@@ -191,6 +191,24 @@ def _supersede_deployment(existing_dep: dict, new_dep_id: str,
                supersededBy=new_dep_id,
                rolloutStage=existing_dep.get("rolloutStage"),
                detail="Consent records untouched — ACCEPTED consents remain valid per architecture")
+
+        # Clean up pointers so devices stop being offered the old version.
+        # The new deployment's create flow writes fresh pointers immediately after.
+        old_stage = existing_dep.get("rolloutStage", "")
+        if old_stage == "CUSTOM":
+            old_target_ids = existing_dep.get("targetIds") or []
+            if old_target_ids:
+                _delete_custom_pointers(
+                    existing_dep["packageName"], old_target_ids, old_dep_id
+                )
+                _log("info", "custom_pointers_cleaned_on_supersede",
+                     oldDeploymentId=old_dep_id,
+                     deviceCount=len(old_target_ids))
+        elif old_stage in _STAGE_POINTER_KEY:
+            # For PROD/BETA supersede: the new deployment's _write_stage_pointer
+            # will overwrite the pointer atomically, so this is a no-op in practice.
+            # Called here for safety in case of partial failures.
+            _delete_stage_pointer(existing_dep["packageName"], old_stage, old_dep_id)
     except Exception as e:
         _log("error", "supersede_deployment_cancel_failed",
              oldDeploymentId=old_dep_id, error=str(e))
@@ -267,6 +285,125 @@ def _resolve_device_list(device_ids: list[str], rollout_stage: str,
          rolloutStage=rollout_stage, requested=len(device_ids),
          resolved=len(devices), skipped=len(device_ids) - len(devices))
     return devices
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# CUSTOM deployment pointer helpers
+# ──────────────────────────────────────────────────────────────────────────────
+# CUSTOM deployments target specific device IDs. To make them visible to
+# check_updates (which does in-memory pointer lookups), we write a per-device
+# pointer item keyed as LATEST#CUSTOM#{deviceId} in the packages table.
+# Priority in check_updates: CUSTOM > BETA > PROD.
+
+def _write_custom_pointers(pkg_name: str, version: str, pkg: dict,
+                            target_ids: list[str], deployment_id: str) -> None:
+    """Write LATEST#CUSTOM#{deviceId} pointer for each target device."""
+    tbl = dynamo.Table(PACKAGES_TABLE)
+    for device_id in target_ids:
+        pointer_key = f"LATEST#CUSTOM#{device_id}"
+        try:
+            tbl.put_item(Item={
+                "packageName":      pkg_name,
+                "version":          pointer_key,
+                "targetVersion":    version,
+                "releaseType":      "CUSTOM",
+                "releaseNotes":     pkg.get("releaseNotes", ""),
+                "fileName":         pkg.get("fileName", ""),
+                "firmwareCategory": pkg.get("firmwareCategory"),
+                "tierOverride":     pkg.get("tierOverride"),
+                "deploymentId":     deployment_id,
+                "deviceId":         device_id,
+            })
+            _log("debug", "custom_pointer_written",
+                 packageName=pkg_name, deviceId=device_id,
+                 targetVersion=version, deploymentId=deployment_id)
+        except Exception as e:
+            _log("warning", "custom_pointer_write_failed",
+                 packageName=pkg_name, deviceId=device_id,
+                 deploymentId=deployment_id, error=str(e))
+
+
+def _delete_custom_pointers(pkg_name: str, target_ids: list[str],
+                             deployment_id: str) -> None:
+    """Delete LATEST#CUSTOM#{deviceId} pointers for a superseded or aborted CUSTOM deployment."""
+    tbl = dynamo.Table(PACKAGES_TABLE)
+    for device_id in target_ids:
+        pointer_key = f"LATEST#CUSTOM#{device_id}"
+        try:
+            tbl.delete_item(Key={"packageName": pkg_name, "version": pointer_key})
+            _log("debug", "custom_pointer_deleted",
+                 packageName=pkg_name, deviceId=device_id, deploymentId=deployment_id)
+        except Exception as e:
+            _log("warning", "custom_pointer_delete_failed",
+                 packageName=pkg_name, deviceId=device_id,
+                 deploymentId=deployment_id, error=str(e))
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# PRODUCTION / BETA deployment pointer helpers
+# ──────────────────────────────────────────────────────────────────────────────
+# PRODUCTION and BETA deployments write a single LATEST#PROD or LATEST#BETA
+# pointer item in the packages table. check_updates reads these pointers in its
+# pre-loop I/O phase and uses them to serve updates without querying the
+# deployments table per device.
+
+_STAGE_POINTER_KEY  = {"PRODUCTION": "LATEST#PROD", "BETA": "LATEST#BETA"}
+_STAGE_RELEASE_TYPE = {"PRODUCTION": "PROD",        "BETA": "BETA"}
+
+
+def _write_stage_pointer(pkg_name: str, version: str, pkg: dict,
+                          rollout_stage: str, deployment_id: str) -> None:
+    """Write LATEST#PROD or LATEST#BETA pointer for a PRODUCTION or BETA deployment."""
+    pointer_key  = _STAGE_POINTER_KEY.get(rollout_stage)
+    release_type = _STAGE_RELEASE_TYPE.get(rollout_stage)
+    if not pointer_key:
+        return
+    try:
+        dynamo.Table(PACKAGES_TABLE).put_item(Item={
+            "packageName":  pkg_name,
+            "version":      pointer_key,
+            "targetVersion": version,
+            "releaseType":  release_type,
+            "releaseNotes": pkg.get("releaseNotes", ""),
+            "fileName":     pkg.get("fileName", ""),
+            "deploymentId": deployment_id,
+        })
+        _log("info", "stage_pointer_written",
+             packageName=pkg_name, pointerKey=pointer_key,
+             targetVersion=version, deploymentId=deployment_id)
+    except Exception as e:
+        _log("warning", "stage_pointer_write_failed",
+             packageName=pkg_name, pointerKey=pointer_key,
+             deploymentId=deployment_id, error=str(e))
+
+
+def _delete_stage_pointer(pkg_name: str, rollout_stage: str,
+                           deployment_id: str) -> None:
+    """Delete LATEST#PROD or LATEST#BETA pointer when a deployment is superseded or aborted.
+    Only deletes if the pointer still references this deployment (a supersede
+    writes the new pointer first, so this is a no-op for the old deployment).
+    """
+    pointer_key = _STAGE_POINTER_KEY.get(rollout_stage)
+    if not pointer_key:
+        return
+    try:
+        tbl = dynamo.Table(PACKAGES_TABLE)
+        current = tbl.get_item(
+            Key={"packageName": pkg_name, "version": pointer_key}
+        ).get("Item", {})
+        if current.get("deploymentId") == deployment_id:
+            tbl.delete_item(Key={"packageName": pkg_name, "version": pointer_key})
+            _log("info", "stage_pointer_deleted",
+                 packageName=pkg_name, pointerKey=pointer_key, deploymentId=deployment_id)
+        else:
+            _log("debug", "stage_pointer_skip_delete",
+                 packageName=pkg_name, pointerKey=pointer_key,
+                 reason="pointer already updated by newer deployment",
+                 currentDeploymentId=current.get("deploymentId"))
+    except Exception as e:
+        _log("warning", "stage_pointer_delete_failed",
+             packageName=pkg_name, pointerKey=pointer_key,
+             deploymentId=deployment_id, error=str(e))
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -383,12 +520,21 @@ def _get_job(deployment_id: str) -> dict:
     return _response(200, json.loads(json.dumps(item, cls=_DecimalEncoder)))
 
 
-def _abort_job(deployment_id: str, claims: dict) -> dict:
+def _abort_job(deployment_id: str, claims: dict, body: dict) -> dict:
     """POST /ota/deployments/{jobId}/abort — cancel an active deployment.
+    Requires a non-empty `reason` in the request body.
+    Blocked if any IoT jobs for this deployment are currently IN_PROGRESS.
     Per architecture: consent records are not touched; ACCEPTED consents remain valid.
     """
     actor = claims.get("email", claims.get("sub", "unknown"))
     _log("info", "abort_deployment_start", deploymentId=deployment_id, requestedBy=actor)
+
+    # ── Require abort reason ──────────────────────────────────────────────────
+    reason = str(body.get("reason", "")).strip()
+    if not reason:
+        _log("warning", "abort_missing_reason",
+             deploymentId=deployment_id, requestedBy=actor)
+        return _response(400, {"error": "An abort reason is required."})
 
     try:
         item = dynamo.Table(DEPLOYMENTS_TABLE).get_item(
@@ -410,22 +556,61 @@ def _abort_job(deployment_id: str, claims: dict) -> dict:
                 "error": f"Cannot abort a {current_status} deployment."
             })
 
+        # ── Block if any jobs for this deployment are IN_PROGRESS ─────────────
+        # Query consents by deploymentId to get associated jobIds, then check
+        # each job's status. A device mid-download must not be interrupted.
+        try:
+            consent_resp = dynamo.Table(CONSENTS_TABLE).query(
+                IndexName=CONSENTS_DEPLOYMENT_INDEX,
+                KeyConditionExpression=Key("deploymentId").eq(deployment_id),
+            )
+            consents = consent_resp.get("Items", [])
+            in_progress_jobs = []
+            for c in consents:
+                job_id = c.get("jobId")
+                if not job_id:
+                    continue
+                job = dynamo.Table(OTA_JOBS_TABLE).get_item(
+                    Key={"jobId": job_id}
+                ).get("Item")
+                if job and job.get("status") == "IN_PROGRESS":
+                    in_progress_jobs.append(job_id)
+
+            if in_progress_jobs:
+                _log("warning", "abort_blocked_by_in_progress_jobs",
+                     deploymentId=deployment_id, requestedBy=actor,
+                     inProgressJobs=in_progress_jobs)
+                return _response(409, {
+                    "error": (
+                        f"Cannot abort: {len(in_progress_jobs)} device(s) are currently "
+                        "downloading this firmware. Wait for them to finish or time out."
+                    ),
+                    "inProgressJobs": in_progress_jobs,
+                })
+        except Exception as e:
+            _log("warning", "abort_in_progress_check_failed",
+                 deploymentId=deployment_id, error=str(e),
+                 detail="Proceeding with abort — could not verify job statuses")
+
         now_ms = int(time.time() * 1000)
 
         dynamo.Table(DEPLOYMENTS_TABLE).update_item(
             Key={"deploymentId": deployment_id},
-            UpdateExpression="SET #s = :s, cancelledAt = :ts, cancelledBy = :by",
+            UpdateExpression=(
+                "SET #s = :s, cancelledAt = :ts, cancelledBy = :by, cancelledReason = :r"
+            ),
             ExpressionAttributeNames={"#s": "status"},
             ExpressionAttributeValues={
                 ":s":  "CANCELLED",
                 ":ts": now_ms,
                 ":by": actor,
+                ":r":  reason,
             },
         )
 
         _log("info", "abort_deployment_complete",
              deploymentId=deployment_id, requestedBy=actor,
-             previousStatus=current_status)
+             previousStatus=current_status, reason=reason)
         _audit("DEPLOYMENT_ABORTED", actor,
                {"deploymentId": deployment_id,
                 "packageName": item.get("packageName"),
@@ -433,12 +618,30 @@ def _abort_job(deployment_id: str, claims: dict) -> dict:
                "SUCCESS",
                previousStatus=current_status,
                rolloutStage=item.get("rolloutStage"),
+               reason=reason,
                detail="Consent records untouched — ACCEPTED consents remain valid per architecture")
 
+        # Clean up pointers so devices immediately stop being offered this update.
+        abort_stage = item.get("rolloutStage", "")
+        if abort_stage == "CUSTOM":
+            abort_target_ids = item.get("targetIds") or []
+            if abort_target_ids:
+                _delete_custom_pointers(
+                    item["packageName"], abort_target_ids, deployment_id
+                )
+                _log("info", "custom_pointers_cleaned_on_abort",
+                     deploymentId=deployment_id,
+                     deviceCount=len(abort_target_ids))
+        elif abort_stage in _STAGE_POINTER_KEY:
+            _delete_stage_pointer(item["packageName"], abort_stage, deployment_id)
+            _log("info", "stage_pointer_cleaned_on_abort",
+                 deploymentId=deployment_id, rolloutStage=abort_stage)
+
         return _response(200, {
-            "jobId":     deployment_id,
-            "status":    "CANCELLED",
-            "abortedBy": actor,
+            "jobId":        deployment_id,
+            "status":       "CANCELLED",
+            "abortedBy":    actor,
+            "abortReason":  reason,
         })
 
     except ClientError as e:
@@ -490,7 +693,8 @@ def lambda_handler(event, context):
 
         # ── Route: POST abort ─────────────────────────────────────────────────
         if method == "POST" and job_id_param:
-            return _abort_job(job_id_param, claims)
+            abort_body = json.loads(event.get("body") or "{}")
+            return _abort_job(job_id_param, claims, abort_body)
 
         # ── Route: POST create ────────────────────────────────────────────────
         body = json.loads(event.get("body") or "{}")
@@ -653,6 +857,18 @@ def lambda_handler(event, context):
              deploymentId=deployment_id, status="ACTIVE",
              targetType=target_type,
              detail="Deployment is ACTIVE — no IoT Job at deployment level")
+
+        # Write per-device CUSTOM pointers so check_updates can serve this
+        # deployment with highest priority (CUSTOM > BETA > PROD).
+        if rollout_stage == "CUSTOM" and target_ids:
+            _write_custom_pointers(pkg_name, version, pkg, target_ids, deployment_id)
+            _log("info", "custom_pointers_written",
+                 deploymentId=deployment_id, deviceCount=len(target_ids))
+
+        # Write LATEST#PROD or LATEST#BETA pointer so check_updates can serve
+        # this update to all eligible devices without a per-device DB query.
+        if rollout_stage in _STAGE_POINTER_KEY:
+            _write_stage_pointer(pkg_name, version, pkg, rollout_stage, deployment_id)
 
         _audit("DEPLOYMENT_CREATED", caller,
                {"packageName": pkg_name, "version": version},
