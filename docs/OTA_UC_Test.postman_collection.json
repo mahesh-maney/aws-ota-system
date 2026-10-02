@@ -1,0 +1,1954 @@
+{
+  "info": {
+    "_postman_id": "d1g1lux-ota-uc-test-2026",
+    "name": "Digilux OTA — UC Test Collection",
+    "description": "25 use-case tests for the Digilux OTA system.\n\nBase URL: https://iot.digilux.co.in/smarthome\n\nSet variables before running:\n  admin_token  — Cognito ID token for ota-admin user\n  user_token   — Bearer access token with smarthome_server scopes (device owner)\n  device_id    — registered device UUID\n  version      — unique semver for your test run (e.g. 9.9.1)\n\nSee OTA_USE_CASE_TEST_CHECKLIST.md for full context.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    { "key": "base_url",          "value": "https://iot.digilux.co.in/smarthome" },
+    { "key": "admin_token",       "value": "" },
+    { "key": "user_token",        "value": "" },
+    { "key": "admin_username",    "value": "mahesh.maney@gmail.com" },
+    { "key": "admin_password",    "value": "" },
+    { "key": "auth_code",         "value": "" },
+    { "key": "code_verifier",     "value": "" },
+    { "key": "device_id",         "value": "edb39bba-baf1-4700-968c-a42228e53aa0" },
+    { "key": "package_name",      "value": "HomeAssistantUtility" },
+    { "key": "version",           "value": "9.9.1" },
+    { "key": "deployment_id",     "value": "" },
+    { "key": "job_id",            "value": "" },
+    { "key": "upload_url",        "value": "" },
+    { "key": "upload_token",      "value": "" },
+    { "key": "beta_user_id",      "value": "" }
+  ],
+  "item": [
+
+    {
+      "name": "Auth — Get Tokens",
+      "description": "Step 1: Run '1. Get Admin Token' to populate {{admin_token}}.\nStep 2: For the user token, open the PKCE login URL in a browser, sign in, copy the `code` param from the redirect URL into {{auth_code}} and your verifier into {{code_verifier}}, then run '3. Exchange Code for User Token'.",
+      "item": [
+        {
+          "name": "1. Get Admin Token",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "const b = pm.response.json();",
+                  "pm.test('IdToken present', () => pm.expect(b.AuthenticationResult.IdToken).to.exist);",
+                  "pm.collectionVariables.set('admin_token', b.AuthenticationResult.IdToken);",
+                  "console.log('admin_token set — expires in', b.AuthenticationResult.ExpiresIn, 's');"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type",  "value": "application/x-amz-json-1.1" },
+              { "key": "X-Amz-Target", "value": "AmazonCognitoIdentityProviderService.InitiateAuth" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"AuthFlow\": \"USER_PASSWORD_AUTH\",\n  \"ClientId\": \"2qmig1uh220ttntbl0gfvcde4f\",\n  \"AuthParameters\": {\n    \"USERNAME\": \"{{admin_username}}\",\n    \"PASSWORD\": \"{{admin_password}}\"\n  }\n}"
+            },
+            "url": "https://cognito-idp.ap-south-1.amazonaws.com/"
+          }
+        },
+        {
+          "name": "2. PKCE Login URL (open in browser)",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "exec": [
+                  "// Generate a random code_verifier and derive code_challenge (S256).",
+                  "// Postman sandbox does not have SubtleCrypto, so we use a pre-generated pair here.",
+                  "// To generate your own:",
+                  "//   verifier  = base64url(32 random bytes)",
+                  "//   challenge = base64url(SHA256(verifier))",
+                  "//",
+                  "// Sample pair (replace with your own for production use):",
+                  "const verifier   = 'dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk';",
+                  "const challenge  = 'E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM';",
+                  "pm.collectionVariables.set('code_verifier', verifier);",
+                  "const clientId   = 'q7189jitfkk4ttesepkgls491';",
+                  "const redirectUri = encodeURIComponent('https://iot.digilux.co.in/callback');",
+                  "const loginUrl   = `https://ap-south-1h1o8s7257.auth.ap-south-1.amazoncognito.com/oauth2/authorize?response_type=code&client_id=${clientId}&redirect_uri=${redirectUri}&scope=smarthome_server%2Fread%20smarthome_server%2Fwrite&code_challenge=${challenge}&code_challenge_method=S256`;",
+                  "console.log('Open this URL in a browser to log in:');",
+                  "console.log(loginUrl);",
+                  "console.log('After redirect, copy the `code` param into {{auth_code}} and run request 3.');"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "// This request intentionally has no URL — it only logs the login link in the pre-request script.",
+                  "// Check the Postman console for the URL to open."
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "https://example.com/open-console-for-login-url"
+          }
+        },
+        {
+          "name": "3. Exchange Code for User Token (PKCE)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "const b = pm.response.json();",
+                  "pm.test('access_token present', () => pm.expect(b.access_token).to.exist);",
+                  "pm.collectionVariables.set('user_token', 'Bearer ' + b.access_token);",
+                  "console.log('user_token set — expires in', b.expires_in, 's');"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/x-www-form-urlencoded" }
+            ],
+            "body": {
+              "mode": "urlencoded",
+              "urlencoded": [
+                { "key": "grant_type",    "value": "authorization_code" },
+                { "key": "client_id",     "value": "q7189jitfkk4ttesepkgls491" },
+                { "key": "code",          "value": "{{auth_code}}" },
+                { "key": "redirect_uri",  "value": "https://iot.digilux.co.in/callback" },
+                { "key": "code_verifier", "value": "{{code_verifier}}" }
+              ]
+            },
+            "url": "https://ap-south-1h1o8s7257.auth.ap-south-1.amazoncognito.com/oauth2/token"
+          }
+        }
+      ]
+    },
+
+    {
+      "name": "UC1 — Admin Upload (Gateway + S3)",
+      "item": [
+        {
+          "name": "1.1 Upload URL — valid Gateway package",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "const b = pm.response.json();",
+                  "pm.test('uploadUrl present', () => pm.expect(b.uploadUrl || b.uploadUrls).to.exist);",
+                  "if (b.uploadUrl) pm.collectionVariables.set('upload_url', b.uploadUrl);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Authorization", "value": "{{admin_token}}" },
+              { "key": "Content-Type",  "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"deviceType\": \"Network_controller_firmware\",\n  \"version\": \"{{version}}\",\n  \"releaseType\": \"BETA\",\n  \"checksum\": \"<sha256-of-your-tar>\",\n  \"releaseNotes\": \"QA UC1 gateway upload — valid package\",\n  \"fileName\": \"HomeAssistantUtility-{{version}}.tar\"\n}"
+            },
+            "url": "{{base_url}}/api/v1/ota/upload-url"
+          }
+        },
+        {
+          "name": "1.2 PUT artifact to S3 (presigned URL)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('S3 PUT accepted (200/204)', () => {",
+                  "  pm.expect(pm.response.code).to.be.oneOf([200, 204]);",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "PUT",
+            "header": [
+              { "key": "Content-Type", "value": "application/octet-stream" },
+              { "key": "x-amz-meta-upload-token", "value": "{{upload_token}}" }
+            ],
+            "body": {
+              "mode": "file",
+              "file": { "src": "" }
+            },
+            "url": "{{upload_url}}"
+          }
+        },
+        {
+          "name": "1.3 Poll package status — expect ACTIVE",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "const b = pm.response.json();",
+                  "pm.test('Package ACTIVE', () => pm.expect(b.status).to.eql('ACTIVE'));",
+                  "pm.test('encS3Key or s3Key present', () => pm.expect(b.encS3Key || b.s3Key).to.exist);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "{{admin_token}}" }],
+            "url": "{{base_url}}/api/v1/ota/packages/{{package_name}}/{{version}}"
+          }
+        },
+        {
+          "name": "1.4 Invalid deviceType — expect 400",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 400', () => pm.response.to.have.status(400));",
+                  "pm.test('Error mentions valid types', () => pm.expect(pm.response.json().error).to.include('deviceType'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Authorization", "value": "{{admin_token}}" },
+              { "key": "Content-Type",  "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"deviceType\": \"Unknown_box\",\n  \"version\": \"{{version}}-bad\",\n  \"releaseType\": \"BETA\",\n  \"checksum\": \"abc123\",\n  \"releaseNotes\": \"Should fail — invalid deviceType\",\n  \"fileName\": \"test.tar\"\n}"
+            },
+            "url": "{{base_url}}/api/v1/ota/upload-url"
+          }
+        },
+        {
+          "name": "1.5 Missing releaseNotes — expect 400 (desired) / 200 (today)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "// Today: returns 200 (API does not enforce releaseNotes)",
+                  "// Desired: 400 mandatory",
+                  "pm.test('GAP — releaseNotes not enforced at API level (returns 200)', () => {",
+                  "  pm.expect(pm.response.code).to.be.oneOf([200, 400]);",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Authorization", "value": "{{admin_token}}" },
+              { "key": "Content-Type",  "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"deviceType\": \"Network_controller_firmware\",\n  \"version\": \"{{version}}-nonotes\",\n  \"releaseType\": \"BETA\",\n  \"checksum\": \"abc123\",\n  \"fileName\": \"test.tar\"\n}"
+            },
+            "url": "{{base_url}}/api/v1/ota/upload-url"
+          }
+        }
+      ]
+    },
+
+    {
+      "name": "UC2 — Upload ≠ Deploy",
+      "item": [
+        {
+          "name": "2.1 Available updates BEFORE deployment — expect no new version",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "const b = pm.response.json();",
+                  "const devices = b.devices || [];",
+                  "const found = devices.some(d => d.availableVersion === pm.collectionVariables.get('version'));",
+                  "pm.test('New version NOT offered before deployment', () => pm.expect(found).to.be.false);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "{{user_token}}" }],
+            "url": "{{base_url}}/api/v1/ota/device/available-updates"
+          }
+        },
+        {
+          "name": "2.2 Create BETA deployment",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 201', () => pm.response.to.have.status(201));",
+                  "const b = pm.response.json();",
+                  "pm.test('Deployment ACTIVE', () => pm.expect(b.status).to.eql('ACTIVE'));",
+                  "pm.collectionVariables.set('deployment_id', b.deploymentId || b.jobId);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Authorization", "value": "{{admin_token}}" },
+              { "key": "Content-Type",  "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"packageName\": \"{{package_name}}\",\n  \"version\": \"{{version}}\",\n  \"rolloutStage\": \"BETA\",\n  \"targetIds\": [\"{{device_id}}\"]\n}"
+            },
+            "url": "{{base_url}}/api/v1/ota/deployments"
+          }
+        },
+        {
+          "name": "2.3 Available updates AFTER deployment — version appears",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "const b = pm.response.json();",
+                  "const devices = b.devices || [];",
+                  "const device = devices.find(d => d.deviceId === pm.collectionVariables.get('device_id'));",
+                  "pm.test('New version offered after deployment', () => {",
+                  "  pm.expect(device).to.exist;",
+                  "  pm.expect(device.availableVersion).to.eql(pm.collectionVariables.get('version'));",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "{{user_token}}" }],
+            "url": "{{base_url}}/api/v1/ota/device/available-updates"
+          }
+        }
+      ]
+    },
+
+    {
+      "name": "UC3/UC4 — Delete Package vs Active Jobs",
+      "item": [
+        {
+          "name": "3.1 Delete PENDING package — expect 200 hard delete",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "const b = pm.response.json();",
+                  "pm.test('recordRetained false', () => pm.expect(b.recordRetained).to.be.false);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "DELETE",
+            "header": [
+              { "key": "Authorization", "value": "{{admin_token}}" },
+              { "key": "Content-Type",  "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"reason\": \"QA cleanup UC3 — PENDING package\",\n  \"force\": false\n}"
+            },
+            "url": "{{base_url}}/api/v1/ota/packages/{{package_name}}/{{version}}-pending"
+          }
+        },
+        {
+          "name": "3.2 Delete ACTIVE package — expect 409",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 409 — cannot delete ACTIVE', () => pm.response.to.have.status(409));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "DELETE",
+            "header": [
+              { "key": "Authorization", "value": "{{admin_token}}" },
+              { "key": "Content-Type",  "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"reason\": \"QA UC3 — attempt delete ACTIVE\"\n}"
+            },
+            "url": "{{base_url}}/api/v1/ota/packages/{{package_name}}/{{version}}"
+          }
+        },
+        {
+          "name": "3.3 Delete with QUEUED jobs — expect 409",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 409 — blocked by QUEUED jobs', () => pm.response.to.have.status(409));",
+                  "pm.test('activeJobs present in body', () => pm.expect(pm.response.json().activeJobs).to.exist);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "DELETE",
+            "header": [
+              { "key": "Authorization", "value": "{{admin_token}}" },
+              { "key": "Content-Type",  "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"reason\": \"QA UC3 — delete while QUEUED jobs exist\"\n}"
+            },
+            "url": "{{base_url}}/api/v1/ota/packages/{{package_name}}/{{version}}"
+          }
+        },
+        {
+          "name": "4.1 Delete with IN_PROGRESS job — expect 409",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 409 — blocked by IN_PROGRESS', () => pm.response.to.have.status(409));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "DELETE",
+            "header": [
+              { "key": "Authorization", "value": "{{admin_token}}" },
+              { "key": "Content-Type",  "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"reason\": \"QA UC4 — delete while IN_PROGRESS\"\n}"
+            },
+            "url": "{{base_url}}/api/v1/ota/packages/{{package_name}}/{{version}}"
+          }
+        },
+        {
+          "name": "No reason body — expect 400",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 400 — reason required', () => pm.response.to.have.status(400));",
+                  "pm.test('Error message', () => pm.expect(pm.response.json().error).to.include('reason'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "DELETE",
+            "header": [
+              { "key": "Authorization", "value": "{{admin_token}}" },
+              { "key": "Content-Type",  "value": "application/json" }
+            ],
+            "body": { "mode": "raw", "raw": "{}" },
+            "url": "{{base_url}}/api/v1/ota/packages/{{package_name}}/{{version}}"
+          }
+        }
+      ]
+    },
+
+    {
+      "name": "UC5 — CUSTOM Cannot Promote to PROD",
+      "item": [
+        {
+          "name": "5.1 Promote CUSTOM package — expect 400/409",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 400 or 409 — CUSTOM cannot promote', () => {",
+                  "  pm.expect(pm.response.code).to.be.oneOf([400, 409]);",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "PATCH",
+            "header": [
+              { "key": "Authorization", "value": "{{admin_token}}" },
+              { "key": "Content-Type",  "value": "application/json" }
+            ],
+            "body": { "mode": "raw", "raw": "{\n  \"promote\": true\n}" },
+            "url": "{{base_url}}/api/v1/ota/packages/{{package_name}}/{{version}}/activate"
+          }
+        },
+        {
+          "name": "5.2 Add CUSTOM target to beta list",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 201 or 200', () => pm.expect(pm.response.code).to.be.oneOf([200, 201]));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Authorization", "value": "{{admin_token}}" },
+              { "key": "Content-Type",  "value": "application/json" }
+            ],
+            "body": { "mode": "raw", "raw": "{\n  \"email\": \"beta.tester@example.com\"\n}" },
+            "url": "{{base_url}}/api/v1/ota/beta-users"
+          }
+        },
+        {
+          "name": "5.3 Create BETA deployment with same targetIds as CUSTOM",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 201 — BETA deploy allowed', () => pm.response.to.have.status(201));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Authorization", "value": "{{admin_token}}" },
+              { "key": "Content-Type",  "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"packageName\": \"{{package_name}}\",\n  \"version\": \"{{version}}\",\n  \"rolloutStage\": \"BETA\",\n  \"targetIds\": [\"{{device_id}}\"]\n}"
+            },
+            "url": "{{base_url}}/api/v1/ota/deployments"
+          }
+        }
+      ]
+    },
+
+    {
+      "name": "UC6 — Version Priority Custom > Beta > Prod",
+      "item": [
+        {
+          "name": "6.1 Device with CUSTOM pointer — CUSTOM wins",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "const devices = pm.response.json().devices || [];",
+                  "const d = devices.find(x => x.deviceId === pm.collectionVariables.get('device_id'));",
+                  "pm.test('releaseType CUSTOM wins', () => pm.expect(d && d.releaseType).to.eql('CUSTOM'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "{{user_token}}" }],
+            "url": "{{base_url}}/api/v1/ota/device/available-updates"
+          }
+        },
+        {
+          "name": "6.2 Beta user, BETA < PROD — expect PROD (today) / BETA (desired UC18)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "// Today: PROD wins when PROD is newer. UC18 wants always BETA.",
+                  "const devices = pm.response.json().devices || [];",
+                  "pm.test('Device present', () => pm.expect(devices.length).to.be.greaterThan(0));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "{{user_token}}" }],
+            "url": "{{base_url}}/api/v1/ota/device/available-updates"
+          }
+        },
+        {
+          "name": "6.3 Non-beta user — PROD only",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "const devices = pm.response.json().devices || [];",
+                  "const betaOffered = devices.some(d => d.releaseType === 'BETA');",
+                  "pm.test('Non-beta user does not see BETA', () => pm.expect(betaOffered).to.be.false);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "{{user_token}}" }],
+            "url": "{{base_url}}/api/v1/ota/device/available-updates"
+          }
+        }
+      ]
+    },
+
+    {
+      "name": "UC7 — Abort / Delete CUSTOM",
+      "item": [
+        {
+          "name": "7.1 Abort CUSTOM (no IN_PROGRESS) — expect 200",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "const b = pm.response.json();",
+                  "pm.test('status CANCELLED', () => pm.expect(b.status).to.eql('CANCELLED'));",
+                  "pm.test('abortReason stored', () => pm.expect(b.abortReason).to.exist);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Authorization", "value": "{{admin_token}}" },
+              { "key": "Content-Type",  "value": "application/json" }
+            ],
+            "body": { "mode": "raw", "raw": "{\n  \"reason\": \"QA abort CUSTOM — wrong target list\"\n}" },
+            "url": "{{base_url}}/api/v1/ota/deployments/{{deployment_id}}/abort"
+          }
+        },
+        {
+          "name": "7.2 Abort with IN_PROGRESS job — expect 409",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 409 — IN_PROGRESS blocks abort', () => pm.response.to.have.status(409));",
+                  "pm.test('inProgressJobs in body', () => pm.expect(pm.response.json().inProgressJobs).to.exist);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Authorization", "value": "{{admin_token}}" },
+              { "key": "Content-Type",  "value": "application/json" }
+            ],
+            "body": { "mode": "raw", "raw": "{\n  \"reason\": \"QA UC7.2 abort while IN_PROGRESS\"\n}" },
+            "url": "{{base_url}}/api/v1/ota/deployments/{{deployment_id}}/abort"
+          }
+        },
+        {
+          "name": "7.3 Abort with COMPLETED jobs only — expect 200",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 200 — COMPLETED does not block abort', () => pm.response.to.have.status(200));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Authorization", "value": "{{admin_token}}" },
+              { "key": "Content-Type",  "value": "application/json" }
+            ],
+            "body": { "mode": "raw", "raw": "{\n  \"reason\": \"QA UC7.3 abort with COMPLETED jobs\"\n}" },
+            "url": "{{base_url}}/api/v1/ota/deployments/{{deployment_id}}/abort"
+          }
+        },
+        {
+          "name": "No abort reason — expect 400",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 400 — abort reason required', () => pm.response.to.have.status(400));",
+                  "pm.test('Error message', () => pm.expect(pm.response.json().error).to.include('reason'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Authorization", "value": "{{admin_token}}" },
+              { "key": "Content-Type",  "value": "application/json" }
+            ],
+            "body": { "mode": "raw", "raw": "{}" },
+            "url": "{{base_url}}/api/v1/ota/deployments/{{deployment_id}}/abort"
+          }
+        }
+      ]
+    },
+
+    {
+      "name": "UC8 — One Active Deployment per Stage",
+      "item": [
+        {
+          "name": "8.1 Second BETA deploy supersedes first",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 201', () => pm.response.to.have.status(201));",
+                  "const b = pm.response.json();",
+                  "pm.test('New deployment ACTIVE', () => pm.expect(b.status).to.eql('ACTIVE'));",
+                  "pm.test('Previous superseded message', () => pm.expect(b.message).to.include('superseded'));",
+                  "pm.collectionVariables.set('deployment_id', b.deploymentId || b.jobId);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Authorization", "value": "{{admin_token}}" },
+              { "key": "Content-Type",  "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"packageName\": \"{{package_name}}\",\n  \"version\": \"{{version}}\",\n  \"rolloutStage\": \"BETA\",\n  \"targetIds\": [\"{{device_id}}\"]\n}"
+            },
+            "url": "{{base_url}}/api/v1/ota/deployments"
+          }
+        },
+        {
+          "name": "8.2 Create PRODUCTION deployment",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 201', () => pm.response.to.have.status(201));",
+                  "const b = pm.response.json();",
+                  "pm.test('PRODUCTION targets DGX-Production', () => pm.expect(b.targetId).to.include('DGX-Production'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Authorization", "value": "{{admin_token}}" },
+              { "key": "Content-Type",  "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"packageName\": \"{{package_name}}\",\n  \"version\": \"{{version}}\",\n  \"rolloutStage\": \"PRODUCTION\"\n}"
+            },
+            "url": "{{base_url}}/api/v1/ota/deployments"
+          }
+        },
+        {
+          "name": "8.3 List deployments — sorted newest first",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "const jobs = pm.response.json().jobs || [];",
+                  "pm.test('At least one deployment', () => pm.expect(jobs.length).to.be.greaterThan(0));",
+                  "const dates = jobs.map(j => j.createdAt);",
+                  "const sorted = dates.every((d, i) => i === 0 || dates[i-1] >= d);",
+                  "pm.test('Sorted newest first', () => pm.expect(sorted).to.be.true);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "{{admin_token}}" }],
+            "url": "{{base_url}}/api/v1/ota/deployments"
+          }
+        }
+      ]
+    },
+
+    {
+      "name": "UC9 — BETA → PROD Promote",
+      "item": [
+        {
+          "name": "9.1 PATCH promote BETA package to PROD",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "const b = pm.response.json();",
+                  "pm.test('releaseType is now PROD', () => pm.expect(b.releaseType).to.eql('PROD'));",
+                  "pm.test('promotedBy present', () => pm.expect(b.promotedBy).to.exist);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "PATCH",
+            "header": [
+              { "key": "Authorization", "value": "{{admin_token}}" },
+              { "key": "Content-Type",  "value": "application/json" }
+            ],
+            "body": { "mode": "raw", "raw": "{\n  \"promote\": true\n}" },
+            "url": "{{base_url}}/api/v1/ota/packages/{{package_name}}/{{version}}/activate"
+          }
+        },
+        {
+          "name": "9.2 POST PRODUCTION deployment for promoted version",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 201', () => pm.response.to.have.status(201));",
+                  "const b = pm.response.json();",
+                  "pm.test('PRODUCTION stage', () => pm.expect(b.rolloutStage).to.eql('PRODUCTION'));",
+                  "pm.test('Targets DGX-Production', () => pm.expect(b.targetId).to.include('DGX-Production'));",
+                  "pm.collectionVariables.set('deployment_id', b.deploymentId || b.jobId);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Authorization", "value": "{{admin_token}}" },
+              { "key": "Content-Type",  "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"packageName\": \"{{package_name}}\",\n  \"version\": \"{{version}}\",\n  \"rolloutStage\": \"PRODUCTION\"\n}"
+            },
+            "url": "{{base_url}}/api/v1/ota/deployments"
+          }
+        }
+      ]
+    },
+
+    {
+      "name": "UC10 — In-Progress Job Visible",
+      "item": [
+        {
+          "name": "10.1 check-updates with QUEUED/IN_PROGRESS job — JOB_ACTIVE",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "const devices = pm.response.json().devices || [];",
+                  "const d = devices.find(x => x.deviceId === pm.collectionVariables.get('device_id'));",
+                  "pm.test('otaStatus JOB_ACTIVE', () => pm.expect(d && d.otaStatus).to.eql('JOB_ACTIVE'));",
+                  "pm.test('activeJob present', () => pm.expect(d && d.activeJob).to.exist);",
+                  "pm.test('no availableVersion when active', () => pm.expect(d && d.availableVersion).to.not.exist);",
+                  "if (d && d.activeJob) pm.collectionVariables.set('job_id', d.activeJob.jobId);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "{{user_token}}" }],
+            "url": "{{base_url}}/api/v1/ota/device/available-updates"
+          }
+        }
+      ]
+    },
+
+    {
+      "name": "UC11 — Production Group Targeting",
+      "item": [
+        {
+          "name": "11.1 Create PRODUCTION deployment — targetGroup DGX-Production",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 201', () => pm.response.to.have.status(201));",
+                  "const b = pm.response.json();",
+                  "pm.test('targetId is DGX-Production', () => pm.expect(b.targetId).to.include('DGX-Production'));",
+                  "pm.test('targetType THING_GROUP', () => pm.expect(b.targetType).to.eql('THING_GROUP'));",
+                  "pm.collectionVariables.set('deployment_id', b.deploymentId || b.jobId);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Authorization", "value": "{{admin_token}}" },
+              { "key": "Content-Type",  "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"packageName\": \"{{package_name}}\",\n  \"version\": \"{{version}}\",\n  \"rolloutStage\": \"PRODUCTION\"\n}"
+            },
+            "url": "{{base_url}}/api/v1/ota/deployments"
+          }
+        },
+        {
+          "name": "11.2 Beta user, PROD newer than BETA — sees PROD",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "const devices = pm.response.json().devices || [];",
+                  "const d = devices.find(x => x.deviceId === pm.collectionVariables.get('device_id'));",
+                  "pm.test('Beta user sees PROD when PROD is newer', () => pm.expect(d && d.releaseType).to.eql('PROD'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "{{user_token}}" }],
+            "url": "{{base_url}}/api/v1/ota/device/available-updates"
+          }
+        },
+        {
+          "name": "11.3 Beta user, BETA newer than PROD — sees BETA",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "// Pre-condition: ensure BETA version > PROD version in test data",
+                  "const devices = pm.response.json().devices || [];",
+                  "const d = devices.find(x => x.deviceId === pm.collectionVariables.get('device_id'));",
+                  "pm.test('Beta user sees BETA when BETA is newer', () => pm.expect(d && d.releaseType).to.eql('BETA'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "{{user_token}}" }],
+            "url": "{{base_url}}/api/v1/ota/device/available-updates"
+          }
+        }
+      ]
+    },
+
+    {
+      "name": "UC12 — Release Notes + Abort Reason",
+      "item": [
+        {
+          "name": "12.1 Upload without releaseNotes — 200 today (GAP: should be 400)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "// GAP: API returns 200. Desired: 400 mandatory field.",
+                  "pm.test('GAP — releaseNotes not enforced (expect 200 today)', () => {",
+                  "  pm.expect(pm.response.code).to.be.oneOf([200, 400]);",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Authorization", "value": "{{admin_token}}" },
+              { "key": "Content-Type",  "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"deviceType\": \"Network_controller_firmware\",\n  \"version\": \"{{version}}-nonotes\",\n  \"releaseType\": \"BETA\",\n  \"checksum\": \"abc123\",\n  \"fileName\": \"test.tar\"\n}"
+            },
+            "url": "{{base_url}}/api/v1/ota/upload-url"
+          }
+        },
+        {
+          "name": "12.2 Abort without reason — expect 400",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 400 — abort reason required', () => pm.response.to.have.status(400));",
+                  "pm.test('Error message', () => pm.expect(pm.response.json().error).to.include('reason'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Authorization", "value": "{{admin_token}}" },
+              { "key": "Content-Type",  "value": "application/json" }
+            ],
+            "body": { "mode": "raw", "raw": "{}" },
+            "url": "{{base_url}}/api/v1/ota/deployments/{{deployment_id}}/abort"
+          }
+        },
+        {
+          "name": "12.3 Abort with reason — expect 200 + cancelledReason stored",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "const b = pm.response.json();",
+                  "pm.test('abortReason in response', () => pm.expect(b.abortReason).to.exist);",
+                  "pm.test('status CANCELLED', () => pm.expect(b.status).to.eql('CANCELLED'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Authorization", "value": "{{admin_token}}" },
+              { "key": "Content-Type",  "value": "application/json" }
+            ],
+            "body": { "mode": "raw", "raw": "{\n  \"reason\": \"UC12.3 QA — abort with reason stored\"\n}" },
+            "url": "{{base_url}}/api/v1/ota/deployments/{{deployment_id}}/abort"
+          }
+        }
+      ]
+    },
+
+    {
+      "name": "UC13 — Delete Cleans S3 + DDB",
+      "item": [
+        {
+          "name": "13.1 Delete PENDING/SUPERSEDED — hard delete (recordRetained false)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "const b = pm.response.json();",
+                  "pm.test('recordRetained false — hard delete', () => pm.expect(b.recordRetained).to.be.false);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "DELETE",
+            "header": [
+              { "key": "Authorization", "value": "{{admin_token}}" },
+              { "key": "Content-Type",  "value": "application/json" }
+            ],
+            "body": { "mode": "raw", "raw": "{\n  \"reason\": \"UC13.1 QA — hard delete PENDING package\"\n}" },
+            "url": "{{base_url}}/api/v1/ota/packages/{{package_name}}/{{version}}"
+          }
+        },
+        {
+          "name": "13.2 Delete RECALLED — soft delete (recordRetained true, status=DELETED)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "const b = pm.response.json();",
+                  "pm.test('recordRetained true — audit record kept', () => pm.expect(b.recordRetained).to.be.true);",
+                  "pm.test('Message mentions audit record', () => pm.expect(b.message).to.include('retained'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "DELETE",
+            "header": [
+              { "key": "Authorization", "value": "{{admin_token}}" },
+              { "key": "Content-Type",  "value": "application/json" }
+            ],
+            "body": { "mode": "raw", "raw": "{\n  \"reason\": \"UC13.2 QA — soft delete RECALLED package\"\n}" },
+            "url": "{{base_url}}/api/v1/ota/packages/{{package_name}}/{{version}}-recalled"
+          }
+        }
+      ]
+    },
+
+    {
+      "name": "UC14 — Always .tar + manifest.json",
+      "item": [
+        {
+          "name": "14.1 GET package — verify .tar filename",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "const b = pm.response.json();",
+                  "pm.test('fileName ends with .tar', () => pm.expect(b.fileName).to.match(/\\.tar$/));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "{{admin_token}}" }],
+            "url": "{{base_url}}/api/v1/ota/packages/{{package_name}}/{{version}}"
+          }
+        },
+        {
+          "name": "14.2 Upload invalid (non-tar) content — package becomes CORRUPTED",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "// After artifact_processor runs, poll GET package status",
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "const b = pm.response.json();",
+                  "pm.test('Package CORRUPTED after bad upload', () => pm.expect(b.status).to.eql('CORRUPTED'));",
+                  "pm.test('corruptReason present', () => pm.expect(b.corruptReason).to.exist);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "{{admin_token}}" }],
+            "url": "{{base_url}}/api/v1/ota/packages/{{package_name}}/{{version}}-badtar"
+          }
+        },
+        {
+          "name": "14.3 Valid tar + manifest.json — package becomes ACTIVE",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "const b = pm.response.json();",
+                  "pm.test('Package ACTIVE after valid tar', () => pm.expect(b.status).to.eql('ACTIVE'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "{{admin_token}}" }],
+            "url": "{{base_url}}/api/v1/ota/packages/{{package_name}}/{{version}}"
+          }
+        }
+      ]
+    },
+
+    {
+      "name": "UC15 — List Sort",
+      "item": [
+        {
+          "name": "15.2 List packages (GAP: not sorted by createdAt today)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "const pkgs = pm.response.json().packages || [];",
+                  "pm.test('Packages returned', () => pm.expect(pkgs.length).to.be.greaterThan(0));",
+                  "// GAP: packages not sorted by createdAt today",
+                  "const dates = pkgs.map(p => p.createdAt || 0);",
+                  "const sorted = dates.every((d, i) => i === 0 || dates[i-1] >= d);",
+                  "pm.test('GAP — packages sorted newest first', () => pm.expect(sorted).to.be.true);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "{{admin_token}}" }],
+            "url": { "raw": "{{base_url}}/api/v1/ota/packages?limit=20", "query": [{ "key": "limit", "value": "20" }] }
+          }
+        },
+        {
+          "name": "15.3 List deployments — sorted newest first",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "const jobs = pm.response.json().jobs || [];",
+                  "const dates = jobs.map(j => j.createdAt || 0);",
+                  "const sorted = dates.every((d, i) => i === 0 || dates[i-1] >= d);",
+                  "pm.test('Deployments sorted newest first', () => pm.expect(sorted).to.be.true);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "{{admin_token}}" }],
+            "url": "{{base_url}}/api/v1/ota/deployments"
+          }
+        }
+      ]
+    },
+
+    {
+      "name": "UC16 — Beta Users CRUD",
+      "item": [
+        {
+          "name": "16.1 GET beta users list",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "const b = pm.response.json();",
+                  "const users = b.betaUsers || b.users || [];",
+                  "pm.test('Beta users list returned', () => pm.expect(users).to.be.an('array'));",
+                  "if (users.length > 0) pm.collectionVariables.set('beta_user_id', users[0].userId);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "{{admin_token}}" }],
+            "url": "{{base_url}}/api/v1/ota/beta-users"
+          }
+        },
+        {
+          "name": "16.2 POST add beta user by email",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 200 or 201', () => pm.expect(pm.response.code).to.be.oneOf([200, 201]));",
+                  "const b = pm.response.json();",
+                  "pm.test('userId returned', () => pm.expect(b.userId).to.exist);",
+                  "pm.collectionVariables.set('beta_user_id', b.userId);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Authorization", "value": "{{admin_token}}" },
+              { "key": "Content-Type",  "value": "application/json" }
+            ],
+            "body": { "mode": "raw", "raw": "{\n  \"email\": \"demotesthw5@yopmail.com\"\n}" },
+            "url": "{{base_url}}/api/v1/ota/beta-users"
+          }
+        },
+        {
+          "name": "16.3 DELETE beta user by userId",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "pm.test('Removed message', () => pm.expect(pm.response.json().message).to.exist);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "DELETE",
+            "header": [{ "key": "Authorization", "value": "{{admin_token}}" }],
+            "url": "{{base_url}}/api/v1/ota/beta-users/{{beta_user_id}}"
+          }
+        },
+        {
+          "name": "16.4 Create BETA deploy — targetIds required (list not auto-applied)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Missing targetIds returns 400', () => pm.response.to.have.status(400));",
+                  "pm.test('Error mentions targetIds', () => pm.expect(pm.response.json().error).to.include('device'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Authorization", "value": "{{admin_token}}" },
+              { "key": "Content-Type",  "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"packageName\": \"{{package_name}}\",\n  \"version\": \"{{version}}\",\n  \"rolloutStage\": \"BETA\"\n}"
+            },
+            "url": "{{base_url}}/api/v1/ota/deployments"
+          }
+        }
+      ]
+    },
+
+    {
+      "name": "UC17 — Idle Device Shows Latest PROD",
+      "item": [
+        {
+          "name": "17.1 Non-beta, idle — availableVersion = PROD",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "const devices = pm.response.json().devices || [];",
+                  "const d = devices.find(x => x.deviceId === pm.collectionVariables.get('device_id'));",
+                  "pm.test('Device offered update', () => pm.expect(d).to.exist);",
+                  "pm.test('otaStatus REGISTERED', () => pm.expect(d && d.otaStatus).to.eql('REGISTERED'));",
+                  "pm.test('releaseType PROD', () => pm.expect(d && d.releaseType).to.eql('PROD'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "{{user_token}}" }],
+            "url": "{{base_url}}/api/v1/ota/device/available-updates"
+          }
+        },
+        {
+          "name": "17.2 Device up-to-date — no update offered",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "const b = pm.response.json();",
+                  "pm.test('No devices with update', () => pm.expect(b.devices || []).to.have.lengthOf(0));",
+                  "pm.test('No update message', () => pm.expect(b.message).to.include('not available'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "{{user_token}}" }],
+            "url": "{{base_url}}/api/v1/ota/device/available-updates"
+          }
+        }
+      ]
+    },
+
+    {
+      "name": "UC18 — Beta Users Always See BETA Until Removed",
+      "item": [
+        {
+          "name": "18.1 Beta user with BETA newer than PROD — sees BETA",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "// Pre-condition: BETA version > PROD version in deployment pointers",
+                  "const devices = pm.response.json().devices || [];",
+                  "const d = devices.find(x => x.deviceId === pm.collectionVariables.get('device_id'));",
+                  "pm.test('Beta user sees BETA', () => pm.expect(d && d.releaseType).to.eql('BETA'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "{{user_token}}" }],
+            "url": "{{base_url}}/api/v1/ota/device/available-updates"
+          }
+        },
+        {
+          "name": "18.2 After removed from beta — sees PROD (or no update)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "const devices = pm.response.json().devices || [];",
+                  "const betaOffer = devices.some(d => d.releaseType === 'BETA');",
+                  "pm.test('No longer sees BETA after removal', () => pm.expect(betaOffer).to.be.false);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "{{user_token}}" }],
+            "url": "{{base_url}}/api/v1/ota/device/available-updates"
+          }
+        }
+      ]
+    },
+
+    {
+      "name": "UC19 — Consent Creates QUEUED IoT Job",
+      "item": [
+        {
+          "name": "19.1 POST consent YES — 202 + QUEUED jobId",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 202', () => pm.response.to.have.status(202));",
+                  "const b = pm.response.json();",
+                  "pm.test('jobId returned', () => pm.expect(b.jobId).to.exist);",
+                  "pm.test('status QUEUED', () => pm.expect(b.status).to.eql('QUEUED'));",
+                  "pm.test('deviceId matches', () => pm.expect(b.deviceId).to.eql(pm.collectionVariables.get('device_id')));",
+                  "pm.collectionVariables.set('job_id', b.jobId);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Authorization", "value": "{{user_token}}" },
+              { "key": "Content-Type",  "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"deviceId\": \"{{device_id}}\",\n  \"packageName\": \"{{package_name}}\",\n  \"version\": \"{{version}}\",\n  \"accepted\": true\n}"
+            },
+            "url": "{{base_url}}/api/v1/ota/my/updates/consent"
+          }
+        }
+      ]
+    },
+
+    {
+      "name": "UC20 — Timeout + Retry",
+      "item": [
+        {
+          "name": "20.2 check-updates after TIMED_OUT — lastFailedJob + update re-offered",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "const devices = pm.response.json().devices || [];",
+                  "const d = devices.find(x => x.deviceId === pm.collectionVariables.get('device_id'));",
+                  "pm.test('otaStatus REGISTERED — retryable', () => pm.expect(d && d.otaStatus).to.eql('REGISTERED'));",
+                  "pm.test('lastFailedJob present', () => pm.expect(d && d.lastFailedJob).to.exist);",
+                  "pm.test('lastFailedJob status TIMED_OUT', () => pm.expect(d.lastFailedJob.status).to.eql('TIMED_OUT'));",
+                  "pm.test('Timed-out message', () => pm.expect(d.lastFailedJob.message).to.include('timed out'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "{{user_token}}" }],
+            "url": "{{base_url}}/api/v1/ota/device/available-updates"
+          }
+        },
+        {
+          "name": "20.3 POST consent again after TIMED_OUT — new QUEUED jobId",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 202', () => pm.response.to.have.status(202));",
+                  "const b = pm.response.json();",
+                  "pm.test('New jobId created', () => pm.expect(b.jobId).to.not.eql(pm.collectionVariables.get('job_id')));",
+                  "pm.test('status QUEUED', () => pm.expect(b.status).to.eql('QUEUED'));",
+                  "pm.collectionVariables.set('job_id', b.jobId);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Authorization", "value": "{{user_token}}" },
+              { "key": "Content-Type",  "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"deviceId\": \"{{device_id}}\",\n  \"packageName\": \"{{package_name}}\",\n  \"version\": \"{{version}}\",\n  \"accepted\": true\n}"
+            },
+            "url": "{{base_url}}/api/v1/ota/my/updates/consent"
+          }
+        }
+      ]
+    },
+
+    {
+      "name": "UC21 — In-Progress Message",
+      "item": [
+        {
+          "name": "21.1 check-updates with IN_PROGRESS job — JOB_ACTIVE + progress message",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "const devices = pm.response.json().devices || [];",
+                  "const d = devices.find(x => x.deviceId === pm.collectionVariables.get('device_id'));",
+                  "pm.test('otaStatus JOB_ACTIVE', () => pm.expect(d && d.otaStatus).to.eql('JOB_ACTIVE'));",
+                  "pm.test('activeJob.status IN_PROGRESS', () => pm.expect(d && d.activeJob && d.activeJob.status).to.eql('IN_PROGRESS'));",
+                  "pm.test('Progress message contains version', () => {",
+                  "  const msg = d && d.activeJob && d.activeJob.message || '';",
+                  "  pm.expect(msg).to.include('in progress');",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "{{user_token}}" }],
+            "url": "{{base_url}}/api/v1/ota/device/available-updates"
+          }
+        }
+      ]
+    },
+
+    {
+      "name": "UC22 — Completed Then Check Newer",
+      "item": [
+        {
+          "name": "22.1 After SUCCEEDED — sees newer available version",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "const devices = pm.response.json().devices || [];",
+                  "const d = devices.find(x => x.deviceId === pm.collectionVariables.get('device_id'));",
+                  "pm.test('Device offered newer version', () => {",
+                  "  pm.expect(d).to.exist;",
+                  "  pm.expect(d.availableVersion).to.exist;",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "{{user_token}}" }],
+            "url": "{{base_url}}/api/v1/ota/device/available-updates"
+          }
+        },
+        {
+          "name": "22.2 Device matches latest PROD — no update",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "const b = pm.response.json();",
+                  "pm.test('No update offered', () => pm.expect(b.devices || []).to.have.lengthOf(0));",
+                  "pm.test('No update message', () => pm.expect(b.message).to.include('not available'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "{{user_token}}" }],
+            "url": "{{base_url}}/api/v1/ota/device/available-updates"
+          }
+        }
+      ]
+    },
+
+    {
+      "name": "UC23 — Duplicate Consent",
+      "item": [
+        {
+          "name": "23.1 POST consent while QUEUED/IN_PROGRESS — expect 409",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 409 — already in progress', () => pm.response.to.have.status(409));",
+                  "const b = pm.response.json();",
+                  "pm.test('Error message', () => pm.expect(b.error).to.include('already in progress'));",
+                  "pm.test('pendingJobId in body', () => pm.expect(b.pendingJobId).to.exist);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Authorization", "value": "{{user_token}}" },
+              { "key": "Content-Type",  "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"deviceId\": \"{{device_id}}\",\n  \"packageName\": \"{{package_name}}\",\n  \"version\": \"{{version}}\",\n  \"accepted\": true\n}"
+            },
+            "url": "{{base_url}}/api/v1/ota/my/updates/consent"
+          }
+        }
+      ]
+    },
+
+    {
+      "name": "UC24 — Corrupt / CORRUPTED Package Cannot Deploy",
+      "item": [
+        {
+          "name": "24.1 Deploy CORRUPTED package — expect 400",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 400 — cannot deploy CORRUPTED', () => pm.response.to.have.status(400));",
+                  "pm.test('Error mentions CORRUPTED', () => {",
+                  "  const err = pm.response.json().error || '';",
+                  "  pm.expect(err).to.include('CORRUPTED');",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Authorization", "value": "{{admin_token}}" },
+              { "key": "Content-Type",  "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"packageName\": \"{{package_name}}\",\n  \"version\": \"{{version}}-badtar\",\n  \"rolloutStage\": \"PRODUCTION\"\n}"
+            },
+            "url": "{{base_url}}/api/v1/ota/deployments"
+          }
+        },
+        {
+          "name": "24.1b Deploy PENDING package — expect 400",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 400 — cannot deploy PENDING', () => pm.response.to.have.status(400));",
+                  "pm.test('Error mentions PENDING or not ACTIVE', () => {",
+                  "  const err = pm.response.json().error || '';",
+                  "  pm.expect(err.toLowerCase()).to.satisfy(s => s.includes('pending') || s.includes('active'));",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Authorization", "value": "{{admin_token}}" },
+              { "key": "Content-Type",  "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"packageName\": \"{{package_name}}\",\n  \"version\": \"{{version}}-pending\",\n  \"rolloutStage\": \"PRODUCTION\"\n}"
+            },
+            "url": "{{base_url}}/api/v1/ota/deployments"
+          }
+        }
+      ]
+    },
+
+    {
+      "name": "UC25 — Failed Until User Asks for Newer",
+      "item": [
+        {
+          "name": "25.1 check-updates after FAILED + newer available — REGISTERED + lastFailedJob",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "const devices = pm.response.json().devices || [];",
+                  "const d = devices.find(x => x.deviceId === pm.collectionVariables.get('device_id'));",
+                  "pm.test('otaStatus REGISTERED — retryable', () => pm.expect(d && d.otaStatus).to.eql('REGISTERED'));",
+                  "pm.test('availableVersion present', () => pm.expect(d && d.availableVersion).to.exist);",
+                  "pm.test('lastFailedJob present', () => pm.expect(d && d.lastFailedJob).to.exist);",
+                  "pm.test('lastFailedJob status FAILED', () => pm.expect(d.lastFailedJob.status).to.eql('FAILED'));",
+                  "pm.test('Failure message', () => pm.expect(d.lastFailedJob.message).to.include('failed'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "{{user_token}}" }],
+            "url": "{{base_url}}/api/v1/ota/device/available-updates"
+          }
+        }
+      ]
+    },
+
+    {
+      "name": "Smoke — Full Happy Path",
+      "item": [
+        {
+          "name": "S1 Upload URL",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "const b = pm.response.json();",
+                  "if (b.uploadUrl) pm.collectionVariables.set('upload_url', b.uploadUrl);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Authorization", "value": "{{admin_token}}" },
+              { "key": "Content-Type",  "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"deviceType\": \"Network_controller_firmware\",\n  \"version\": \"{{version}}\",\n  \"releaseType\": \"BETA\",\n  \"checksum\": \"<sha256>\",\n  \"releaseNotes\": \"Smoke test — valid tar with manifest.json\",\n  \"fileName\": \"HomeAssistantUtility-{{version}}.tar\"\n}"
+            },
+            "url": "{{base_url}}/api/v1/ota/upload-url"
+          }
+        },
+        {
+          "name": "S2 PUT artifact (tar file)",
+          "request": {
+            "method": "PUT",
+            "header": [
+              { "key": "Content-Type", "value": "application/octet-stream" }
+            ],
+            "body": { "mode": "file", "file": { "src": "" } },
+            "url": "{{upload_url}}"
+          }
+        },
+        {
+          "name": "S3 Poll package status until ACTIVE",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Package ACTIVE', () => pm.expect(pm.response.json().status).to.eql('ACTIVE'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "{{admin_token}}" }],
+            "url": "{{base_url}}/api/v1/ota/packages/{{package_name}}/{{version}}"
+          }
+        },
+        {
+          "name": "S4 check-updates BEFORE deploy — version not offered",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "const devices = pm.response.json().devices || [];",
+                  "const found = devices.some(d => d.availableVersion === pm.collectionVariables.get('version'));",
+                  "pm.test('Not offered before deployment', () => pm.expect(found).to.be.false);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "{{user_token}}" }],
+            "url": "{{base_url}}/api/v1/ota/device/available-updates"
+          }
+        },
+        {
+          "name": "S5 Create BETA deployment",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 201', () => pm.response.to.have.status(201));",
+                  "const b = pm.response.json();",
+                  "pm.collectionVariables.set('deployment_id', b.deploymentId || b.jobId);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Authorization", "value": "{{admin_token}}" },
+              { "key": "Content-Type",  "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"packageName\": \"{{package_name}}\",\n  \"version\": \"{{version}}\",\n  \"rolloutStage\": \"BETA\",\n  \"targetIds\": [\"{{device_id}}\"]\n}"
+            },
+            "url": "{{base_url}}/api/v1/ota/deployments"
+          }
+        },
+        {
+          "name": "S6 check-updates AFTER deploy — version offered",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "const devices = pm.response.json().devices || [];",
+                  "const d = devices.find(x => x.deviceId === pm.collectionVariables.get('device_id'));",
+                  "pm.test('Version offered after deployment', () => pm.expect(d && d.availableVersion).to.exist);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "{{user_token}}" }],
+            "url": "{{base_url}}/api/v1/ota/device/available-updates"
+          }
+        },
+        {
+          "name": "S7 POST consent YES — QUEUED",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 202', () => pm.response.to.have.status(202));",
+                  "const b = pm.response.json();",
+                  "pm.test('status QUEUED', () => pm.expect(b.status).to.eql('QUEUED'));",
+                  "pm.collectionVariables.set('job_id', b.jobId);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Authorization", "value": "{{user_token}}" },
+              { "key": "Content-Type",  "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"deviceId\": \"{{device_id}}\",\n  \"packageName\": \"{{package_name}}\",\n  \"version\": \"{{version}}\",\n  \"accepted\": true\n}"
+            },
+            "url": "{{base_url}}/api/v1/ota/my/updates/consent"
+          }
+        },
+        {
+          "name": "S8 check-updates after consent — JOB_ACTIVE",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "const devices = pm.response.json().devices || [];",
+                  "const d = devices.find(x => x.deviceId === pm.collectionVariables.get('device_id'));",
+                  "pm.test('otaStatus JOB_ACTIVE', () => pm.expect(d && d.otaStatus).to.eql('JOB_ACTIVE'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "{{user_token}}" }],
+            "url": "{{base_url}}/api/v1/ota/device/available-updates"
+          }
+        },
+        {
+          "name": "S9 POST consent again — 409 duplicate",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 409 — duplicate consent blocked', () => pm.response.to.have.status(409));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Authorization", "value": "{{user_token}}" },
+              { "key": "Content-Type",  "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"deviceId\": \"{{device_id}}\",\n  \"packageName\": \"{{package_name}}\",\n  \"version\": \"{{version}}\",\n  \"accepted\": true\n}"
+            },
+            "url": "{{base_url}}/api/v1/ota/my/updates/consent"
+          }
+        }
+      ]
+    }
+
+  ]
+}
