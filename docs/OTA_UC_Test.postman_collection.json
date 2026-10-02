@@ -48,7 +48,7 @@
             "method": "POST",
             "header": [
               { "key": "Content-Type",  "value": "application/x-amz-json-1.1" },
-              { "key": "X-Amz-Target", "value": "AmazonCognitoIdentityProviderService.InitiateAuth" }
+              { "key": "X-Amz-Target", "value": "AWSCognitoIdentityProviderService.InitiateAuth" }
             ],
             "body": {
               "mode": "raw",
