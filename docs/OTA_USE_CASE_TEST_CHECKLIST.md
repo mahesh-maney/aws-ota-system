@@ -225,7 +225,7 @@ Empty reason → **400** `An abort reason is required.`
 
 | ID | Step | Expected (today) | Desired (UC) | Result |
 |---|---|---|---|---|
-| 12.1 | Upload **without** `releaseNotes` | **200** (optional, stored as `""`) | **Mandatory** | |
+| 12.1 | Upload **without** `releaseNotes` | **400** (required, 20–500 chars) | **Mandatory** | |
 | 12.2 | Abort **without** `reason` | **400** | Mandatory | |
 | 12.3 | Abort **with** `reason` | Stored `cancelledReason` / response `abortReason` | Stored | |
 
@@ -264,7 +264,7 @@ python infrastructure/make_test_artifact.py \
 | ID | Surface | Expected (today) | Desired (UC) | Result |
 |---|---|---|---|---|
 | 15.1 | This repo | **No Admin UI** | Sort by create/update | Test on portal separately |
-| 15.2 | GET `/packages` | Sort `(packageName, version)` **not** `createdAt` | Date sort | |
+| 15.2 | GET `/packages` | Sort `createdAt` **desc** (fixed 2026-10-05) | Date sort | |
 | 15.3 | GET `/deployments` | Sort `createdAt` **desc** | Date sort | |
 
 ---

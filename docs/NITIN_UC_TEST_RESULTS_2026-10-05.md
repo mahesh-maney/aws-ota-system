@@ -15,12 +15,12 @@
 | Total requests | 69 |
 | Requests with errors | 0 |
 | Total assertions | 153 |
-| **Passed** | **88** |
-| **Failed** | **65** |
+| **Passed** | **94** |
+| **Failed** | **57** |
 
 ---
 
-## Passed Assertions (88)
+## Passed Assertions (94)
 
 | UC / Request | Test |
 |---|---|
@@ -74,12 +74,21 @@
 | UC22 22.2 | Status 200 |
 | UC24 24.1b | Error mentions PENDING or not ACTIVE |
 | UC25 25.1 | Status 200, otaStatus REGISTERED — retryable, availableVersion present |
+| Smoke S7 | Status 202, status QUEUED *(PKCE token working)* |
+| Smoke S8 | otaStatus JOB_ACTIVE |
+| Smoke S9 | Status 409 — duplicate consent blocked |
+| UC1 1.1 | Status 200, uploadUrl present *(uc1_version isolation)* |
+| UC1 1.2 | S3 PUT accepted *(uc1_version path)* |
+| UC1 1.5 | GAP — releaseNotes now enforced (returns 400) |
+| UC10 10.1 | otaStatus JOB_ACTIVE, activeJob present, no availableVersion |
+| UC15 15.2 | Packages sorted by createdAt desc |
+| UC23 23.1 | Status 409, Error message, pendingJobId in body |
 
 ---
 
-## Failed Assertions (65) — Categorized
+## Failed Assertions (57) — Categorized
 
-### Category A — Consent endpoint requires PKCE OAuth token (13 failures)
+### Category A — Consent endpoint requires PKCE OAuth token (6 remaining — down from 13)
 
 `POST /api/v1/ota/my/updates/consent` returns **401 Unauthorized**.
 
@@ -225,7 +234,20 @@ These tests check the device's "up-to-date" state, but the device has `installed
 
 ---
 
-## Fixed During This Run
+## Fixed During Session 2 (2026-10-06)
+
+| Fix | Impact |
+|---|---|
+| `get_pkce_token.py` updated for Cognito Managed Login v2 (single-step combined form, `auth.digilux.co.in`) | PKCE token now obtainable headlessly; consent endpoint (S7/S9/UC23) passes |
+| `build_nitin_collection.py`: PKCE Bearer token injected on consent requests | Removes 401s on consent endpoint |
+| `build_nitin_collection.py`: `uc1_version` variable added, UC1 folder uses it | UC1/1.1 no longer 409-collides with Smoke S1 version |
+| `build_nitin_collection.py`: Smoke teardown step added (abort + clear `job_id`) | Reduces state contamination between Smoke and UC tests |
+| `releaseNotes` validation enforced in `upload_url` Lambda (required, 20–500 chars) | UC12.1 now returns 400 as desired |
+| `GET /packages` sorted by `createdAt` desc | UC15.2 now passes |
+
+---
+
+## Fixed During Session 1 (2026-10-05)
 
 The following API bugs were discovered and fixed during test execution:
 
@@ -280,7 +302,7 @@ npx newman run /tmp/nitin_uc_collection.json --timeout-request 30000
 
 | Category | Count | What's needed |
 |---|---|---|
-| A — Consent PKCE | 13 | Fix Cognito Hosted UI or add non-PKCE consent test path |
-| B — IoT job states | 14 | Real device or DynamoDB seed script to set job statuses |
-| C — Version reuse | 2 | Each UC should use a unique version variable |
-| D — Pre-conditions | 36 | Seed script for CUSTOM/RECALLED/PENDING packages; beta user email in Cognito; per-UC isolation |
+| A — Consent PKCE | 6 | UC19 + UC20/20.3 still blocked — device in JOB_ACTIVE from Smoke S7 consent; need teardown between Smoke and UC runs |
+| B — IoT job states | ~11 | Real device or DynamoDB seed script to set TIMED_OUT / FAILED / SUCCEEDED job statuses |
+| C — Version reuse | 0 | **Fixed** — `uc1_version` variable added to `build_nitin_collection.py` |
+| D — Pre-conditions | ~40 | Seed script for CUSTOM/RECALLED/PENDING packages; beta user email in Cognito (`beta.tester@example.com`); device in DGX-Canary group for BETA visibility |
