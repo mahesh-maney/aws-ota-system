@@ -52,8 +52,6 @@ OTA_JOBS_TABLE      = os.environ.get("OTA_JOBS_TABLE",       "digilux_ota_jobs")
 CONSENTS_TABLE      = os.environ.get("CONSENTS_TABLE",       "digilux_ota_user_consents")
 ARTIFACT_BUCKET    = os.environ.get("ARTIFACT_BUCKET",    "digilux-ota-artifacts")
 RATE_LIMIT_MINUTES = int(os.environ.get("RATE_LIMIT_MINUTES", "5"))
-KEY_SERVER_URL     = os.environ.get("KEY_SERVER_URL",     "")
-KEY_SERVER_API_KEY = os.environ.get("KEY_SERVER_API_KEY", "")
 
 # Pre-signed URL expiry tiers
 _TIER1_MAX_MB  = int(os.environ.get("PRESIGN_EXPIRY_TIER1_MAX_MB", "50"))
@@ -327,51 +325,6 @@ def _check_rate_limit(user_id: str, device_id: str) -> bool:
     return is_limited
 
 
-def _unwrap_data_key(wrapped_key: str) -> str:
-    """
-    Call the Digilux Key Server /unwrap endpoint to decrypt the wrapped data key.
-    Returns base64-encoded plaintext AES-256 key.
-    The master key never enters this Lambda — only the Key Server can unwrap.
-    """
-    import urllib.request
-    import urllib.error
-
-    if not KEY_SERVER_URL or not KEY_SERVER_API_KEY:
-        raise RuntimeError(
-            "KEY_SERVER_URL and KEY_SERVER_API_KEY must be set to use the key server"
-        )
-
-    payload = json.dumps({"wrappedKey": wrapped_key}).encode()
-    req     = urllib.request.Request(
-        f"{KEY_SERVER_URL}/api/v1/ota/keys/unwrap",
-        data=payload,
-        headers={
-            "Content-Type":  "application/json",
-            "Authorization": f"Bearer {KEY_SERVER_API_KEY}",
-        },
-        method="POST",
-    )
-    _log("debug", "key_server_unwrap_request",
-         url=f"{KEY_SERVER_URL}/api/v1/ota/keys/unwrap",
-         wrappedKeyVersion=wrapped_key.split(":")[0] if ":" in wrapped_key else "?")
-    try:
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            body = json.loads(resp.read().decode())
-        key_b64 = body.get("plaintextKey", "")
-        if not key_b64:
-            raise RuntimeError("Key server /unwrap returned empty plaintextKey")
-        _log("debug", "key_server_unwrap_success", keyId=body.get("keyId", ""))
-        return key_b64
-    except urllib.error.HTTPError as exc:
-        err_body = exc.read().decode() if exc.fp else ""
-        _log("error", "key_server_unwrap_http_error",
-             status=exc.code, reason=str(exc.reason), body=err_body)
-        raise RuntimeError(f"Key server /unwrap failed with HTTP {exc.code}: {err_body}") from exc
-    except urllib.error.URLError as exc:
-        _log("error", "key_server_unwrap_connection_error", error=str(exc.reason))
-        raise RuntimeError(f"Key server unreachable: {exc.reason}") from exc
-
-
 def _create_iot_job(pkg: dict, package_name: str, version: str,
                     thing_name: str, device_id: str,
                     user_id: str, job_id: str, expiry_sec: int) -> str:
@@ -416,27 +369,15 @@ def _create_iot_job(pkg: dict, package_name: str, version: str,
         "rollback":  True,
     }
 
-    # ── Inject decryption key via Key Server ──────────────────────────────────
-    wrapped_data_key = pkg.get("wrappedDataKey", "")
-    aes_iv_b64       = pkg.get("aesIv", "")
-    if wrapped_data_key and aes_iv_b64:
-        t_unwrap = time.monotonic()
-        plaintext_key_b64 = _unwrap_data_key(wrapped_data_key)
-        unwrap_ms = int((time.monotonic() - t_unwrap) * 1000)
-        job_doc["artifact"]["dataKey"] = plaintext_key_b64
-        job_doc["artifact"]["iv"]      = aes_iv_b64
-        _log("info", "data_key_injected",
+    # ── Inject IV only — AES data key delivered just-in-time via artifact_key Lambda ──
+    # Device calls POST /device/artifact-key with IoT SigV4 auth to get the plaintext key.
+    # No plaintext key is stored in DynamoDB or embedded in the job document.
+    aes_iv_b64 = pkg.get("aesIv", "")
+    if aes_iv_b64:
+        job_doc["artifact"]["iv"] = aes_iv_b64
+        _log("debug", "iv_injected_into_job_doc",
              jobId=job_id, packageName=package_name, version=version,
-             unwrapMs=unwrap_ms,
-             detail="Plaintext data key embedded in IoT Job document for device decryption")
-        _audit("DATA_KEY_UNWRAPPED", user_id,
-               {"jobId": job_id, "packageName": package_name, "version": version},
-               "SUCCESS", unwrapMs=unwrap_ms)
-    else:
-        _log("warning", "data_key_not_injected",
-             jobId=job_id, packageName=package_name, version=version,
-             hasWrappedKey=bool(wrapped_data_key), hasIv=bool(aes_iv_b64),
-             detail="Package has no wrappedDataKey or aesIv — device will not be able to decrypt artifact")
+             detail="IV is not secret — data key delivered separately via artifact_key Lambda")
 
     iot_target = f"arn:aws:iot:{REGION}:{ACCOUNT_ID}:thing/{thing_name}"
     _log("debug", "iot_create_job_call",
@@ -726,9 +667,9 @@ def _handle_consent(user_id: str, email: str, body: dict) -> dict:
                                            thing_name, device_id, user_id,
                                            new_job_id, expiry_sec)
         except RuntimeError as exc:
-            _log("error", "key_server_failure_during_retry",
+            _log("error", "iot_job_create_failed_during_retry",
                  userId=user_id, deviceId=device_id, error=str(exc))
-            return _resp(500, {"error": "Key service unavailable — please try again"})
+            return _resp(500, {"error": "Failed to create IoT job — please try again"})
         job_ms = int((time.monotonic() - t_job) * 1000)
 
         # Update consent record with new jobId (consent itself stays ACCEPTED)
@@ -820,9 +761,9 @@ def _handle_consent(user_id: str, email: str, body: dict) -> dict:
         iot_job_arn = _create_iot_job(pkg, package_name, version,
                                        thing_name, device_id, user_id, job_id, expiry_sec)
     except RuntimeError as exc:
-        _log("error", "key_server_failure_during_user_initiated_consent",
+        _log("error", "iot_job_create_failed_during_consent",
              userId=user_id, deviceId=device_id, error=str(exc))
-        return _resp(500, {"error": "Key service unavailable — please try again"})
+        return _resp(500, {"error": "Failed to create IoT job — please try again"})
     job_ms = int((time.monotonic() - t_job) * 1000)
 
     # Write consent + job records
