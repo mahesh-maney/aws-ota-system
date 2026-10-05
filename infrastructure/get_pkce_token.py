@@ -31,7 +31,7 @@ try:
 except ImportError:
     sys.exit("requests not installed — run: pip install requests")
 
-COGNITO_DOMAIN = "https://ap-south-1h1o8s7257.auth.ap-south-1.amazoncognito.com"
+COGNITO_DOMAIN      = "https://auth.digilux.co.in"
 CLIENT_ID      = "q7189jitfkk4ttesepkgls491"
 REDIRECT_URI   = "https://oauth.pstmn.io/v1/callback"
 SCOPES         = "openid email smarthome_server/read smarthome_server/write"
@@ -139,26 +139,16 @@ def get_token(username: str, password: str) -> str:
     csrf1      = _extract_csrf(resp.text, "login")
     login_url  = _resolve(_get_form_action(resp.text))
 
-    # Step 2 — POST username → auto-follow to /verifyPassword
+    # Step 2 — POST username + password in one request (Managed Login v2 combined form)
+    # The new Cognito Managed Login shows username and password on the same page.
     resp2 = session.post(
         login_url,
-        data={"csrf": csrf1, "username": username, "cognitoAsfData": ""},
-        allow_redirects=True,
-    )
-    if resp2.status_code != 200:
-        raise RuntimeError(f"/login POST returned HTTP {resp2.status_code}")
-
-    csrf2       = _extract_csrf(resp2.text, "verifyPassword")
-    verify_url  = _resolve(_get_form_action(resp2.text))
-
-    # Step 3 — POST password — do NOT auto-follow (callback redirect is next)
-    resp3 = session.post(
-        verify_url,
-        data={"csrf": csrf2, "password": password, "cognitoAsfData": ""},
+        data={"csrf": csrf1, "username": username, "password": password,
+              "cognitoAsfData": ""},
         allow_redirects=False,
     )
 
-    callback_url = _follow_to_callback(session, resp3)
+    callback_url = _follow_to_callback(session, resp2)
 
     # Step 4 — Extract auth code from callback URL
     qs   = urllib.parse.parse_qs(urllib.parse.urlparse(callback_url).query)
