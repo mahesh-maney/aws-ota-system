@@ -585,12 +585,12 @@ ABORT_DEPLOY=$(call POST "/api/v1/ota/deployments" \
 ABORT_JOB_ID=$(echo "$ABORT_DEPLOY" | python3 -c "import json,sys; print(json.load(sys.stdin).get('jobId',''))" 2>/dev/null)
 
 if [ -n "$ABORT_JOB_ID" ] && [ "$ABORT_JOB_ID" != "None" ]; then
-  ABORT_RESP=$(call POST "/api/v1/ota/deployments/${ABORT_JOB_ID}/abort")
+  ABORT_RESP=$(call POST "/api/v1/ota/deployments/${ABORT_JOB_ID}/abort" '{"reason":"e2e test abort"}')
   ABORT_STATUS=$(echo "$ABORT_RESP" | python3 -c "import json,sys; print(json.load(sys.stdin).get('status',''))" 2>/dev/null)
   [ "$ABORT_STATUS" = "CANCELLED" ] && _pass "Abort returns status=CANCELLED" || _fail "Abort failed: $ABORT_RESP"
 
   # Abort again → should return 400 (already cancelled)
-  ABORT2_CODE=$(http_code POST "/api/v1/ota/deployments/${ABORT_JOB_ID}/abort")
+  ABORT2_CODE=$(http_code POST "/api/v1/ota/deployments/${ABORT_JOB_ID}/abort" '{"reason":"e2e test abort again"}')
   [ "$ABORT2_CODE" = "400" ] && _pass "Aborting already-cancelled job → 400" || _warn "Expected 400 on double-abort, got $ABORT2_CODE"
 else
   _warn "Could not create abort-test job"
