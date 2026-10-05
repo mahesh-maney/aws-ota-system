@@ -31,47 +31,42 @@ echo "    Permission granted."
 
 echo "==> Configuring S3 event notification"
 
-# Trigger on uploads to the raw artifact prefixes.
-# The artifact_processor writes to enc/ and sig/ which do NOT match these prefixes,
-# so there is no risk of an infinite loop.
+# One notification entry per deviceType prefix — matches the S3 key structure
+# written by the upload_url Lambda: {deviceType}/{packageName}/{version}/{fileName}
+# The artifact_processor writes outputs to enc/ and sig/ which do NOT match these
+# prefixes, so there is no risk of an infinite trigger loop.
 cat > /tmp/s3_notification.json << EOF
 {
   "LambdaFunctionConfigurations": [
     {
-      "Id": "${PREFIX}-ota-artifact-firmware",
+      "Id": "${PREFIX}-ota-artifact-nc-firmware",
       "LambdaFunctionArn": "${PROCESSOR_ARN}",
       "Events": ["s3:ObjectCreated:Put","s3:ObjectCreated:CompleteMultipartUpload"],
-      "Filter": {"Key": {"FilterRules": [{"Name": "prefix","Value": "firmware/"}]}}
+      "Filter": {"Key": {"FilterRules": [{"Name": "prefix","Value": "Network_controller_firmware/"}]}}
     },
     {
-      "Id": "${PREFIX}-ota-artifact-application",
+      "Id": "${PREFIX}-ota-artifact-nc-zigbee",
       "LambdaFunctionArn": "${PROCESSOR_ARN}",
       "Events": ["s3:ObjectCreated:Put","s3:ObjectCreated:CompleteMultipartUpload"],
-      "Filter": {"Key": {"FilterRules": [{"Name": "prefix","Value": "application/"}]}}
+      "Filter": {"Key": {"FilterRules": [{"Name": "prefix","Value": "Network_controller_zigbee_firmware/"}]}}
     },
     {
-      "Id": "${PREFIX}-ota-artifact-drivers",
+      "Id": "${PREFIX}-ota-artifact-nc-z2m",
       "LambdaFunctionArn": "${PROCESSOR_ARN}",
       "Events": ["s3:ObjectCreated:Put","s3:ObjectCreated:CompleteMultipartUpload"],
-      "Filter": {"Key": {"FilterRules": [{"Name": "prefix","Value": "drivers/"}]}}
+      "Filter": {"Key": {"FilterRules": [{"Name": "prefix","Value": "Network_controller_Z2M_Firmware/"}]}}
     },
     {
-      "Id": "${PREFIX}-ota-artifact-zigbee",
+      "Id": "${PREFIX}-ota-artifact-nc-zigbee-stack",
       "LambdaFunctionArn": "${PROCESSOR_ARN}",
       "Events": ["s3:ObjectCreated:Put","s3:ObjectCreated:CompleteMultipartUpload"],
-      "Filter": {"Key": {"FilterRules": [{"Name": "prefix","Value": "zigbee-devices/"}]}}
+      "Filter": {"Key": {"FilterRules": [{"Name": "prefix","Value": "Network_controller_zigbee_stack_firmware/"}]}}
     },
     {
-      "Id": "${PREFIX}-ota-artifact-config",
+      "Id": "${PREFIX}-ota-artifact-nc-misc",
       "LambdaFunctionArn": "${PROCESSOR_ARN}",
       "Events": ["s3:ObjectCreated:Put","s3:ObjectCreated:CompleteMultipartUpload"],
-      "Filter": {"Key": {"FilterRules": [{"Name": "prefix","Value": "config/"}]}}
-    },
-    {
-      "Id": "${PREFIX}-ota-artifact-rules",
-      "LambdaFunctionArn": "${PROCESSOR_ARN}",
-      "Events": ["s3:ObjectCreated:Put","s3:ObjectCreated:CompleteMultipartUpload"],
-      "Filter": {"Key": {"FilterRules": [{"Name": "prefix","Value": "rules/"}]}}
+      "Filter": {"Key": {"FilterRules": [{"Name": "prefix","Value": "Network_controller_Miscellaneous/"}]}}
     }
   ]
 }
