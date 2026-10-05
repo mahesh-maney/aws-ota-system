@@ -378,7 +378,7 @@ def _list_packages(event: dict, caller: str) -> dict:
         }
         for i in items
     ]
-    packages.sort(key=lambda x: (x["packageName"], x["version"]))
+    packages.sort(key=lambda x: x["createdAt"] or 0, reverse=True)
     log.info(json.dumps({"msg": "list_packages_result", "actor": caller, "count": len(packages)}))
     return _response(200, {"packages": packages, "count": len(packages)})
 
