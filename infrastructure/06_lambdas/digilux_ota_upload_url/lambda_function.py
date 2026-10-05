@@ -15,7 +15,7 @@ Request body (POST):
   "checksum":     "a1b2c3d4...",                          # required SHA256 hex — verified on upload
   "totalSize":    10485760,                               # optional bytes — triggers multipart if > 10MB
   "fileName":     "custom-name.tar",                      # optional override
-  "releaseNotes": "Bug fixes"                             # optional
+  "releaseNotes": "Bug fixes and improvements"           # required, 20–500 chars
 }
 
 Upload modes:
@@ -139,6 +139,12 @@ def lambda_handler(event, context):
                 "error": f"Invalid releaseType. Must be one of: {', '.join(VALID_RELEASE_TYPES)}"
             })
 
+        release_notes = str(body.get("releaseNotes") or "").strip()
+        if len(release_notes) < 20:
+            return _response(400, {"error": "releaseNotes is required and must be at least 20 characters."})
+        if len(release_notes) > 500:
+            return _response(400, {"error": "releaseNotes must be 500 characters or fewer."})
+
         # ── Derive packageName and fileName from deviceType ───────────────────
         type_cfg     = DEVICE_TYPE_MAP[device_type]
         package_name = type_cfg["baseName"]
@@ -190,7 +196,7 @@ def lambda_handler(event, context):
             "uploadToken":      upload_token,
             "uploadType":       "MULTIPART" if use_multipart else "SINGLE",
             "expectedChecksum": checksum,
-            "releaseNotes":     body.get("releaseNotes", ""),
+            "releaseNotes":     release_notes,
             "createdAt":        now_ms,
             "createdBy":        caller,
         }
