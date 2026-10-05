@@ -291,7 +291,7 @@ sys.exit(1 if found else 0)
 
 # Duplicate upload of same ACTIVE version → 409
 code=$(http_code POST "/api/v1/ota/packages/upload-artefact" \
-  "{\"deviceType\":\"Network_controller_firmware\",\"version\":\"${TEST_VERSION}\",\"releaseType\":\"PROD\",\"checksum\":\"${TEST_CHECKSUM}\"}")
+  "{\"deviceType\":\"Network_controller_firmware\",\"version\":\"${TEST_VERSION}\",\"releaseType\":\"PROD\",\"checksum\":\"${TEST_CHECKSUM}\",\"releaseNotes\":\"Duplicate upload test - should be rejected with 409\"}")
 assert_code "$code" "409" "Duplicate ACTIVE version upload → 409"
 
 echo "TEST_VERSION=$TEST_VERSION" > /tmp/ota_test_version.txt
