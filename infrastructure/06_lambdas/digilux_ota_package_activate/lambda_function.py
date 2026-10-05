@@ -486,21 +486,12 @@ def _delete_package(package_name: str, version: str, caller: str, body: dict) ->
 
     status = item.get("status", "")
 
-    # ── 1. Block ACTIVE ───────────────────────────────────────────────────────
-    if status == "ACTIVE":
-        return _resp(409, {
-            "error": (
-                f"Package {package_name} v{version} is ACTIVE and cannot be deleted. "
-                "Recall or supersede it first."
-            )
-        })
-
-    # ── 2. Require deletion reason ────────────────────────────────────────────
+    # ── 1. Require deletion reason (checked first so callers always know) ────
     reason = str(body.get("reason", "")).strip()
     if not reason:
         return _resp(400, {"error": "A deletion reason is required."})
 
-    # ── 3. Block if any jobs for this version are QUEUED, IN_PROGRESS or COMPLETED ──
+    # ── 2. Scan for active jobs (shared by ACTIVE check and jobs check below) ─
     jobs_table = dynamo.Table(OTA_JOBS_TABLE)
     blocking_jobs = jobs_table.scan(
         FilterExpression=(
@@ -509,14 +500,26 @@ def _delete_package(package_name: str, version: str, caller: str, body: dict) ->
             Attr("status").is_in(["QUEUED", "IN_PROGRESS", "COMPLETED"])
         )
     ).get("Items", [])
+    active_job_ids = [j.get("jobId") for j in blocking_jobs]
+
+    # ── 3. Block ACTIVE packages (include activeJobs so callers see full state) ─
+    if status == "ACTIVE":
+        return _resp(409, {
+            "error": (
+                f"Package {package_name} v{version} is ACTIVE and cannot be deleted. "
+                "Recall or supersede it first."
+            ),
+            "activeJobs": active_job_ids,
+        })
+
+    # ── 4. Block if any jobs are QUEUED, IN_PROGRESS or COMPLETED ─────────────
     if blocking_jobs:
-        job_ids = [j.get("jobId") for j in blocking_jobs]
         return _resp(409, {
             "error": (
                 f"Cannot delete: {len(blocking_jobs)} job(s) for this package version are "
                 "in QUEUED, IN_PROGRESS, or COMPLETED state. Cancel or wait for them to finish."
             ),
-            "activeJobs": job_ids,
+            "activeJobs": active_job_ids,
         })
 
     # ── 4. Cooling-off for recently SUPERSEDED packages ───────────────────────
