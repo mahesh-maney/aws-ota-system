@@ -152,8 +152,30 @@ def lambda_handler(event, context):
         promote  = bool(body.get("promote",  False))
         restore  = bool(body.get("restore",  False))
 
-        if not recalled and not promote and not restore and "activated" not in body:
-            return _resp(400, {"error": "Missing required field: 'activated', 'recalled', 'promote', or 'restore'"})
+        # Direct publish/withdraw via `activated` is blocked — all package visibility
+        # is controlled through deployments (POST /deployments).
+        if "activated" in body:
+            return _resp(400, {
+                "error": (
+                    "Direct package activation is not allowed. "
+                    "Create a deployment via POST /api/v1/ota/deployments to make a package "
+                    "visible to devices, or abort the deployment to withdraw it."
+                )
+            })
+
+        # Direct recall is blocked — use deployment abort instead.
+        # Aborting a deployment removes the LATEST pointer so devices stop seeing the update.
+        if recalled:
+            return _resp(400, {
+                "error": (
+                    "Direct package recall is not allowed. "
+                    "Abort the associated deployment via POST /api/v1/ota/deployments/{id}/abort "
+                    "to stop devices from receiving this update."
+                )
+            })
+
+        if not promote and not restore:
+            return _resp(400, {"error": "Missing required field: 'promote' or 'restore'"})
 
         # ── Verify package exists ─────────────────────────────────────────────
         table = dynamo.Table(PACKAGES_TABLE)
@@ -166,94 +188,6 @@ def lambda_handler(event, context):
 
         now_ms = int(__import__("time").time() * 1000)
 
-        # ── RECALL ────────────────────────────────────────────────────────────
-        if recalled:
-            if item.get("status") not in ("ACTIVE",):
-                return _resp(409, {
-                    "error": f"Package {package_name} v{version} cannot be recalled "
-                             f"(current status={item.get('status')}). Only ACTIVE packages can be recalled."
-                })
-
-            # Block recall if an ACTIVE deployment exists for this package version.
-            # Admin must abort the deployment first.
-            from boto3.dynamodb.conditions import Attr as _Attr
-            dep_scan = dynamo.Table(DEPLOYMENTS_TABLE).scan(
-                FilterExpression=(
-                    _Attr("packageName").eq(package_name) &
-                    _Attr("version").eq(version) &
-                    _Attr("status").eq("ACTIVE")
-                ),
-                ProjectionExpression="deploymentId, rolloutStage",
-            )
-            active_deps = dep_scan.get("Items", [])
-            if active_deps:
-                dep_ids = [d.get("deploymentId") for d in active_deps]
-                return _resp(409, {
-                    "error": (
-                        f"Package {package_name} v{version} has {len(active_deps)} active deployment(s). "
-                        "Abort the deployment(s) before recalling the package."
-                    ),
-                    "activeDeployments": dep_ids,
-                })
-
-            recall_reason = str(body.get("recallReason", "")).strip()
-
-            # Mark package RECALLED
-            table.update_item(
-                Key={"packageName": package_name, "version": version},
-                UpdateExpression=(
-                    "SET #s = :s, activated = :a, "
-                    "recalledBy = :by, recalledAt = :ts, recallReason = :reason"
-                ),
-                ExpressionAttributeNames={"#s": "status"},
-                ExpressionAttributeValues={
-                    ":s":      "RECALLED",
-                    ":a":      False,
-                    ":by":     caller,
-                    ":ts":     now_ms,
-                    ":reason": recall_reason,
-                },
-            )
-
-            # Remove the LATEST pointer so check_updates stops offering this package
-            _delete_latest_pointer(table, package_name, item.get("releaseType", ""))
-
-            # Auto-cancel QUEUED deployments; collect IN_PROGRESS for warning
-            cancelled_jobs, in_progress_jobs = _cancel_queued_deployments(
-                package_name, version, caller, recall_reason, now_ms
-            )
-
-            log.info(json.dumps({
-                "msg": "package_recalled",
-                "packageName": package_name, "version": version,
-                "actor": caller, "recallReason": recall_reason,
-                "cancelledJobs": len(cancelled_jobs),
-                "inProgressJobs": len(in_progress_jobs),
-            }))
-            _audit("PACKAGE_RECALLED", caller,
-                   {"packageName": package_name, "version": version},
-                   "SUCCESS", recallReason=recall_reason, releaseType=item.get("releaseType"),
-                   cancelledDeployments=len(cancelled_jobs),
-                   inProgressDeployments=len(in_progress_jobs))
-
-            msg = f"Package {package_name} v{version} recalled. No longer visible to end users."
-            if cancelled_jobs:
-                msg += f" {len(cancelled_jobs)} queued deployment(s) automatically cancelled."
-            if in_progress_jobs:
-                msg += f" {len(in_progress_jobs)} in-progress deployment(s) require manual abort."
-
-            return _resp(200, {
-                "packageName":          package_name,
-                "version":              version,
-                "status":               "RECALLED",
-                "activated":            False,
-                "recalledBy":           caller,
-                "recallReason":         recall_reason,
-                "updatedBy":            caller,
-                "cancelledDeployments": cancelled_jobs,
-                "inProgressDeployments": in_progress_jobs,
-                "message":              msg,
-            })
 
         # ── PROMOTE (BETA → PROD) ─────────────────────────────────────────────
         if promote:
