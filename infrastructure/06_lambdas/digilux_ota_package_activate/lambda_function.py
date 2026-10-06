@@ -44,11 +44,12 @@ from botocore.exceptions import ClientError
 log = logging.getLogger()
 log.setLevel(logging.INFO)
 
-REGION          = os.environ["REGION"]
-PACKAGES_TABLE  = os.environ.get("PACKAGES_TABLE",  "digilux_ota_packages")
-ARTIFACT_BUCKET = os.environ.get("ARTIFACT_BUCKET", "digilux-ota-artifacts")
-OTA_JOBS_TABLE  = os.environ.get("OTA_JOBS_TABLE",  "digilux_ota_jobs")
-COOLING_OFF_DAYS = int(os.environ.get("COOLING_OFF_DAYS", "7"))
+REGION             = os.environ["REGION"]
+PACKAGES_TABLE     = os.environ.get("PACKAGES_TABLE",     "digilux_ota_packages")
+ARTIFACT_BUCKET    = os.environ.get("ARTIFACT_BUCKET",    "digilux-ota-artifacts")
+OTA_JOBS_TABLE     = os.environ.get("OTA_JOBS_TABLE",     "digilux_ota_jobs")
+DEPLOYMENTS_TABLE  = os.environ.get("DEPLOYMENTS_TABLE",  "digilux_ota_deployments")
+COOLING_OFF_DAYS   = int(os.environ.get("COOLING_OFF_DAYS", "7"))
 
 dynamo = boto3.resource("dynamodb", region_name=REGION)
 s3     = boto3.client("s3",  region_name=REGION)
@@ -170,6 +171,28 @@ def lambda_handler(event, context):
                 return _resp(409, {
                     "error": f"Package {package_name} v{version} cannot be recalled "
                              f"(current status={item.get('status')}). Only ACTIVE packages can be recalled."
+                })
+
+            # Block recall if an ACTIVE deployment exists for this package version.
+            # Admin must abort the deployment first.
+            from boto3.dynamodb.conditions import Attr as _Attr
+            dep_scan = dynamo.Table(DEPLOYMENTS_TABLE).scan(
+                FilterExpression=(
+                    _Attr("packageName").eq(package_name) &
+                    _Attr("version").eq(version) &
+                    _Attr("status").eq("ACTIVE")
+                ),
+                ProjectionExpression="deploymentId, rolloutStage",
+            )
+            active_deps = dep_scan.get("Items", [])
+            if active_deps:
+                dep_ids = [d.get("deploymentId") for d in active_deps]
+                return _resp(409, {
+                    "error": (
+                        f"Package {package_name} v{version} has {len(active_deps)} active deployment(s). "
+                        "Abort the deployment(s) before recalling the package."
+                    ),
+                    "activeDeployments": dep_ids,
                 })
 
             recall_reason = str(body.get("recallReason", "")).strip()
