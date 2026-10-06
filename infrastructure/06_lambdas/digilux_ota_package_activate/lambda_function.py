@@ -49,6 +49,7 @@ PACKAGES_TABLE     = os.environ.get("PACKAGES_TABLE",     "digilux_ota_packages"
 ARTIFACT_BUCKET    = os.environ.get("ARTIFACT_BUCKET",    "digilux-ota-artifacts")
 OTA_JOBS_TABLE     = os.environ.get("OTA_JOBS_TABLE",     "digilux_ota_jobs")
 DEPLOYMENTS_TABLE  = os.environ.get("DEPLOYMENTS_TABLE",  "digilux_ota_deployments")
+PRODUCTION_GROUP   = os.environ.get("PRODUCTION_GROUP",   "DGX-Gateways")
 COOLING_OFF_DAYS   = int(os.environ.get("COOLING_OFF_DAYS", "7"))
 
 dynamo = boto3.resource("dynamodb", region_name=REGION)
@@ -273,6 +274,35 @@ def lambda_handler(event, context):
                     )
                 })
 
+            # Block if a PRODUCTION deployment already exists for this package version
+            from boto3.dynamodb.conditions import Attr as _Attr2, Key as _Key2
+            dep_table = dynamo.Table(DEPLOYMENTS_TABLE)
+            existing_prod_dep = None
+            try:
+                dep_resp = dep_table.query(
+                    IndexName="packageName-status-index",
+                    KeyConditionExpression=(
+                        _Key2("packageName").eq(package_name) & _Key2("status").eq("ACTIVE")
+                    ),
+                    FilterExpression=_Attr2("rolloutStage").eq("PRODUCTION"),
+                )
+                prod_deps = dep_resp.get("Items", [])
+                existing_prod_dep = prod_deps[0] if prod_deps else None
+            except Exception as dep_err:
+                log.warning(f"Could not check existing PRODUCTION deployment: {dep_err}")
+
+            if existing_prod_dep:
+                return _resp(409, {
+                    "error": (
+                        f"An active PRODUCTION deployment already exists for {package_name} "
+                        f"(v{existing_prod_dep.get('version')}, "
+                        f"id={existing_prod_dep.get('deploymentId')}). "
+                        "Abort it first before promoting."
+                    ),
+                    "activeDeploymentId": existing_prod_dep.get("deploymentId"),
+                    "activeVersion":      existing_prod_dep.get("version"),
+                })
+
             table.update_item(
                 Key={"packageName": package_name, "version": version},
                 UpdateExpression="SET releaseType = :rt, promotedBy = :by, promotedAt = :ts",
@@ -286,22 +316,58 @@ def lambda_handler(event, context):
             _write_latest_pointer(table, package_name, "PROD", item, now_ms)
             _delete_latest_pointer(table, package_name, "BETA")
 
+            # Auto-create a PRODUCTION deployment record so it appears in the
+            # deployments list and devices are offered the update via check_updates.
+            import uuid as _uuid
+            deployment_id = f"digilux-ota-{package_name}-{version}-{int(__import__('time').time())}".replace(".", "-")
+            deployment_item = {
+                "deploymentId": deployment_id,
+                "packageName":  package_name,
+                "version":      version,
+                "deviceType":   item.get("deviceType", ""),
+                "releaseNotes": item.get("releaseNotes", ""),
+                "rolloutStage": "PRODUCTION",
+                "targetType":   "THING_GROUP",
+                "targetGroup":  PRODUCTION_GROUP,
+                "status":       "ACTIVE",
+                "createdAt":    now_ms,
+                "createdBy":    caller,
+                "promotedFrom": "BETA",
+                "counters": {"accepted": 0, "succeeded": 0, "cancelled": 0, "failed": 0},
+            }
+            try:
+                dep_table.put_item(Item=deployment_item)
+                log.info(json.dumps({
+                    "msg": "auto_deployment_created_on_promote",
+                    "deploymentId": deployment_id, "packageName": package_name,
+                    "version": version, "targetGroup": PRODUCTION_GROUP,
+                }))
+            except Exception as dep_err:
+                log.error(f"Failed to create deployment record on promote: {dep_err}")
+                # Non-fatal — package is promoted, pointer is written; deployment record
+                # can be created manually via POST /deployments if needed.
+                deployment_id = None
+
             log.info(json.dumps({
                 "msg": "package_promoted", "packageName": package_name,
                 "version": version, "actor": caller,
             }))
             _audit("PACKAGE_PROMOTED", caller,
                    {"packageName": package_name, "version": version},
-                   "SUCCESS", fromReleaseType="BETA", toReleaseType="PROD")
+                   "SUCCESS", fromReleaseType="BETA", toReleaseType="PROD",
+                   deploymentId=deployment_id, targetGroup=PRODUCTION_GROUP)
 
             return _resp(200, {
-                "packageName": package_name,
-                "version":     version,
-                "releaseType": "PROD",
-                "status":      "ACTIVE",
-                "promotedBy":  caller,
-                "message":     (
+                "packageName":  package_name,
+                "version":      version,
+                "releaseType":  "PROD",
+                "status":       "ACTIVE",
+                "promotedBy":   caller,
+                "deploymentId": deployment_id,
+                "targetGroup":  PRODUCTION_GROUP,
+                "message":      (
                     f"Package {package_name} v{version} promoted from BETA to PROD. "
+                    f"PRODUCTION deployment created targeting {PRODUCTION_GROUP}. "
                     "Lower PROD versions have been superseded."
                 ),
             })

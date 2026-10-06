@@ -798,29 +798,38 @@ def lambda_handler(event, context):
                  group=PRODUCTION_GROUP,
                  detail="PRODUCTION deployments always target DGX-Production — no device list needed at deploy time")
 
-        # ── Supersede existing active deployment for same package+stage ───────
-        now_ms         = int(time.time() * 1000)
-        deployment_id  = f"digilux-ota-{pkg_name}-{version}-{int(time.time())}".replace(".", "-")
+        # ── Block if an active deployment already exists for this package+stage ─
+        # Admin must abort the existing deployment before creating a new one.
+        now_ms        = int(time.time() * 1000)
+        deployment_id = f"digilux-ota-{pkg_name}-{version}-{int(time.time())}".replace(".", "-")
 
         existing_dep = _find_active_deployment(pkg_name, rollout_stage)
 
         if existing_dep:
-            existing_dep_id = existing_dep["deploymentId"]
-            if existing_dep_id == deployment_id:
-                # Extremely unlikely collision — add suffix
-                deployment_id = deployment_id + "-1"
+            existing_dep_id  = existing_dep["deploymentId"]
+            existing_version = existing_dep.get("version", "")
+            _log("warning", "active_deployment_exists",
+                 packageName=pkg_name, rolloutStage=rollout_stage,
+                 existingDeploymentId=existing_dep_id,
+                 existingVersion=existing_version, caller=caller)
+            _audit("DEPLOYMENT_BLOCKED", caller,
+                   {"packageName": pkg_name, "version": version},
+                   "FAILURE",
+                   reason="active_deployment_exists",
+                   existingDeploymentId=existing_dep_id,
+                   rolloutStage=rollout_stage)
+            return _response(409, {
+                "error": (
+                    f"An active {rollout_stage} deployment already exists for {pkg_name} "
+                    f"(v{existing_version}, id={existing_dep_id}). "
+                    "Abort it first before creating a new deployment."
+                ),
+                "activeDeploymentId": existing_dep_id,
+                "activeVersion":      existing_version,
+            })
 
-            _log("info", "superseding_existing_deployment",
-                 oldDeploymentId=existing_dep_id,
-                 oldVersion=existing_dep.get("version"),
-                 newDeploymentId=deployment_id, newVersion=version,
-                 rolloutStage=rollout_stage, caller=caller,
-                 detail="Old deployment CANCELLED; consent records untouched per architecture")
-
-            _supersede_deployment(existing_dep, deployment_id, caller, now_ms)
-        else:
-            _log("info", "no_existing_active_deployment_to_supersede",
-                 packageName=pkg_name, rolloutStage=rollout_stage)
+        _log("info", "no_existing_active_deployment",
+             packageName=pkg_name, rolloutStage=rollout_stage)
 
         # ── Write deployment record (ACTIVE) ───────────────────────────────────
         deployment_item = {
@@ -879,14 +888,11 @@ def lambda_handler(event, context):
                targetGroup=target_group or None,
                deviceCount=len(devices),
                deviceType=pkg.get("deviceType", ""),
-               supersededPrevious=existing_dep is not None,
-               supersededDeploymentId=existing_dep.get("deploymentId") if existing_dep else None)
+               )
 
         target_id_response = target_group or ",".join(target_ids)
 
         msg = f"Deployment created. Devices in {target_id_response} will be offered this update."
-        if existing_dep:
-            msg += f" Previous {rollout_stage} deployment superseded."
 
         return _response(201, {
             "jobId":        deployment_id,     # backward compat for UI
