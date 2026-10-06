@@ -540,17 +540,28 @@ def _delete_package(package_name: str, version: str, caller: str, body: dict) ->
                     "coolingOffDays":    COOLING_OFF_DAYS,
                 })
 
-    # ── 5. Delete S3 artifact ─────────────────────────────────────────────────
-    s3_key    = item.get("s3Key")
-    s3_bucket = item.get("s3Bucket", ARTIFACT_BUCKET)
+    # ── 5. Delete S3 artifacts (raw upload + encrypted artifact + signature) ───
+    s3_bucket  = item.get("s3Bucket", ARTIFACT_BUCKET)
     s3_deleted = False
-    if s3_key:
+
+    # Delete all three S3 keys associated with this package version:
+    # - s3Key:    original raw upload (Network_controller_firmware/.../filename)
+    # - encS3Key: AES-256-GCM encrypted artifact (enc/<uuid>.enc)
+    # - sigS3Key: ECDSA signature file (sig/<uuid>.sig)
+    s3_keys_to_delete = [
+        ("s3Key",    item.get("s3Key")),
+        ("encS3Key", item.get("encS3Key")),
+        ("sigS3Key", item.get("sigS3Key")),
+    ]
+    for field, s3_key in s3_keys_to_delete:
+        if not s3_key:
+            continue
         try:
             s3.delete_object(Bucket=s3_bucket, Key=s3_key)
             s3_deleted = True
-            log.info(f"Deleted S3 artifact: s3://{s3_bucket}/{s3_key}")
+            log.info(f"Deleted S3 object ({field}): s3://{s3_bucket}/{s3_key}")
         except ClientError as e:
-            log.warning(f"Could not delete S3 artifact s3://{s3_bucket}/{s3_key}: {e}")
+            log.warning(f"Could not delete S3 object ({field}) s3://{s3_bucket}/{s3_key}: {e}")
 
     now_ms = int(_time.time() * 1000)
 

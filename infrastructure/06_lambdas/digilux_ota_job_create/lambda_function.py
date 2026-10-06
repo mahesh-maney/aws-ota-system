@@ -65,7 +65,7 @@ OTA_JOBS_TABLE     = os.environ.get("OTA_JOBS_TABLE",     "digilux_ota_jobs")
 CONSENTS_TABLE     = os.environ.get("CONSENTS_TABLE",     "digilux_ota_user_consents")
 BETA_USERS_TABLE   = os.environ.get("BETA_USERS_TABLE",   "digilux_ota_beta_users")
 DEPLOYMENTS_TABLE  = os.environ.get("DEPLOYMENTS_TABLE",  "digilux_ota_deployments")
-PRODUCTION_GROUP   = os.environ.get("PRODUCTION_GROUP",   "DGX-Production")
+PRODUCTION_GROUP   = os.environ.get("PRODUCTION_GROUP",   "DGX-Gateways")
 
 # GSI names
 DEPLOYMENTS_PKG_STATUS_INDEX = os.environ.get("DEPLOYMENTS_PKG_STATUS_INDEX", "packageName-status-index")
