@@ -428,8 +428,8 @@ def _process_artifact(bucket: str, s3_key: str, obj_size: int) -> None:
          packageName=pkg_name, version=version, kmsMs=wrap_ms)
 
     # ── 8. Upload encrypted artifact + signature file to S3 ───────────────────
-    enc_key = _enc_s3_key(s3_key)
-    sig_key = _sig_s3_key(s3_key)
+    enc_key = _enc_s3_key(s3_key, device_type)
+    sig_key = _sig_s3_key(s3_key, device_type)
 
     _log("info", "s3_upload_start",
          packageName=pkg_name, version=version,
@@ -643,13 +643,15 @@ def _download_artifact(bucket: str, s3_key: str) -> bytes:
     return data
 
 
-def _enc_s3_key(s3_key: str) -> str:
-    # Opaque UUID path — no package info leaked in presigned URLs
-    return f"enc/{uuid.uuid4()}.enc"
+def _enc_s3_key(s3_key: str, device_type: str = "") -> str:
+    # Device-type prefix for folder organisation; UUID keeps package/version opaque
+    prefix = device_type if device_type else "unknown"
+    return f"{prefix}/enc/{uuid.uuid4()}.enc"
 
 
-def _sig_s3_key(s3_key: str) -> str:
-    return f"sig/{uuid.uuid4()}.sig"
+def _sig_s3_key(s3_key: str, device_type: str = "") -> str:
+    prefix = device_type if device_type else "unknown"
+    return f"{prefix}/sig/{uuid.uuid4()}.sig"
 
 
 VALID_FILE_TYPES = {1, 2, 3, 4, 5, 6, 7, 8}
