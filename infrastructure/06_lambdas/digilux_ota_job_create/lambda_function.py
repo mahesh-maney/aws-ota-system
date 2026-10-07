@@ -730,6 +730,16 @@ def lambda_handler(event, context):
                  packageName=pkg_name, version=version, caller=caller)
             return _response(404, {"error": f"Package {pkg_name}@{version} not found"})
 
+        if pkg.get("status") == "RECALLED":
+            _log("warning", "package_recalled_cannot_deploy",
+                 packageName=pkg_name, version=version, caller=caller)
+            return _response(400, {
+                "error": (
+                    f"Package {pkg_name}@{version} has been recalled and cannot be deployed. "
+                    "Upload a new version to continue."
+                )
+            })
+
         if pkg.get("status") != "ACTIVE":
             _log("warning", "package_not_active",
                  packageName=pkg_name, version=version,

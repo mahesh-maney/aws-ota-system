@@ -163,15 +163,100 @@ def lambda_handler(event, context):
                 )
             })
 
-        # Direct recall is blocked — use deployment abort instead.
-        # Aborting a deployment removes the LATEST pointer so devices stop seeing the update.
+        # ── RECALL ───────────────────────────────────────────────────────────
         if recalled:
-            return _resp(400, {
-                "error": (
-                    "Direct package recall is not allowed. "
-                    "Abort the associated deployment via POST /api/v1/ota/deployments/{id}/abort "
-                    "to stop devices from receiving this update."
+            recall_reason = str(body.get("recallReason", "")).strip()
+            if not recall_reason:
+                return _resp(400, {"error": "recallReason is required when recalling a package."})
+
+            if item.get("status") != "ACTIVE":
+                return _resp(409, {
+                    "error": (
+                        f"Only ACTIVE packages can be recalled "
+                        f"(current status={item.get('status')})"
+                    )
+                })
+
+            # Block if an active deployment exists — admin must abort it first
+            from boto3.dynamodb.conditions import Key as _RK, Attr as _RA
+            dep_table = dynamo.Table(DEPLOYMENTS_TABLE)
+            active_deps = []
+            try:
+                dep_resp = dep_table.query(
+                    IndexName="packageName-status-index",
+                    KeyConditionExpression=(
+                        _RK("packageName").eq(package_name) & _RK("status").eq("ACTIVE")
+                    ),
                 )
+                active_deps = [
+                    d for d in dep_resp.get("Items", [])
+                    if d.get("version") == version
+                ]
+            except Exception as dep_err:
+                log.warning(f"Could not check active deployments for recall: {dep_err}")
+
+            if active_deps:
+                dep = active_deps[0]
+                return _resp(409, {
+                    "error": (
+                        f"Package {package_name} v{version} has an active deployment "
+                        f"(id={dep.get('deploymentId')}, stage={dep.get('rolloutStage')}). "
+                        "Abort the deployment first, then recall the package."
+                    ),
+                    "activeDeploymentId": dep.get("deploymentId"),
+                    "rolloutStage":       dep.get("rolloutStage"),
+                })
+
+            # Mark RECALLED
+            table.update_item(
+                Key={"packageName": package_name, "version": version},
+                UpdateExpression=(
+                    "SET #s = :recalled, recalledBy = :by, recalledAt = :ts, recallReason = :r"
+                ),
+                ExpressionAttributeNames={"#s": "status"},
+                ExpressionAttributeValues={
+                    ":recalled": "RECALLED",
+                    ":by":       caller,
+                    ":ts":       now_ms,
+                    ":r":        recall_reason,
+                },
+            )
+
+            # Remove LATEST pointer so devices stop being offered this version immediately
+            _delete_latest_pointer(table, package_name, item.get("releaseType", ""))
+
+            # Cancel any QUEUED IoT jobs for this package version
+            cancelled_jobs, in_progress_jobs = _cancel_queued_deployments(
+                package_name, version, caller, recall_reason, now_ms
+            )
+
+            log.info(json.dumps({
+                "msg": "package_recalled", "packageName": package_name,
+                "version": version, "actor": caller, "reason": recall_reason,
+                "cancelledJobs": cancelled_jobs, "inProgressJobs": in_progress_jobs,
+            }))
+            _audit("PACKAGE_RECALLED", caller,
+                   {"packageName": package_name, "version": version},
+                   "SUCCESS",
+                   recallReason=recall_reason,
+                   releaseType=item.get("releaseType"),
+                   cancelledJobs=cancelled_jobs,
+                   inProgressJobsWarning=in_progress_jobs or None)
+
+            return _resp(200, {
+                "packageName":           package_name,
+                "version":               version,
+                "status":                "RECALLED",
+                "recalledBy":            caller,
+                "recallReason":          recall_reason,
+                "cancelledDeployments":  cancelled_jobs,
+                "inProgressDeployments": in_progress_jobs,
+                "message": (
+                    f"Package {package_name} v{version} recalled. "
+                    + (f"{len(cancelled_jobs)} queued job(s) cancelled. " if cancelled_jobs else "")
+                    + (f"⚠ {len(in_progress_jobs)} job(s) still in progress — abort them manually."
+                       if in_progress_jobs else "")
+                ),
             })
 
         if not promote and not restore:
