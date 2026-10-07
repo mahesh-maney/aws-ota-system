@@ -327,6 +327,23 @@ _section "T08 — DEPLOYMENT CREATION"
 TEST_VERSION=$(grep TEST_VERSION /tmp/ota_test_version.txt | cut -d= -f2)
 TEST_PKG_NAME=$(grep TEST_PKG_NAME /tmp/ota_test_version.txt | cut -d= -f2)
 
+# Pre-cleanup: abort any leftover ACTIVE BETA deployment for this package (previous test run)
+T08_EXISTING_DEP=$(python3.9 -W ignore -c "
+import boto3, sys
+from boto3.dynamodb.conditions import Key, Attr
+tbl = boto3.resource('dynamodb', region_name='ap-south-1').Table('digilux_ota_deployments')
+resp = tbl.query(IndexName='packageName-status-index',
+    KeyConditionExpression=Key('packageName').eq(sys.argv[1]) & Key('status').eq('ACTIVE'),
+    FilterExpression=Attr('rolloutStage').eq('BETA'))
+items = resp.get('Items', [])
+print(items[0]['deploymentId'] if items else '')
+" "$TEST_PKG_NAME" 2>/dev/null || true)
+if [ -n "$T08_EXISTING_DEP" ] && [ "$T08_EXISTING_DEP" != "None" ]; then
+  curl -s -X POST "${BASE}/api/v1/ota/deployments/${T08_EXISTING_DEP}/abort" \
+    -H "Authorization: ${TOKEN}" -H "Content-Type: application/json" \
+    -d '{"reason":"T08 pre-run cleanup - aborting leftover deployment"}' > /dev/null
+fi
+
 # Single call — capture body and HTTP status code together to avoid duplicate job creation
 # BETA rolloutStage requires targetIds array (explicit device list)
 DEPLOY_RESP=$(curl -s -w "\n%{http_code}" -X POST "${BASE}/api/v1/ota/deployments" \
@@ -474,8 +491,8 @@ if [ "$IOT_JOB_ID" != "NOJOB" ]; then
 
   # Re-deploy same package+version — must abort existing ACTIVE deployment first (Issue 5)
   # Abort existing BETA deployment, then re-deploy should succeed with 201
-  T10_REDEPLOY_ABORT=$(curl -s -X POST "${BASE_URL}/api/v1/ota/deployments/${JOB_ID}/abort" \
-    -H "Authorization: Bearer ${ADMIN_TOKEN}" \
+  T10_REDEPLOY_ABORT=$(curl -s -X POST "${BASE}/api/v1/ota/deployments/${JOB_ID}/abort" \
+    -H "Authorization: ${TOKEN}" \
     -H "Content-Type: application/json" \
     -d "{\"reason\":\"T10 re-deploy test — abort existing deployment\"}")
   code=$(http_code POST "/api/v1/ota/deployments" \
