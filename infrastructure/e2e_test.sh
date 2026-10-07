@@ -253,10 +253,10 @@ SIG_KEY=$(echo "$PKG_ITEM"  | python3 -c "import json,sys; print(json.load(sys.s
 echo "$ENC_KEY" | python3 -c "
 import sys, re
 key = sys.stdin.read().strip()
-pat = r'^enc/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.enc$'
+pat = r'^[^/]+/enc/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.enc$'
 sys.exit(0 if re.match(pat, key) else 1)
 " 2>/dev/null \
-  && _pass "encS3Key is opaque UUID format (enc/<uuid>.enc)" \
+  && _pass "encS3Key is opaque UUID format ({deviceType}/enc/<uuid>.enc)" \
   || _fail "encS3Key is NOT in UUID format — URL masking may be broken: $ENC_KEY"
 
 # (+) sigS3Key stored and follows opaque UUID format sig/<uuid>.sig
@@ -267,17 +267,17 @@ sys.exit(0 if re.match(pat, key) else 1)
 echo "$SIG_KEY" | python3 -c "
 import sys, re
 key = sys.stdin.read().strip()
-pat = r'^sig/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.sig$'
+pat = r'^[^/]+/sig/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.sig$'
 sys.exit(0 if re.match(pat, key) else 1)
 " 2>/dev/null \
-  && _pass "sigS3Key is opaque UUID format (sig/<uuid>.sig)" \
+  && _pass "sigS3Key is opaque UUID format ({deviceType}/sig/<uuid>.sig)" \
   || _fail "sigS3Key is NOT in UUID format: $SIG_KEY"
 
 # (-) encS3Key must NOT leak package name, version, or device type
 echo "$ENC_KEY" | python3 -c "
 import sys
 key = sys.stdin.read().strip().lower()
-leaks = ['homeassistantutility', 'network_controller', '${TEST_PKG_NAME}'.lower(), '${TEST_VERSION}'.lower()]
+leaks = ['homeassistantutility', '${TEST_PKG_NAME}'.lower(), '${TEST_VERSION}'.lower()]
 found = [l for l in leaks if l in key]
 sys.exit(1 if found else 0)
 " 2>/dev/null \
@@ -472,11 +472,15 @@ if [ "$IOT_JOB_ID" != "NOJOB" ]; then
     && _pass "pendingJobId cleared after SUCCEEDED" \
     || _warn "pendingJobId not cleared: $PENDING"
 
-  # Re-deploy same package+version — admin can always create consent-gated deployment (201)
-  # Version guard lives in user_consent (user side), not job_create (admin side)
+  # Re-deploy same package+version — must abort existing ACTIVE deployment first (Issue 5)
+  # Abort existing BETA deployment, then re-deploy should succeed with 201
+  T10_REDEPLOY_ABORT=$(curl -s -X POST "${BASE_URL}/api/v1/ota/deployments/${JOB_ID}/abort" \
+    -H "Authorization: Bearer ${ADMIN_TOKEN}" \
+    -H "Content-Type: application/json" \
+    -d "{\"reason\":\"T10 re-deploy test — abort existing deployment\"}")
   code=$(http_code POST "/api/v1/ota/deployments" \
     "{\"packageName\":\"${TEST_PKG_NAME}\",\"version\":\"${TEST_VERSION}\",\"rolloutStage\":\"BETA\",\"targetIds\":[\"${DEVICE_ID}\"]}")
-  assert_code "$code" "201" "Re-deploy same version → 201 (admin creates deployment regardless of installed version)"
+  assert_code "$code" "201" "Re-deploy same version → 201 (after aborting existing deployment)"
 else
   _warn "Skipping status handler tests — no IoT job ID"
 fi
