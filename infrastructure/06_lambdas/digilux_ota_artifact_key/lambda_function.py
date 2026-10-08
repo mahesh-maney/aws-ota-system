@@ -11,11 +11,11 @@ Supports two invocation paths:
     FROM 'digilux/ota/+/key-delivery/request'
 
   Device publishes:
-    Topic:   ota/things/{thingName}/handshake/request
+    Topic:   iot/device/{thingName}/ota/handshake/request
     Payload: { "jobId": "digilux-ota-..." }
 
   Lambda publishes response to:
-    Topic:   ota/things/{thingName}/handshake/response
+    Topic:   iot/device/{thingName}/ota/handshake/response
     Payload: { "jobId": "...", "dataKey": "<base64>", "iv": "<base64>" }
              or { "error": "..." } on failure
 
@@ -63,7 +63,7 @@ MAX_REQUESTS_PER_JOB = int(os.environ.get("MAX_REQUESTS_PER_JOB", "5"))
 RATE_WINDOW_HOURS    = int(os.environ.get("RATE_WINDOW_HOURS",    "24"))
 
 # MQTT topic pattern — IoT Rule triggers on the request topic
-MQTT_RESPONSE_TOPIC = "ota/things/{thingName}/handshake/response"
+MQTT_RESPONSE_TOPIC = "iot/device/{thingName}/ota/handshake/response"
 
 ACTOR = "artifact_key"
 
