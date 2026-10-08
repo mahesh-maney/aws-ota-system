@@ -143,27 +143,27 @@ def _check_rate_limit(job_id: str, thing_name: str) -> tuple[bool, int]:
     Returns (is_limited, current_count).
     Reads the rate-limit record from digilux_ota_key_requests.
     """
-    pk = f"{job_id}#{thing_name}"
+    request_id = f"{job_id}#{thing_name}"
     try:
-        resp = dynamo.Table(KEY_REQUESTS_TABLE).get_item(Key={"pk": pk})
+        resp = dynamo.Table(KEY_REQUESTS_TABLE).get_item(Key={"requestId": request_id})
         item = resp.get("Item")
         if not item:
             return False, 0
         count = int(item.get("requestCount", 0))
         return count >= MAX_REQUESTS_PER_JOB, count
     except Exception as e:
-        _log("warning", "rate_limit_check_failed", pk=pk, error=str(e))
+        _log("warning", "rate_limit_check_failed", requestId=request_id, error=str(e))
         # Fail open — don't block legitimate devices due to rate limit table issues
         return False, 0
 
 
 def _increment_rate_limit(job_id: str, thing_name: str) -> None:
     """Atomically increment the request count. TTL = now + RATE_WINDOW_HOURS."""
-    pk    = f"{job_id}#{thing_name}"
-    ttl   = int(time.time()) + RATE_WINDOW_HOURS * 3600
+    request_id = f"{job_id}#{thing_name}"
+    ttl        = int(time.time()) + RATE_WINDOW_HOURS * 3600
     try:
         dynamo.Table(KEY_REQUESTS_TABLE).update_item(
-            Key={"pk": pk},
+            Key={"requestId": request_id},
             UpdateExpression=(
                 "SET requestCount = if_not_exists(requestCount, :zero) + :one, "
                 "#ttl = :ttl, jobId = :jid, thingName = :tn, lastRequestAt = :ts"
@@ -179,7 +179,7 @@ def _increment_rate_limit(job_id: str, thing_name: str) -> None:
             },
         )
     except Exception as e:
-        _log("warning", "rate_limit_increment_failed", pk=pk, error=str(e))
+        _log("warning", "rate_limit_increment_failed", requestId=request_id, error=str(e))
 
 
 def _get_job(job_id: str) -> dict | None:
