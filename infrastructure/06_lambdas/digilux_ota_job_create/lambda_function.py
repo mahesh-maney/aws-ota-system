@@ -195,16 +195,16 @@ def _supersede_deployment(existing_dep: dict, new_dep_id: str,
         # Clean up pointers so devices stop being offered the old version.
         # The new deployment's create flow writes fresh pointers immediately after.
         old_stage = existing_dep.get("rolloutStage", "")
-        if old_stage == "CUSTOM":
+        if old_stage in ("CUSTOM", "BETA"):
             old_target_ids = existing_dep.get("targetIds") or []
             if old_target_ids:
-                _delete_custom_pointers(
-                    existing_dep["packageName"], old_target_ids, old_dep_id
+                _delete_device_pointers(
+                    existing_dep["packageName"], old_target_ids, old_dep_id, old_stage
                 )
-                _log("info", "custom_pointers_cleaned_on_supersede",
-                     oldDeploymentId=old_dep_id,
+                _log("info", "device_pointers_cleaned_on_supersede",
+                     oldDeploymentId=old_dep_id, rolloutStage=old_stage,
                      deviceCount=len(old_target_ids))
-        elif old_stage in _STAGE_POINTER_KEY:
+        if old_stage in _STAGE_POINTER_KEY:
             # For PROD/BETA supersede: the new deployment's _write_stage_pointer
             # will overwrite the pointer atomically, so this is a no-op in practice.
             # Called here for safety in case of partial failures.
@@ -288,25 +288,31 @@ def _resolve_device_list(device_ids: list[str], rollout_stage: str,
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# CUSTOM deployment pointer helpers
+# Per-device deployment pointer helpers
 # ──────────────────────────────────────────────────────────────────────────────
-# CUSTOM deployments target specific device IDs. To make them visible to
-# check_updates (which does in-memory pointer lookups), we write a per-device
-# pointer item keyed as LATEST#CUSTOM#{deviceId} in the packages table.
-# Priority in check_updates: CUSTOM > BETA > PROD.
+# CUSTOM and BETA deployments target specific device IDs. To make them visible
+# to check_updates (which does in-memory pointer lookups), we write a per-device
+# pointer item in the packages table keyed by stage:
+#   CUSTOM → LATEST#CUSTOM#{deviceId}
+#   BETA   → LATEST#BETA#{deviceId}
+#
+# Priority in check_updates: CUSTOM > BETA(targeted) > BETA(broadcast) > PROD.
+# Using distinct keys per stage ensures priority is preserved when a device is
+# included in deployments from multiple stages simultaneously.
 
-def _write_custom_pointers(pkg_name: str, version: str, pkg: dict,
-                            target_ids: list[str], deployment_id: str) -> None:
-    """Write LATEST#CUSTOM#{deviceId} pointer for each target device."""
+def _write_device_pointers(pkg_name: str, version: str, pkg: dict,
+                            target_ids: list[str], deployment_id: str,
+                            rollout_stage: str) -> None:
+    """Write LATEST#{stage}#{deviceId} pointer for each target device."""
     tbl = dynamo.Table(PACKAGES_TABLE)
     for device_id in target_ids:
-        pointer_key = f"LATEST#CUSTOM#{device_id}"
+        pointer_key = f"LATEST#{rollout_stage}#{device_id}"
         try:
             tbl.put_item(Item={
                 "packageName":      pkg_name,
                 "version":          pointer_key,
                 "targetVersion":    version,
-                "releaseType":      "CUSTOM",
+                "releaseType":      rollout_stage,
                 "releaseNotes":     pkg.get("releaseNotes", ""),
                 "fileName":         pkg.get("fileName", ""),
                 "firmwareCategory": pkg.get("firmwareCategory"),
@@ -314,28 +320,29 @@ def _write_custom_pointers(pkg_name: str, version: str, pkg: dict,
                 "deploymentId":     deployment_id,
                 "deviceId":         device_id,
             })
-            _log("debug", "custom_pointer_written",
-                 packageName=pkg_name, deviceId=device_id,
+            _log("debug", "device_pointer_written",
+                 packageName=pkg_name, deviceId=device_id, rolloutStage=rollout_stage,
                  targetVersion=version, deploymentId=deployment_id)
         except Exception as e:
-            _log("warning", "custom_pointer_write_failed",
-                 packageName=pkg_name, deviceId=device_id,
+            _log("warning", "device_pointer_write_failed",
+                 packageName=pkg_name, deviceId=device_id, rolloutStage=rollout_stage,
                  deploymentId=deployment_id, error=str(e))
 
 
-def _delete_custom_pointers(pkg_name: str, target_ids: list[str],
-                             deployment_id: str) -> None:
-    """Delete LATEST#CUSTOM#{deviceId} pointers for a superseded or aborted CUSTOM deployment."""
+def _delete_device_pointers(pkg_name: str, target_ids: list[str],
+                             deployment_id: str, rollout_stage: str) -> None:
+    """Delete LATEST#{stage}#{deviceId} pointers for a superseded or aborted deployment."""
     tbl = dynamo.Table(PACKAGES_TABLE)
     for device_id in target_ids:
-        pointer_key = f"LATEST#CUSTOM#{device_id}"
+        pointer_key = f"LATEST#{rollout_stage}#{device_id}"
         try:
             tbl.delete_item(Key={"packageName": pkg_name, "version": pointer_key})
-            _log("debug", "custom_pointer_deleted",
-                 packageName=pkg_name, deviceId=device_id, deploymentId=deployment_id)
+            _log("debug", "device_pointer_deleted",
+                 packageName=pkg_name, deviceId=device_id, rolloutStage=rollout_stage,
+                 deploymentId=deployment_id)
         except Exception as e:
-            _log("warning", "custom_pointer_delete_failed",
-                 packageName=pkg_name, deviceId=device_id,
+            _log("warning", "device_pointer_delete_failed",
+                 packageName=pkg_name, deviceId=device_id, rolloutStage=rollout_stage,
                  deploymentId=deployment_id, error=str(e))
 
 
@@ -623,16 +630,16 @@ def _abort_job(deployment_id: str, claims: dict, body: dict) -> dict:
 
         # Clean up pointers so devices immediately stop being offered this update.
         abort_stage = item.get("rolloutStage", "")
-        if abort_stage == "CUSTOM":
+        if abort_stage in ("CUSTOM", "BETA"):
             abort_target_ids = item.get("targetIds") or []
             if abort_target_ids:
-                _delete_custom_pointers(
-                    item["packageName"], abort_target_ids, deployment_id
+                _delete_device_pointers(
+                    item["packageName"], abort_target_ids, deployment_id, abort_stage
                 )
-                _log("info", "custom_pointers_cleaned_on_abort",
-                     deploymentId=deployment_id,
+                _log("info", "device_pointers_cleaned_on_abort",
+                     deploymentId=deployment_id, rolloutStage=abort_stage,
                      deviceCount=len(abort_target_ids))
-        elif abort_stage in _STAGE_POINTER_KEY:
+        if abort_stage in _STAGE_POINTER_KEY:
             _delete_stage_pointer(item["packageName"], abort_stage, deployment_id)
             _log("info", "stage_pointer_cleaned_on_abort",
                  deploymentId=deployment_id, rolloutStage=abort_stage)
@@ -877,12 +884,16 @@ def lambda_handler(event, context):
              targetType=target_type,
              detail="Deployment is ACTIVE — no IoT Job at deployment level")
 
-        # Write per-device CUSTOM pointers so check_updates can serve this
-        # deployment with highest priority (CUSTOM > BETA > PROD).
-        if rollout_stage == "CUSTOM" and target_ids:
-            _write_custom_pointers(pkg_name, version, pkg, target_ids, deployment_id)
-            _log("info", "custom_pointers_written",
-                 deploymentId=deployment_id, deviceCount=len(target_ids))
+        # Write per-device pointers so check_updates can serve targeted deployments
+        # with the correct priority (CUSTOM > BETA-targeted > BETA-broadcast > PROD).
+        # Each stage writes to its own key (LATEST#CUSTOM#{id} or LATEST#BETA#{id})
+        # so priority is preserved when a device is in multiple stages at once.
+        if rollout_stage in ("CUSTOM", "BETA") and target_ids:
+            _write_device_pointers(pkg_name, version, pkg, target_ids, deployment_id,
+                                   rollout_stage)
+            _log("info", "device_pointers_written",
+                 deploymentId=deployment_id, rolloutStage=rollout_stage,
+                 deviceCount=len(target_ids))
 
         # Write LATEST#PROD or LATEST#BETA pointer so check_updates can serve
         # this update to all eligible devices without a per-device DB query.

@@ -502,12 +502,21 @@ def lambda_handler(event, context):
                  targetVersion=ptr.get("targetVersion") if ptr else None,
                  releaseType=ptr.get("releaseType") if ptr else None)
 
-        # ── Pre-fetch CUSTOM pointers (per deviceId × packageName) ────────────
-        # CUSTOM deployments write LATEST#CUSTOM#{deviceId} pointer items into
-        # the packages table. We look them up here so the device loop stays
-        # in-memory. The entitlement fields are already embedded in the pointer
-        # item at write time so no extra GetItem is needed.
-        custom_cache: dict = {}  # key: (deviceId, packageName)
+        # ── Pre-fetch per-device pointers (CUSTOM and BETA-targeted) ────────────
+        # CUSTOM and BETA deployments with DEVICE_LIST write stage-specific
+        # per-device pointer items into the packages table:
+        #   CUSTOM → LATEST#CUSTOM#{deviceId}
+        #   BETA   → LATEST#BETA#{deviceId}
+        #
+        # Priority in the device loop:
+        #   CUSTOM-targeted > BETA-targeted > BETA-broadcast > PROD
+        #
+        # Using separate caches (and distinct DynamoDB keys) ensures that a
+        # device enrolled in both a CUSTOM and a BETA deployment at the same
+        # time always receives the CUSTOM version, not whichever was written
+        # last.
+        custom_cache: dict = {}       # key: (deviceId, packageName)
+        beta_device_cache: dict = {}  # key: (deviceId, packageName)
         for did in unique_device_ids:
             for pname in unique_pkg_names:
                 try:
@@ -523,9 +532,25 @@ def lambda_handler(event, context):
                     _log("warning", "custom_pointer_fetch_failed",
                          deviceId=did, packageName=pname, error=str(e))
 
+                try:
+                    b_ptr = tbl.get_item(
+                        Key={"packageName": pname, "version": f"LATEST#BETA#{did}"}
+                    ).get("Item")
+                    if b_ptr:
+                        beta_device_cache[(did, pname)] = b_ptr
+                        _log("debug", "beta_device_pointer_found",
+                             deviceId=did, packageName=pname,
+                             targetVersion=b_ptr.get("targetVersion"))
+                except Exception as e:
+                    _log("warning", "beta_device_pointer_fetch_failed",
+                         deviceId=did, packageName=pname, error=str(e))
+
         if custom_cache:
             _log("info", "custom_cache_loaded",
                  userId=user_id, entries=len(custom_cache))
+        if beta_device_cache:
+            _log("info", "beta_device_cache_loaded",
+                 userId=user_id, entries=len(beta_device_cache))
 
         result_devices       = []
         not_registered_count = 0
@@ -627,14 +652,20 @@ def lambda_handler(event, context):
                 installed_version = rec.get("globalInstalledVersion", "")
                 thing_name        = rec.get("thingName")
 
-                # ── Package pointer lookup: CUSTOM > BETA/PROD ────────────────
-                # CUSTOM has highest priority — if admin created a targeted
-                # deployment for this device, it overrides BETA and PROD.
-                ptr = custom_cache.get((device_id, pkg_name)) or pkg_cache.get(pkg_name)
+                # ── Package pointer lookup: CUSTOM > BETA-targeted > BETA/PROD ──
+                # Priority order (highest to lowest):
+                #   1. CUSTOM targeted deployment  (LATEST#CUSTOM#{deviceId})
+                #   2. BETA  targeted deployment   (LATEST#BETA#{deviceId})
+                #   3. BETA/PROD broadcast pointer (LATEST#BETA or LATEST#PROD)
+                ptr = (
+                    custom_cache.get((device_id, pkg_name))
+                    or beta_device_cache.get((device_id, pkg_name))
+                    or pkg_cache.get(pkg_name)
+                )
                 if not ptr:
                     _log("info", "no_active_package_pointer",
                          userId=user_id, deviceId=device_id, packageName=pkg_name,
-                         detail="No LATEST#CUSTOM, LATEST#PROD, or LATEST#BETA pointer")
+                         detail="No LATEST#CUSTOM, LATEST#BETA (targeted), LATEST#BETA, or LATEST#PROD pointer")
                     up_to_date_count += 1
                     continue
 
