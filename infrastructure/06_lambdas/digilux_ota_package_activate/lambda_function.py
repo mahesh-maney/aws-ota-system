@@ -152,6 +152,16 @@ def lambda_handler(event, context):
         promote  = bool(body.get("promote",  False))
         restore  = bool(body.get("restore",  False))
 
+        # ── Fetch package record (needed by all branches) ─────────────────────
+        import time as _time
+        now_ms = int(_time.time() * 1000)
+        table  = dynamo.Table(PACKAGES_TABLE)
+        item   = table.get_item(
+            Key={"packageName": package_name, "version": version}
+        ).get("Item")
+        if not item:
+            return _resp(404, {"error": f"Package {package_name} v{version} not found"})
+
         # Direct publish/withdraw via `activated` is blocked — all package visibility
         # is controlled through deployments (POST /deployments).
         if "activated" in body:
@@ -262,17 +272,6 @@ def lambda_handler(event, context):
         if not promote and not restore:
             return _resp(400, {"error": "Missing required field: 'promote' or 'restore'"})
 
-        # ── Verify package exists ─────────────────────────────────────────────
-        table = dynamo.Table(PACKAGES_TABLE)
-        item  = table.get_item(
-            Key={"packageName": package_name, "version": version}
-        ).get("Item")
-
-        if not item:
-            return _resp(404, {"error": f"Package {package_name} v{version} not found"})
-
-        now_ms = int(__import__("time").time() * 1000)
-
 
         # ── PROMOTE (BETA → PROD) ─────────────────────────────────────────────
         if promote:
@@ -338,7 +337,7 @@ def lambda_handler(event, context):
             # Auto-create a PRODUCTION deployment record so it appears in the
             # deployments list and devices are offered the update via check_updates.
             import uuid as _uuid
-            deployment_id = f"digilux-ota-{package_name}-{version}-{int(__import__('time').time())}".replace(".", "-")
+            deployment_id = f"digilux-ota-{package_name}-{version}-{int(now_ms // 1000)}".replace(".", "-")
             deployment_item = {
                 "deploymentId": deployment_id,
                 "packageName":  package_name,
