@@ -230,8 +230,54 @@ add_method "$STATUS_RES" "GET" "$U_STATUS" "$USER_AUTH"
 add_cors   "$STATUS_RES"
 
 # ── CORS on auth error responses ──────────────────────────────────────────────
-log_step "Gateway Responses (CORS on 401/403/5xx)"
+# Before making any change, we read and log the existing gateway response config.
+# This gives you a permanent record in the deploy log of exactly what was there
+# before we touched it. If you ever need to revert, the values are right here.
+log_step "Gateway Responses (CORS on 401/403/5xx) — auditing existing config first"
+
 for RESP_TYPE in DEFAULT_4XX DEFAULT_5XX UNAUTHORIZED ACCESS_DENIED EXPIRED_TOKEN; do
+  EXISTING_RESP=$(aws apigateway get-gateway-response \
+    --rest-api-id "$API_ID" \
+    --response-type "$RESP_TYPE" \
+    --region "$REGION" 2>/dev/null || echo '{}')
+
+  python3 - << PYEOF
+import json
+
+resp = json.loads('''${EXISTING_RESP}''')
+resp_type = "${RESP_TYPE}"
+params = resp.get("responseParameters", {})
+templates = resp.get("responseTemplates", {})
+status = resp.get("statusCode", "(default)")
+is_default = resp.get("defaultResponse", True)
+
+print(f"  [{resp_type}]")
+
+if is_default and not params and not templates:
+    print(f"    Status    : AWS default (no customisation) — safe to add CORS headers")
+else:
+    print(f"    Status    : CUSTOMISED — existing values logged below")
+    print(f"    statusCode: {status}")
+    if params:
+        print(f"    responseParameters (BEFORE our change):")
+        for k, v in params.items():
+            print(f"      {k} = {v}")
+            # Flag specifically if CORS origin is already set to something
+            if "Allow-Origin" in k:
+                if v.strip("'") != "*":
+                    print(f"      *** CHANGE FLAGGED: Allow-Origin was '{v}' → will become '*'")
+                    print(f"      *** If this matters, restore with:")
+                    print(f"      ***   aws apigateway put-gateway-response --rest-api-id {resp_type} \\")
+                    print(f"      ***     --response-type {resp_type} --response-parameters '{{\"{k}\": \"{v}\"}}' --region \$REGION")
+                else:
+                    print(f"      (already '*' — no effective change)")
+    if templates:
+        print(f"    responseTemplates (PRESERVED — we do not touch these):")
+        for k, v in templates.items():
+            print(f"      {k}: {v}")
+PYEOF
+
+  # Now apply our CORS headers
   aws apigateway put-gateway-response \
     --rest-api-id "$API_ID" \
     --response-type "$RESP_TYPE" \
@@ -240,7 +286,7 @@ for RESP_TYPE in DEFAULT_4XX DEFAULT_5XX UNAUTHORIZED ACCESS_DENIED EXPIRED_TOKE
       "gatewayresponse.header.Access-Control-Allow-Headers": "'"'"'Content-Type,Authorization'"'"'"
     }' \
     --region "$REGION" > /dev/null
-  log_ok "  $RESP_TYPE configured"
+  log_ok "  $RESP_TYPE — CORS headers applied"
 done
 
 # ── Deploy to stage ───────────────────────────────────────────────────────────
