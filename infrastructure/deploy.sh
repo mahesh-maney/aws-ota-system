@@ -284,7 +284,7 @@ SIGNING_KEY_OUTPUT=$(aws secretsmanager get-secret-value \
   --query SecretString --output text \
   --region "$REGION" 2>/dev/null \
   | python3 -c "import sys,json; print(json.load(sys.stdin).get('publicKey','(not yet generated)'))" 2>/dev/null \
-  || echo "(run phase 02 first)")
+  || echo "(see phase 02 output above — key is in Secrets Manager: ${SIGNING_SECRET})")
 
 echo "════════════════════════════════════════════════════════════════"
 echo "  Deployment complete!"
