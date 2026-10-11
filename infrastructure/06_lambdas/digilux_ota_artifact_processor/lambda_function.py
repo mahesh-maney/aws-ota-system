@@ -673,7 +673,15 @@ def _enrich_tar_manifest(raw_bytes: bytes, pkg_name: str, version: str,
          packageName=pkg_name, version=version, sizeBytes=len(raw_bytes))
     try:
         with tarfile.open(fileobj=io.BytesIO(raw_bytes), mode="r:*") as tf:
-            names = tf.getnames()
+            # Build a normalized name → member map so that tars created on
+            # macOS/Linux (which prefix entries with './') are handled identically
+            # to tars without the prefix. e.g. './manifest.json' → 'manifest.json'.
+            _name_map: dict = {}
+            for _m in tf.getmembers():
+                _norm = _m.name[2:] if _m.name.startswith("./") else _m.name.lstrip("/")
+                if _norm:
+                    _name_map[_norm] = _m
+            names = list(_name_map.keys())
             _log("debug", "tar_contents",
                  packageName=pkg_name, version=version,
                  fileCount=len(names), files=names)
@@ -687,7 +695,7 @@ def _enrich_tar_manifest(raw_bytes: bytes, pkg_name: str, version: str,
                             "manifest.json not found inside tar archive")
                 return None
 
-            f        = tf.extractfile("manifest.json")
+            f        = tf.extractfile(_name_map["manifest.json"])
             manifest = json.loads(f.read().decode("utf-8"))
 
             _log("debug", "manifest_parsed",
@@ -756,7 +764,7 @@ def _enrich_tar_manifest(raw_bytes: bytes, pkg_name: str, version: str,
                          knownTypes=sorted(VALID_FILE_TYPES),
                          detail="Unknown type — file will be included but controller will skip it")
 
-                file_bytes = tf.extractfile(fname).read()
+                file_bytes = tf.extractfile(_name_map[fname]).read()
                 file_sha256 = hashlib.sha256(file_bytes).hexdigest()
                 file_size   = len(file_bytes)
 
@@ -781,7 +789,8 @@ def _enrich_tar_manifest(raw_bytes: bytes, pkg_name: str, version: str,
             with tarfile.open(fileobj=out_buf, mode="w:gz") as out_tf:
                 # Write all original files except manifest.json
                 for member in tf.getmembers():
-                    if member.name == "manifest.json":
+                    _mname = member.name[2:] if member.name.startswith("./") else member.name.lstrip("/")
+                    if _mname == "manifest.json":
                         continue
                     file_obj = tf.extractfile(member)
                     if file_obj is not None:
