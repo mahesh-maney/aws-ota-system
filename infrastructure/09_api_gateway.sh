@@ -267,7 +267,7 @@ else:
                 if v.strip("'") != "*":
                     print(f"      *** CHANGE FLAGGED: Allow-Origin was '{v}' → will become '*'")
                     print(f"      *** If this matters, restore with:")
-                    print(f"      ***   aws apigateway put-gateway-response --rest-api-id {resp_type} \\")
+                    print(f"      ***   aws apigateway put-gateway-response --rest-api-id {resp_type}")
                     print(f"      ***     --response-type {resp_type} --response-parameters '{{\"{k}\": \"{v}\"}}' --region \$REGION")
                 else:
                     print(f"      (already '*' — no effective change)")
