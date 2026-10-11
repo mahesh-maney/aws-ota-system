@@ -34,7 +34,7 @@ get_or_create_resource() {
   if [[ -n "$EXISTING" ]]; then
     echo "$EXISTING"
   else
-    log_info "    Creating resource: /${PATH_PART}"
+    log_info "    Creating resource: /${PATH_PART}" >&2
     aws apigateway create-resource \
       --rest-api-id "$API_ID" \
       --parent-id "$PARENT_ID" \
