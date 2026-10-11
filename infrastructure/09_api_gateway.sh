@@ -242,11 +242,13 @@ for RESP_TYPE in DEFAULT_4XX DEFAULT_5XX UNAUTHORIZED ACCESS_DENIED EXPIRED_TOKE
     --response-type "$RESP_TYPE" \
     --region "$REGION" 2>/dev/null || echo '{}')
 
-  python3 - << PYEOF
-import json
+  # Pass data via env vars so bash never expands $-tokens inside the JSON
+  # (default gateway responses contain "$context.error.message" etc.)
+  EXISTING_RESP="$EXISTING_RESP" RESP_TYPE="$RESP_TYPE" python3 - <<'PYEOF'
+import json, os
 
-resp = json.loads('''${EXISTING_RESP}''')
-resp_type = "${RESP_TYPE}"
+resp = json.loads(os.environ['EXISTING_RESP'])
+resp_type = os.environ['RESP_TYPE']
 params = resp.get("responseParameters", {})
 templates = resp.get("responseTemplates", {})
 status = resp.get("statusCode", "(default)")
@@ -263,13 +265,12 @@ else:
         print(f"    responseParameters (BEFORE our change):")
         for k, v in params.items():
             print(f"      {k} = {v}")
-            # Flag specifically if CORS origin is already set to something
             if "Allow-Origin" in k:
                 if v.strip("'") != "*":
                     print(f"      *** CHANGE FLAGGED: Allow-Origin was '{v}' → will become '*'")
                     print(f"      *** If this matters, restore with:")
                     print(f"      ***   aws apigateway put-gateway-response --rest-api-id {resp_type}")
-                    print(f"      ***     --response-type {resp_type} --response-parameters '{{\"{k}\": \"{v}\"}}' --region \$REGION")
+                    print(f"      ***     --response-type {resp_type} --response-parameters '{{\"{ k}\": \"{v}\"}}' --region $REGION")
                 else:
                     print(f"      (already '*' — no effective change)")
     if templates:
