@@ -80,12 +80,14 @@ EOF
 EXISTING_RAW=$(aws s3api get-bucket-notification-configuration \
   --bucket "$BUCKET" --region "$REGION" 2>/dev/null || echo '{}')
 
-python3 - << PYEOF
-import json, sys
+# Pass via env vars so bash never expands $-tokens inside the JSON values.
+# Also handle empty response (bucket with no existing notifications).
+EXISTING_RAW="$EXISTING_RAW" OTA_ENTRIES="$OTA_ENTRIES" PREFIX="$PREFIX" python3 - <<'PYEOF'
+import json, sys, os
 
-existing = json.loads('''${EXISTING_RAW}''')
-ota_entries = json.loads('''${OTA_ENTRIES}''')
-prefix = "${PREFIX}"
+existing = json.loads(os.environ['EXISTING_RAW'] or '{}')
+ota_entries = json.loads(os.environ['OTA_ENTRIES'])
+prefix = os.environ['PREFIX']
 
 # Remove stale OTA entries from previous runs (any Id starting with our prefix)
 existing_lambda = existing.get("LambdaFunctionConfigurations", [])
