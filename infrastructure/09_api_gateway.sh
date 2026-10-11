@@ -29,6 +29,7 @@ get_or_create_resource() {
   local EXISTING
   EXISTING=$(aws apigateway get-resources \
     --rest-api-id "$API_ID" --region "$REGION" \
+    --limit 500 \
     --query "items[?parentId=='${PARENT_ID}' && pathPart=='${PATH_PART}'].id" \
     --output text 2>/dev/null)
   if [[ -n "$EXISTING" ]]; then
