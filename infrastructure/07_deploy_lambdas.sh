@@ -248,6 +248,19 @@ log_section "Admin Lambdas"
 deploy_lambda "upload_url"          "$ADMIN_ROLE_ARN"
 deploy_lambda "package_activate"    "$ADMIN_ROLE_ARN"
 deploy_lambda "artifact_processor"  "$ADMIN_ROLE_ARN"
+# artifact_processor handles large firmware files (up to ~200 MB) — override the
+# generic 30s/256MB defaults set inside deploy_lambda.
+log_info "Applying artifact_processor resource overrides (large file processing)..."
+aws lambda update-function-configuration \
+  --function-name "${PREFIX}_ota_artifact_processor" \
+  --timeout 300 \
+  --memory-size 512 \
+  --ephemeral-storage '{"Size":1024}' \
+  --region "$REGION" > /dev/null
+aws lambda wait function-updated \
+  --function-name "${PREFIX}_ota_artifact_processor" --region "$REGION"
+log_ok "artifact_processor — timeout=300s  memory=512MB  /tmp=1024MB"
+
 deploy_lambda "package_register"    "$ADMIN_ROLE_ARN"
 deploy_lambda "compatibility_check" "$ADMIN_ROLE_ARN"
 deploy_lambda "job_create"          "$ADMIN_ROLE_ARN"
