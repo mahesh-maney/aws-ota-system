@@ -11,9 +11,14 @@
 # S3 buckets are NOT touched — they keep the customer prefix and retain data.
 #
 # Usage:
-#   bash infrastructure/cleanup_prefixed_resources.sh              # dry run (safe)
-#   bash infrastructure/cleanup_prefixed_resources.sh --execute    # actually delete
+#   bash infrastructure/cleanup_prefixed_resources.sh                          # dry run (safe)
+#   bash infrastructure/cleanup_prefixed_resources.sh --execute                # actually delete
 #   bash infrastructure/cleanup_prefixed_resources.sh --config path/to.cfg
+#
+# The API Gateway section audits every route under /api/v1/ota before deleting.
+# If any integration points to a non-OTA Lambda, deletion is blocked and the
+# unknown routes are printed.  Use --force-delete-apigw to override the block:
+#   bash infrastructure/cleanup_prefixed_resources.sh --execute --force-delete-apigw
 #
 # Exit code: 0 = clean, 1 = one or more deletions failed
 # ─────────────────────────────────────────────────────────────────────────────
@@ -30,10 +35,13 @@ _BLUE='\033[0;34m';  _BOLD='\033[1m';   _NC='\033[0m'
 CONFIG_FILE="${DIR}/deploy.config"
 EXECUTE=false
 
+FORCE_DELETE_APIGW=false
+
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --execute) EXECUTE=true; shift ;;
-    --config)  CONFIG_FILE="$2"; shift 2 ;;
+    --execute)            EXECUTE=true; shift ;;
+    --config)             CONFIG_FILE="$2"; shift 2 ;;
+    --force-delete-apigw) FORCE_DELETE_APIGW=true; shift ;;
     *) echo "Unknown argument: $1"; exit 1 ;;
   esac
 done
@@ -373,37 +381,127 @@ for TYPE in "${PREFIX}-network-controller" "${PREFIX}-zigbee-device"; do
 done
 echo ""
 
-# ── 12. API Gateway — remove /ota resource subtree ───────────────────────────
-# All OTA methods/integrations must be deleted so phase 09 can recreate them
-# pointing to the new generic Lambda function names.
+# ── 12. API Gateway — audit + remove /ota resource subtree ───────────────────
+# Before deleting the /ota subtree, audit every route's integration to confirm
+# all integrations point to ${PREFIX}_ota_* Lambda functions (i.e. created by
+# our deploy.sh). Any route pointing to a different Lambda is flagged as UNKNOWN
+# and the deletion is blocked unless --force-delete-apigw is specified.
 echo -e "${_BOLD}── [12/12] API Gateway /ota resource subtree ────────────────────${_NC}"
 if [[ -z "$API_GATEWAY_ID" ]]; then
   echo -e "  ${_YELLOW}[WARN]${_NC}     API_GATEWAY_ID not set — skipping API Gateway cleanup."
   echo -e "             Set API_GATEWAY_ID in deploy.config and re-run, or"
   echo -e "             manually delete the /ota resource in API Gateway console."
 else
-  # Find /api/v1 resource
-  API_ROOT=$(aws apigateway get-resources \
+  echo -e "  Fetching all resources in API ${API_GATEWAY_ID}..."
+  ALL_RESOURCES=$(aws apigateway get-resources \
     --rest-api-id "$API_GATEWAY_ID" \
     --region "$REGION" \
     --limit 500 \
-    --query "items[?path=='/api/v1'].id" \
-    --output text 2>/dev/null || true)
+    --output json 2>/dev/null || echo '{"items":[]}')
+
+  # Resolve /api/v1 and /api/v1/ota resource IDs
+  read -r API_ROOT OTA_RESOURCE < <(echo "$ALL_RESOURCES" | python3 - <<'PYEOF'
+import sys, json
+items = json.load(sys.stdin).get("items", [])
+api_root = next((r["id"] for r in items if r.get("path") == "/api/v1"), "")
+ota_res  = next((r["id"] for r in items
+                 if r.get("parentId") == api_root and r.get("pathPart") == "ota"), "")
+print(api_root, ota_res)
+PYEOF
+)
 
   if [[ -z "$API_ROOT" ]]; then
     echo -e "  ${_YELLOW}[WARN]${_NC}     /api/v1 not found in API Gateway $API_GATEWAY_ID"
+  elif [[ -z "$OTA_RESOURCE" ]]; then
+    echo -e "  ${_BLUE}[ABSENT]${_NC}   /api/v1/ota  (API: $API_GATEWAY_ID)"
   else
-    # Find /api/v1/ota resource
-    OTA_RESOURCE=$(aws apigateway get-resources \
-      --rest-api-id "$API_GATEWAY_ID" \
-      --region "$REGION" \
-      --limit 500 \
-      --query "items[?parentId=='${API_ROOT}' && pathPart=='ota'].id" \
-      --output text 2>/dev/null || true)
+    echo -e "  Found /api/v1/ota  (resource ID: $OTA_RESOURCE)"
+    echo ""
+    echo -e "  ${_BOLD}Auditing all routes under /api/v1/ota:${_NC}"
+    echo ""
 
-    if [[ -z "$OTA_RESOURCE" ]]; then
-      echo -e "  ${_BLUE}[ABSENT]${_NC}   /api/v1/ota  (API: $API_GATEWAY_ID)"
+    # Build list of (resource_id, path, methods) for every resource under /ota
+    OTA_ITEMS=$(echo "$ALL_RESOURCES" | python3 - <<'PYEOF'
+import sys, json
+items = json.load(sys.stdin).get("items", [])
+ota_items = [r for r in items if r.get("path", "").startswith("/api/v1/ota")]
+for r in sorted(ota_items, key=lambda x: x.get("path", "")):
+    methods = [m for m in r.get("resourceMethods", {}).keys() if m != "OPTIONS"]
+    print(r["id"] + "|" + r["path"] + "|" + ",".join(methods))
+PYEOF
+)
+
+    UNKNOWN_COUNT=0
+    while IFS='|' read -r RES_ID RES_PATH METHODS; do
+      [[ -z "$RES_ID" ]] && continue
+      echo -e "  ${_BOLD}${RES_PATH}${_NC}"
+
+      if [[ -z "$METHODS" ]]; then
+        echo -e "    ${_BLUE}(no non-OPTIONS methods)${_NC}"
+        continue
+      fi
+
+      IFS=',' read -ra METHOD_LIST <<< "$METHODS"
+      for METHOD in "${METHOD_LIST[@]}"; do
+        INTEGRATION=$(aws apigateway get-integration \
+          --rest-api-id "$API_GATEWAY_ID" \
+          --resource-id "$RES_ID" \
+          --http-method "$METHOD" \
+          --region "$REGION" \
+          --output json 2>/dev/null || echo '{}')
+
+        # Extract function name from the integration URI:
+        # arn:aws:apigateway:REGION:lambda:path/.../function:FUNC_NAME/invocations
+        FUNC_NAME=$(echo "$INTEGRATION" | python3 - <<'PYEOF'
+import sys, json
+d = json.load(sys.stdin)
+uri = d.get("uri", "")
+if "function:" in uri:
+    print(uri.split("function:")[1].split("/")[0])
+elif d.get("type") == "MOCK":
+    print("__MOCK__")
+else:
+    print("(no integration)")
+PYEOF
+)
+
+        if [[ "$FUNC_NAME" == "${PREFIX}_ota_"* ]]; then
+          echo -e "    ${_GREEN}[OTA  ]${_NC}  $METHOD → $FUNC_NAME"
+        elif [[ "$FUNC_NAME" == "__MOCK__" ]]; then
+          echo -e "    ${_BLUE}[MOCK ]${_NC}  $METHOD → MOCK (CORS preflight)"
+        elif [[ "$FUNC_NAME" == "(no integration)" ]]; then
+          echo -e "    ${_YELLOW}[INFO ]${_NC}  $METHOD → no integration set"
+        else
+          echo -e "    ${_RED}${_BOLD}[!!!  ]${_NC}  $METHOD → ${_BOLD}${FUNC_NAME}${_NC}  ← NOT an OTA route"
+          (( UNKNOWN_COUNT++ )) || true
+        fi
+      done
+    done <<< "$OTA_ITEMS"
+
+    echo ""
+
+    # ── Audit result ──────────────────────────────────────────────────────────
+    if [[ $UNKNOWN_COUNT -gt 0 && "$FORCE_DELETE_APIGW" == "false" ]]; then
+      echo -e "  ${_RED}${_BOLD}AUDIT FAILED: ${UNKNOWN_COUNT} non-OTA route(s) found under /api/v1/ota.${_NC}"
+      echo -e "  ${_RED}Deleting the /ota subtree would also remove these routes.${_NC}"
+      echo ""
+      echo -e "  ${_YELLOW}Options:${_NC}"
+      echo -e "  1. If the routes above are NOT yours and safe to remove:"
+      echo -e "       bash infrastructure/cleanup_prefixed_resources.sh --execute --force-delete-apigw"
+      echo -e "  2. If the routes ARE yours and must be kept:"
+      echo -e "       Manually update each integration URI in the API Gateway console"
+      echo -e "       to point to the new generic Lambda names (e.g. ota_upload_url)."
+      echo -e "       Then skip --phase 09 in the redeploy."
+      echo ""
+      echo -e "  ${_YELLOW}Skipping API Gateway deletion to protect unknown routes.${_NC}"
+      (( FAIL_COUNT++ )) || true
     else
+      if [[ $UNKNOWN_COUNT -gt 0 ]]; then
+        echo -e "  ${_YELLOW}[WARN]${_NC}  --force-delete-apigw set — proceeding despite ${UNKNOWN_COUNT} unknown route(s)."
+      else
+        echo -e "  ${_GREEN}Audit passed — all routes under /api/v1/ota are OTA routes.${_NC}"
+      fi
+
       _run "/api/v1/ota subtree (ID: $OTA_RESOURCE) in API $API_GATEWAY_ID" \
         aws apigateway delete-resource \
           --rest-api-id "$API_GATEWAY_ID" \
@@ -411,14 +509,13 @@ else
           --region "$REGION"
 
       if [[ "$EXECUTE" == "true" ]]; then
-        # Deploy the API to apply the deletion
-        echo -e "  ${_BLUE}[INFO]${_NC}     Deploying API Gateway to apply resource deletion..."
+        echo -e "  Deploying API Gateway stage to apply deletion..."
         aws apigateway create-deployment \
           --rest-api-id "$API_GATEWAY_ID" \
           --stage-name "${API_GATEWAY_STAGE:-api}" \
           --description "Cleanup: removed /ota subtree for Lambda rename" \
           --region "$REGION" > /dev/null
-        echo -e "  ${_GREEN}[OK]${_NC}       API Gateway deployed."
+        echo -e "  ${_GREEN}[OK]${_NC}  API Gateway deployed."
       fi
     fi
   fi
