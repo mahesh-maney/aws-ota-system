@@ -159,3 +159,26 @@ CANARY_MAX=5
 
 # How long (minutes) before an IoT Job times out. Default: 24 hours.
 IOT_JOB_TIMEOUT_MINUTES=1440
+
+# ── provisioning_validation Lambda (deploy_provisioning_validation.sh) ────────
+# Required only if you are deploying the IoT Fleet Provisioning pre-hook.
+# Leave blank if not applicable.
+
+# DynamoDB table that holds per-device endpoint/state data (used to clear state on re-provisioning)
+PV_DEVICE_STATE_TABLE=YOUR_DEVICE_STATE_TABLE
+
+# Athena database and table that holds the approved device MAC address list
+PV_DATABASE=YOUR_ATHENA_DATABASE
+PV_TABLE=YOUR_ATHENA_TABLE
+
+# AES-GCM encryption key for MAC address storage — must be exactly 16, 24, or 32 characters
+PV_SECRET_KEY=YOUR_32_CHAR_SECRET_KEY_HERE_____
+
+# S3 bucket where Athena writes query output (must already exist)
+PV_BUCKET_ATHENA_OUTPUT=YOUR_ATHENA_OUTPUT_BUCKET
+
+# DynamoDB device-data table (stores deviceId, macAddress, certificateId, topics config)
+PV_TABLE_DEVICE_DATA=YOUR_DEVICE_DATA_TABLE
+
+# IoT Thing Group that provisioned devices are placed into
+PV_THING_GROUP=YOUR_IOT_THING_GROUP
