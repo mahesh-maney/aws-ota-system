@@ -61,6 +61,14 @@ API_GATEWAY_ID="${API_GATEWAY_ID:-}"
 # IoT rule names used [a-zA-Z0-9_] — hyphens were replaced with underscores
 RULE_PREFIX="${PREFIX//-/_}"
 
+# Resolve the actual artifact bucket name — same logic as deploy.sh
+# If ARTIFACT_BUCKET is blank in deploy.config, it defaults to ${PREFIX}-ota-artifacts.
+# This is the S3 bucket that is NOT deleted but whose event notifications and
+# IAM policies must be rewired to the new generic Lambda names during redeploy.
+# If the bucket name doesn't match the default, the user must set ARTIFACT_BUCKET
+# explicitly in deploy.config, or phases 05/07/11 will wire up to the wrong bucket.
+ARTIFACT_BUCKET="${ARTIFACT_BUCKET:-${PREFIX}-ota-artifacts}"
+
 # ── Helpers ───────────────────────────────────────────────────────────────────
 FAIL_COUNT=0
 
@@ -113,11 +121,46 @@ echo ""
 echo -e "${_BOLD}════════════════════════════════════════════════════════════════${_NC}"
 echo -e "${_BOLD}  OTA Resource Cleanup — removing old '${PREFIX}' prefix${_NC}"
 echo -e "${_BOLD}════════════════════════════════════════════════════════════════${_NC}"
-echo -e "  Config : $CONFIG_FILE"
-echo -e "  Prefix : ${_BOLD}${PREFIX}${_NC}"
-echo -e "  Region : ${_BOLD}${REGION}${_NC}"
-echo -e "  Account: ${_BOLD}${ACCOUNT_ID}${_NC}"
+echo -e "  Config         : $CONFIG_FILE"
+echo -e "  Prefix         : ${_BOLD}${PREFIX}${_NC}"
+echo -e "  Region         : ${_BOLD}${REGION}${_NC}"
+echo -e "  Account        : ${_BOLD}${ACCOUNT_ID}${_NC}"
+echo -e "  Artifact bucket: ${_BOLD}${ARTIFACT_BUCKET}${_NC}  ${_BLUE}(kept — not deleted)${_NC}"
 echo ""
+
+# ── S3 bucket safety check ────────────────────────────────────────────────────
+# The artifact bucket is NOT deleted, but three things reference it by name:
+#   1. IAM role inline policy  (phase 05) — s3:GetObject / s3:PutObject ARN
+#   2. Lambda env var          (phase 07) — ARTIFACT_BUCKET value
+#   3. S3 event notification   (phase 11) — Lambda ARN wired to the bucket
+# All three are rebuilt by the redeploy using ARTIFACT_BUCKET from deploy.config.
+# If ARTIFACT_BUCKET is wrong here, the redeploy will silently wire everything
+# to a non-existent bucket.  Verify the bucket actually exists before proceeding.
+BUCKET_EXISTS=false
+if aws s3api head-bucket --bucket "$ARTIFACT_BUCKET" --region "$REGION" \
+     2>/dev/null; then
+  BUCKET_EXISTS=true
+fi
+
+if [[ "$BUCKET_EXISTS" == "true" ]]; then
+  echo -e "  ${_GREEN}[OK]${_NC}  Artifact bucket confirmed: s3://${ARTIFACT_BUCKET}"
+else
+  echo -e "  ${_RED}${_BOLD}[FAIL] Artifact bucket NOT found: s3://${ARTIFACT_BUCKET}${_NC}"
+  echo ""
+  echo -e "  The bucket name is derived from ARTIFACT_BUCKET (or PREFIX) in deploy.config."
+  echo -e "  Your deploy.config has:"
+  echo -e "    PREFIX         = ${PREFIX}"
+  echo -e "    ARTIFACT_BUCKET= ${ARTIFACT_BUCKET:-"(blank — derived from PREFIX)"}"
+  echo ""
+  echo -e "  If your actual bucket has a different name, set it explicitly:"
+  echo -e "    ${_BOLD}ARTIFACT_BUCKET=<your-actual-bucket-name>${_NC}"
+  echo -e "  in deploy.config, then re-run this script."
+  echo ""
+  echo -e "  ${_RED}Aborting — fix ARTIFACT_BUCKET in deploy.config first.${_NC}"
+  exit 1
+fi
+echo ""
+
 if [[ "$EXECUTE" == "false" ]]; then
   echo -e "  ${_YELLOW}DRY RUN — no changes will be made.${_NC}"
   echo -e "  ${_YELLOW}Re-run with --execute to perform actual deletion.${_NC}"
@@ -536,16 +579,26 @@ else
     echo -e "${_RED}${_BOLD}  Cleanup finished with ${FAIL_COUNT} error(s) — review output above.${_NC}"
   fi
   echo ""
+  echo -e "  ${_YELLOW}${_BOLD}  IMPORTANT — before redeploying:${_NC}"
+  echo -e "  ${_YELLOW}  The artifact bucket s3://${ARTIFACT_BUCKET} is kept but its${_NC}"
+  echo -e "  ${_YELLOW}  event notification now points to a deleted Lambda. Do NOT${_NC}"
+  echo -e "  ${_YELLOW}  upload any artifacts until phase 11 completes the rewire.${_NC}"
+  echo ""
+  echo -e "  ${_YELLOW}  Confirm deploy.config has:${_NC}"
+  echo -e "  ${_YELLOW}    ARTIFACT_BUCKET=${ARTIFACT_BUCKET}${_NC}"
+  echo -e "  ${_YELLOW}  Phases 05 (IAM), 07 (Lambda), and 11 (S3 events) all read${_NC}"
+  echo -e "  ${_YELLOW}  this value — if wrong, they silently wire to a missing bucket.${_NC}"
+  echo ""
   echo -e "  ${_BOLD}Next steps:${_NC}"
   echo     "    bash infrastructure/deploy.sh --phase 02   # new signing key"
   echo     "    bash infrastructure/deploy.sh --phase 03   # IoT thing types"
   echo     "    bash infrastructure/deploy.sh --phase 04   # DynamoDB tables"
-  echo     "    bash infrastructure/deploy.sh --phase 05   # IAM roles"
-  echo     "    bash infrastructure/deploy.sh --phase 07   # Lambda functions"
+  echo     "    bash infrastructure/deploy.sh --phase 05   # IAM roles        (wires to ARTIFACT_BUCKET)"
+  echo     "    bash infrastructure/deploy.sh --phase 07   # Lambda functions  (sets ARTIFACT_BUCKET env var)"
   echo     "    bash infrastructure/deploy.sh --phase 08   # IoT rules"
   echo     "    bash infrastructure/deploy.sh --phase 09   # API Gateway routes"
   echo     "    bash infrastructure/deploy.sh --phase 10   # CloudWatch"
-  echo     "    bash infrastructure/deploy.sh --phase 11   # S3 event trigger"
+  echo     "    bash infrastructure/deploy.sh --phase 11   # S3 event trigger  (rewires bucket → ota_artifact_processor)"
   echo     "    bash infrastructure/deploy.sh --phase 12   # Production hardening"
 fi
 echo -e "${_BOLD}════════════════════════════════════════════════════════════════${_NC}"
