@@ -35,7 +35,7 @@ ATHENA_OUTPUT = f"s3://{os.environ['BUCKET_ATHENA_OUTPUT']}/provisioning_templat
 # Thing Group used by the Fleet Provisioning template.
 # The provisioning template must declare a ThingGroups parameter and
 # reference it from the AWS::IoT::Thing resource.
-THING_GROUP = os.environ.get("THING_GROUP", "DGX-ZigbeeGateway")
+THING_GROUP = os.environ.get("THING_GROUP", "HON-ZigbeeGateway")
 
 
 def check_mac_in_athena(mac: str) -> bool:
