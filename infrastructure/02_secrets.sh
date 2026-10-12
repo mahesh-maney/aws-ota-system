@@ -5,7 +5,7 @@ export AWS_PAGER="" PAGER=cat
 
 REGION="${REGION:-ap-south-1}"
 PREFIX="${PREFIX:-digilux}"
-SECRET_NAME="${SIGNING_SECRET:-${PREFIX}-ota-signing-key}"
+SECRET_NAME="${SIGNING_SECRET:-ota-signing-key}"
 
 echo "==> OTA signing key: $SECRET_NAME  (region: $REGION)"
 

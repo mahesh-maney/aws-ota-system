@@ -17,7 +17,7 @@ echo "════════════════════════�
 echo ""
 echo "==> [1/4] SNS alert topic"
 SNS_ARN=$(aws sns create-topic \
-  --name "${PREFIX}-ota-alerts" \
+  --name "ota-alerts" \
   --region "$REGION" \
   --query 'TopicArn' --output text)
 echo "    Topic: $SNS_ARN"
@@ -42,7 +42,7 @@ fi
 echo ""
 echo "==> [2/4] SQS Dead Letter Queues"
 for SUFFIX in artifact_processor status_handler; do
-  FUNC="${PREFIX}_ota_${SUFFIX}"
+  FUNC="ota_${SUFFIX}"
   QUEUE_NAME="${FUNC}-dlq"
 
   QUEUE_URL=$(aws sqs create-queue \
@@ -100,9 +100,9 @@ for SUFFIX in \
   upload_url artifact_processor job_create status_handler \
   device_register user_check_updates user_consent; do
 
-  FUNC="${PREFIX}_ota_${SUFFIX}"
+  FUNC="ota_${SUFFIX}"
   aws cloudwatch put-metric-alarm \
-    --alarm-name "${PREFIX}-ota-errors-${FUNC}" \
+    --alarm-name "ota-errors-${FUNC}" \
     --alarm-description "Lambda errors in ${FUNC}" \
     --metric-name Errors \
     --namespace AWS/Lambda \
@@ -116,15 +116,15 @@ for SUFFIX in \
     --alarm-actions "$SNS_ARN" \
     --ok-actions    "$SNS_ARN" \
     --region "$REGION"
-  echo "    Alarm: ${PREFIX}-ota-errors-${FUNC}"
+  echo "    Alarm: ota-errors-${FUNC}"
 done
 
 # DLQ depth alarms
 for SUFFIX in artifact_processor status_handler; do
-  QUEUE_NAME="${PREFIX}_ota_${SUFFIX}-dlq"
+  QUEUE_NAME="ota_${SUFFIX}-dlq"
   aws cloudwatch put-metric-alarm \
-    --alarm-name "${PREFIX}-ota-dlq-${SUFFIX}" \
-    --alarm-description "Messages in DLQ for ${PREFIX}_ota_${SUFFIX}" \
+    --alarm-name "ota-dlq-${SUFFIX}" \
+    --alarm-description "Messages in DLQ for ota_${SUFFIX}" \
     --metric-name ApproximateNumberOfMessagesVisible \
     --namespace AWS/SQS \
     --statistic Sum \
@@ -136,7 +136,7 @@ for SUFFIX in artifact_processor status_handler; do
     --treat-missing-data notBreaching \
     --alarm-actions "$SNS_ARN" \
     --region "$REGION"
-  echo "    Alarm: ${PREFIX}-ota-dlq-${SUFFIX}"
+  echo "    Alarm: ota-dlq-${SUFFIX}"
 done
 
 echo ""

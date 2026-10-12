@@ -62,7 +62,7 @@ RESULTS=()
 invoke_lambda() {
   local SUFFIX="$1"
   local PAYLOAD="$2"
-  local FUNC="${PREFIX}_ota_${SUFFIX}"
+  local FUNC="ota_${SUFFIX}"
   local OUT="/tmp/_validate_${FUNC}.json"
 
   printf "  %-45s " "$FUNC"

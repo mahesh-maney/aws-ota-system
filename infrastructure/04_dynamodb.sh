@@ -10,12 +10,12 @@ REGION="${REGION:-ap-south-1}"
 PREFIX="${PREFIX:-digilux}"
 
 # Table names (derived from PREFIX unless overridden)
-PACKAGES_TABLE="${PACKAGES_TABLE:-${PREFIX}_ota_packages}"
-OTA_JOBS_TABLE="${OTA_JOBS_TABLE:-${PREFIX}_ota_jobs}"
-COMPAT_TABLE="${COMPAT_TABLE:-${PREFIX}_ota_compatibility}"
-DEPLOYMENTS_TABLE="${DEPLOYMENTS_TABLE:-${PREFIX}_ota_deployments}"
-CONSENTS_TABLE="${CONSENTS_TABLE:-${PREFIX}_ota_user_consents}"
-BETA_USERS_TABLE="${BETA_USERS_TABLE:-${PREFIX}_ota_beta_users}"
+PACKAGES_TABLE="${PACKAGES_TABLE:-ota_packages}"
+OTA_JOBS_TABLE="${OTA_JOBS_TABLE:-ota_jobs}"
+COMPAT_TABLE="${COMPAT_TABLE:-ota_compatibility}"
+DEPLOYMENTS_TABLE="${DEPLOYMENTS_TABLE:-ota_deployments}"
+CONSENTS_TABLE="${CONSENTS_TABLE:-ota_user_consents}"
+BETA_USERS_TABLE="${BETA_USERS_TABLE:-ota_beta_users}"
 
 create_table_if_missing() {
   local TABLE_NAME="$1"

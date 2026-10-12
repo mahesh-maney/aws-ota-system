@@ -8,7 +8,7 @@ PREFIX="${PREFIX:-digilux}"
 ACCOUNT_ID="${ACCOUNT_ID:-$(aws sts get-caller-identity --query Account --output text)}"
 
 BUCKET="${ARTIFACT_BUCKET:-${PREFIX}-ota-artifacts}"
-PROCESSOR_FUNC="${PREFIX}_ota_artifact_processor"
+PROCESSOR_FUNC="ota_artifact_processor"
 PROCESSOR_ARN="arn:aws:lambda:${REGION}:${ACCOUNT_ID}:function:${PROCESSOR_FUNC}"
 
 echo "==> S3 → Lambda: $BUCKET → $PROCESSOR_FUNC"

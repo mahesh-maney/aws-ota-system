@@ -41,14 +41,14 @@ create_group_if_missing() {
 
 # ── Thing Types ───────────────────────────────────────────────────────────────
 echo "==> IoT Thing Types"
-for TYPE in "${PREFIX}-network-controller" "${PREFIX}-zigbee-device"; do
+for TYPE in "ota-network-controller" "ota-zigbee-device"; do
   if aws iot describe-thing-type --thing-type-name "$TYPE" --region "$REGION" 2>/dev/null | grep -q '"thingTypeName"'; then
     echo "    $TYPE already exists."
   else
     aws iot create-thing-type \
       --thing-type-name "$TYPE" \
       --region "$REGION" \
-      --thing-type-properties "thingTypeDescription=OTA managed device (${PREFIX})" > /dev/null
+      --thing-type-properties "thingTypeDescription=OTA managed device type" > /dev/null
     echo "    Created: $TYPE"
   fi
 done

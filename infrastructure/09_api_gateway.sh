@@ -143,14 +143,14 @@ add_cors() {
   log_ok "    OPTIONS (CORS) added to $RESOURCE_ID"
 }
 
-# Lambda function names (PREFIX-aware)
-U_UPLOAD="${PREFIX}_ota_upload_url"
-U_ACTIVATE="${PREFIX}_ota_package_activate"
-U_JOB="${PREFIX}_ota_job_create"
-U_CHECK="${PREFIX}_ota_user_check_updates"
-U_CONSENT="${PREFIX}_ota_user_consent"
-U_STATUS="${PREFIX}_ota_user_update_status"
-U_DOWNLOAD="${PREFIX}_ota_user_get_download_link"
+# Lambda function names (generic — no customer prefix)
+U_UPLOAD="ota_upload_url"
+U_ACTIVATE="ota_package_activate"
+U_JOB="ota_job_create"
+U_CHECK="ota_user_check_updates"
+U_CONSENT="ota_user_consent"
+U_STATUS="ota_user_update_status"
+U_DOWNLOAD="ota_user_get_download_link"
 
 # ── Resolve /api/v1 root ──────────────────────────────────────────────────────
 log_step "Resolving /api/v1 resource"

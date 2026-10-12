@@ -10,18 +10,18 @@ REGION="${REGION:-ap-south-1}"
 PREFIX="${PREFIX:-digilux}"
 ACCOUNT_ID="${ACCOUNT_ID:-$(aws sts get-caller-identity --query Account --output text)}"
 
-ADMIN_ROLE_ARN="arn:aws:iam::${ACCOUNT_ID}:role/${LAMBDA_ROLE_NAME:-${PREFIX}-ota-lambda-role}"
-USER_ROLE_ARN="arn:aws:iam::${ACCOUNT_ID}:role/${USER_LAMBDA_ROLE_NAME:-${PREFIX}-ota-user-lambda-role}"
+ADMIN_ROLE_ARN="arn:aws:iam::${ACCOUNT_ID}:role/${LAMBDA_ROLE_NAME:-ota-lambda-role}"
+USER_ROLE_ARN="arn:aws:iam::${ACCOUNT_ID}:role/${USER_LAMBDA_ROLE_NAME:-ota-user-lambda-role}"
 
 ARTIFACT_BUCKET="${ARTIFACT_BUCKET:-${PREFIX}-ota-artifacts}"
-SIGNING_SECRET="${SIGNING_SECRET:-${PREFIX}-ota-signing-key}"
-PACKAGES_TABLE="${PACKAGES_TABLE:-${PREFIX}_ota_packages}"
-OTA_JOBS_TABLE="${OTA_JOBS_TABLE:-${PREFIX}_ota_jobs}"
-COMPAT_TABLE="${COMPAT_TABLE:-${PREFIX}_ota_compatibility}"
-DEPLOYMENTS_TABLE="${DEPLOYMENTS_TABLE:-${PREFIX}_ota_deployments}"
-CONSENTS_TABLE="${CONSENTS_TABLE:-${PREFIX}_ota_user_consents}"
-BETA_USERS_TABLE="${BETA_USERS_TABLE:-${PREFIX}_ota_beta_users}"
-DEVICE_DATA_TABLE="${DEVICE_DATA_TABLE:-${PREFIX}_device_data}"
+SIGNING_SECRET="${SIGNING_SECRET:-ota-signing-key}"
+PACKAGES_TABLE="${PACKAGES_TABLE:-ota_packages}"
+OTA_JOBS_TABLE="${OTA_JOBS_TABLE:-ota_jobs}"
+COMPAT_TABLE="${COMPAT_TABLE:-ota_compatibility}"
+DEPLOYMENTS_TABLE="${DEPLOYMENTS_TABLE:-ota_deployments}"
+CONSENTS_TABLE="${CONSENTS_TABLE:-ota_user_consents}"
+BETA_USERS_TABLE="${BETA_USERS_TABLE:-ota_beta_users}"
+DEVICE_DATA_TABLE="${DEVICE_DATA_TABLE:-digilux_device_data}"
 USER_COGNITO_POOL_ID="${USER_COGNITO_POOL_ID:-}"
 SES_SENDER="${SES_SENDER_EMAIL:-noreply@example.com}"
 
@@ -33,7 +33,7 @@ IOT_GATEWAY_MODELS="${IOT_GATEWAY_MODELS:-DGW-100,DGW-200}"
 IOT_TOUCH_PANEL_MODELS="${IOT_TOUCH_PANEL_MODELS:-TP-100,TP-200}"
 CLOUDFRONT_DOMAIN="${CLOUDFRONT_DOMAIN:-}"
 CLOUDFRONT_KEY_PAIR_ID="${CLOUDFRONT_KEY_PAIR_ID:-}"
-CLOUDFRONT_KEY_SECRET="${CLOUDFRONT_KEY_SECRET_NAME:-${PREFIX}-ota-cloudfront-key}"
+CLOUDFRONT_KEY_SECRET="${CLOUDFRONT_KEY_SECRET_NAME:-ota-cloudfront-key}"
 PRESIGN_EXPIRY_TIER1_MAX_MB="${PRESIGN_EXPIRY_TIER1_MAX_MB:-50}"
 PRESIGN_EXPIRY_TIER1_SEC="${PRESIGN_EXPIRY_TIER1_SEC:-3600}"
 PRESIGN_EXPIRY_TIER2_MAX_MB="${PRESIGN_EXPIRY_TIER2_MAX_MB:-200}"
@@ -176,12 +176,12 @@ _obfuscate_lambda() {
 # ── deploy_lambda ──────────────────────────────────────────────────────────────
 # Usage: deploy_lambda <src_suffix> <role_arn>
 #   src_suffix: the part after "digilux_ota_" in the source directory name
-#   Deployed function name: ${PREFIX}_ota_<src_suffix>
+#   Deployed function name: ota_<src_suffix>
 deploy_lambda() {
   local SRC_SUFFIX="$1"
   local ROLE_ARN="$2"
   local SRC_DIR_NAME="digilux_ota_${SRC_SUFFIX}"
-  local FUNC_NAME="${PREFIX}_ota_${SRC_SUFFIX}"
+  local FUNC_NAME="ota_${SRC_SUFFIX}"
   local SRC_DIR="${LAMBDA_DIR}/${SRC_DIR_NAME}"
   local ZIP_FILE="/tmp/${FUNC_NAME}.zip"
 
@@ -269,7 +269,7 @@ deploy_lambda() {
       --memory-size 256 \
       --tracing-config Mode=Active \
       --environment "file://${ENV_JSON_FILE}" \
-      --description "${PREFIX} OTA — ${FUNC_NAME}" \
+      --description "OTA — ${FUNC_NAME}" \
       --region "$REGION" > /dev/null
     aws lambda wait function-active \
       --function-name "$FUNC_NAME" --region "$REGION"
@@ -325,13 +325,13 @@ deploy_lambda "artifact_processor"  "$ADMIN_ROLE_ARN"
 # generic 30s/256MB defaults set inside deploy_lambda.
 log_info "Applying artifact_processor resource overrides (large file processing)..."
 aws lambda update-function-configuration \
-  --function-name "${PREFIX}_ota_artifact_processor" \
+  --function-name "ota_artifact_processor" \
   --timeout 300 \
   --memory-size 2048 \
   --ephemeral-storage '{"Size":2048}' \
   --region "$REGION" > /dev/null
 aws lambda wait function-updated \
-  --function-name "${PREFIX}_ota_artifact_processor" --region "$REGION"
+  --function-name "ota_artifact_processor" --region "$REGION"
 log_ok "artifact_processor — timeout=300s  memory=2048MB  /tmp=2048MB"
 
 deploy_lambda "package_register"    "$ADMIN_ROLE_ARN"
@@ -351,7 +351,7 @@ deploy_lambda "user_get_download_link" "$USER_ROLE_ARN"
 # Grant IoT rules permission to invoke both $LATEST and the 'prod' alias.
 log_section "IoT Invoke Permissions"
 for SUFFIX in status_handler device_register; do
-  FUNC="${PREFIX}_ota_${SUFFIX}"
+  FUNC="ota_${SUFFIX}"
   # Permission on the unqualified function (covers $LATEST)
   STMT_ID="iot-rule-invoke-${FUNC}"
   aws lambda remove-permission \

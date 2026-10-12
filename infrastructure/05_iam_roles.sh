@@ -7,13 +7,13 @@ REGION="${REGION:-ap-south-1}"
 PREFIX="${PREFIX:-digilux}"
 ACCOUNT_ID="${ACCOUNT_ID:-$(aws sts get-caller-identity --query Account --output text)}"
 
-LAMBDA_ROLE="${LAMBDA_ROLE_NAME:-${PREFIX}-ota-lambda-role}"
-USER_ROLE="${USER_LAMBDA_ROLE_NAME:-${PREFIX}-ota-user-lambda-role}"
-RULE_ROLE="${IOT_RULE_ROLE_NAME:-${PREFIX}-ota-iot-rule-role}"
+LAMBDA_ROLE="${LAMBDA_ROLE_NAME:-ota-lambda-role}"
+USER_ROLE="${USER_LAMBDA_ROLE_NAME:-ota-user-lambda-role}"
+RULE_ROLE="${IOT_RULE_ROLE_NAME:-ota-iot-rule-role}"
 
 ARTIFACT_BUCKET="${ARTIFACT_BUCKET:-${PREFIX}-ota-artifacts}"
-SIGNING_SECRET="${SIGNING_SECRET:-${PREFIX}-ota-signing-key}"
-DEVICE_DATA_TABLE="${DEVICE_DATA_TABLE:-${PREFIX}_device_data}"
+SIGNING_SECRET="${SIGNING_SECRET:-ota-signing-key}"
+DEVICE_DATA_TABLE="${DEVICE_DATA_TABLE:-digilux_device_data}"
 
 USER_COGNITO_POOL_ID="${USER_COGNITO_POOL_ID:-}"
 
@@ -42,11 +42,11 @@ make_role() {
 
 # ── Admin Lambda execution role ───────────────────────────────────────────────
 echo "==> Admin Lambda role: $LAMBDA_ROLE"
-make_role "$LAMBDA_ROLE" "lambda.amazonaws.com" "Admin OTA Lambda execution role (${PREFIX})"
+make_role "$LAMBDA_ROLE" "lambda.amazonaws.com" "Admin OTA Lambda execution role"
 
 aws iam put-role-policy \
   --role-name "$LAMBDA_ROLE" \
-  --policy-name "${PREFIX}-ota-admin-permissions" \
+  --policy-name "ota-admin-permissions" \
   --policy-document "{
     \"Version\": \"2012-10-17\",
     \"Statement\": [
@@ -54,7 +54,7 @@ aws iam put-role-policy \
         \"Sid\": \"Logs\",
         \"Effect\": \"Allow\",
         \"Action\": [\"logs:CreateLogGroup\",\"logs:CreateLogStream\",\"logs:PutLogEvents\"],
-        \"Resource\": \"arn:aws:logs:${REGION}:${ACCOUNT_ID}:log-group:/aws/lambda/${PREFIX}_ota_*\"
+        \"Resource\": \"arn:aws:logs:${REGION}:${ACCOUNT_ID}:log-group:/aws/lambda/ota_*\"
       },
       {
         \"Sid\": \"XRay\",
@@ -70,8 +70,8 @@ aws iam put-role-policy \
           \"dynamodb:DeleteItem\",\"dynamodb:Query\",\"dynamodb:Scan\"
         ],
         \"Resource\": [
-          \"arn:aws:dynamodb:${REGION}:${ACCOUNT_ID}:table/${PREFIX}_ota_*\",
-          \"arn:aws:dynamodb:${REGION}:${ACCOUNT_ID}:table/${PREFIX}_ota_*/index/*\",
+          \"arn:aws:dynamodb:${REGION}:${ACCOUNT_ID}:table/ota_*\",
+          \"arn:aws:dynamodb:${REGION}:${ACCOUNT_ID}:table/ota_*/index/*\",
           \"arn:aws:dynamodb:${REGION}:${ACCOUNT_ID}:table/${DEVICE_DATA_TABLE}\",
           \"arn:aws:dynamodb:${REGION}:${ACCOUNT_ID}:table/${DEVICE_DATA_TABLE}/index/*\"
         ]
@@ -104,7 +104,7 @@ aws iam put-role-policy \
         \"Effect\": \"Allow\",
         \"Action\": [\"iot:UpdateJobExecution\",\"iotjobsdata:UpdateJobExecution\"],
         \"Resource\": [
-          \"arn:aws:iot:${REGION}:${ACCOUNT_ID}:job/${PREFIX}-ota-*\",
+          \"arn:aws:iot:${REGION}:${ACCOUNT_ID}:job/ota-*\",
           \"arn:aws:iot:${REGION}:${ACCOUNT_ID}:thing/*\"
         ]
       },
@@ -112,7 +112,7 @@ aws iam put-role-policy \
         \"Sid\": \"Secrets\",
         \"Effect\": \"Allow\",
         \"Action\": \"secretsmanager:GetSecretValue\",
-        \"Resource\": \"arn:aws:secretsmanager:${REGION}:${ACCOUNT_ID}:secret:${PREFIX}-ota-*\"
+        \"Resource\": \"arn:aws:secretsmanager:${REGION}:${ACCOUNT_ID}:secret:ota-*\"
       },
       {
         \"Sid\": \"Cognito\",
@@ -131,11 +131,11 @@ echo "    Admin policy attached."
 # ── User Lambda execution role ────────────────────────────────────────────────
 echo ""
 echo "==> User Lambda role: $USER_ROLE"
-make_role "$USER_ROLE" "lambda.amazonaws.com" "User OTA Lambda execution role (${PREFIX})"
+make_role "$USER_ROLE" "lambda.amazonaws.com" "User OTA Lambda execution role"
 
 aws iam put-role-policy \
   --role-name "$USER_ROLE" \
-  --policy-name "${PREFIX}-ota-user-permissions" \
+  --policy-name "ota-user-permissions" \
   --policy-document "{
     \"Version\": \"2012-10-17\",
     \"Statement\": [
@@ -143,7 +143,7 @@ aws iam put-role-policy \
         \"Sid\": \"Logs\",
         \"Effect\": \"Allow\",
         \"Action\": [\"logs:CreateLogGroup\",\"logs:CreateLogStream\",\"logs:PutLogEvents\"],
-        \"Resource\": \"arn:aws:logs:${REGION}:${ACCOUNT_ID}:log-group:/aws/lambda/${PREFIX}_ota_user_*\"
+        \"Resource\": \"arn:aws:logs:${REGION}:${ACCOUNT_ID}:log-group:/aws/lambda/ota_user_*\"
       },
       {
         \"Sid\": \"XRay\",
@@ -168,8 +168,8 @@ aws iam put-role-policy \
           \"dynamodb:DeleteItem\",\"dynamodb:Query\"
         ],
         \"Resource\": [
-          \"arn:aws:dynamodb:${REGION}:${ACCOUNT_ID}:table/${PREFIX}_ota_*\",
-          \"arn:aws:dynamodb:${REGION}:${ACCOUNT_ID}:table/${PREFIX}_ota_*/index/*\"
+          \"arn:aws:dynamodb:${REGION}:${ACCOUNT_ID}:table/ota_*\",
+          \"arn:aws:dynamodb:${REGION}:${ACCOUNT_ID}:table/ota_*/index/*\"
         ]
       },
       {
@@ -183,7 +183,7 @@ aws iam put-role-policy \
         \"Effect\": \"Allow\",
         \"Action\": [\"iot:TagResource\"],
         \"Resource\": [
-          \"arn:aws:iot:${REGION}:${ACCOUNT_ID}:job/${PREFIX}-ota-*\",
+          \"arn:aws:iot:${REGION}:${ACCOUNT_ID}:job/ota-*\",
           \"arn:aws:iot:${REGION}:${ACCOUNT_ID}:thing/*\"
         ]
       },
@@ -197,7 +197,7 @@ aws iam put-role-policy \
         \"Sid\": \"Secrets\",
         \"Effect\": \"Allow\",
         \"Action\": \"secretsmanager:GetSecretValue\",
-        \"Resource\": \"arn:aws:secretsmanager:${REGION}:${ACCOUNT_ID}:secret:${PREFIX}-ota-*\"
+        \"Resource\": \"arn:aws:secretsmanager:${REGION}:${ACCOUNT_ID}:secret:ota-*\"
       },
       {
         \"Sid\": \"Cognito\",
@@ -218,11 +218,11 @@ echo "    User policy attached."
 # ── IoT Rule execution role ───────────────────────────────────────────────────
 echo ""
 echo "==> IoT Rule role: $RULE_ROLE"
-make_role "$RULE_ROLE" "iot.amazonaws.com" "IoT rule role to invoke OTA Lambdas (${PREFIX})"
+make_role "$RULE_ROLE" "iot.amazonaws.com" "IoT rule role to invoke OTA Lambdas"
 
 aws iam put-role-policy \
   --role-name "$RULE_ROLE" \
-  --policy-name "${PREFIX}-ota-rule-permissions" \
+  --policy-name "ota-rule-permissions" \
   --policy-document "{
     \"Version\": \"2012-10-17\",
     \"Statement\": [
@@ -230,14 +230,14 @@ aws iam put-role-policy \
         \"Effect\": \"Allow\",
         \"Action\": \"lambda:InvokeFunction\",
         \"Resource\": [
-          \"arn:aws:lambda:${REGION}:${ACCOUNT_ID}:function:${PREFIX}_ota_status_handler\",
-          \"arn:aws:lambda:${REGION}:${ACCOUNT_ID}:function:${PREFIX}_ota_device_register\"
+          \"arn:aws:lambda:${REGION}:${ACCOUNT_ID}:function:ota_status_handler\",
+          \"arn:aws:lambda:${REGION}:${ACCOUNT_ID}:function:ota_device_register\"
         ]
       },
       {
         \"Effect\": \"Allow\",
         \"Action\": [\"logs:CreateLogGroup\",\"logs:CreateLogStream\",\"logs:PutLogEvents\"],
-        \"Resource\": \"arn:aws:logs:${REGION}:${ACCOUNT_ID}:log-group:/${PREFIX}/ota/*\"
+        \"Resource\": \"arn:aws:logs:${REGION}:${ACCOUNT_ID}:log-group:/ota/*\"
       }
     ]
   }"

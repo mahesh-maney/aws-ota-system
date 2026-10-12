@@ -7,14 +7,11 @@ REGION="${REGION:-ap-south-1}"
 PREFIX="${PREFIX:-digilux}"
 ACCOUNT_ID="${ACCOUNT_ID:-$(aws sts get-caller-identity --query Account --output text)}"
 
-# IoT rule names only allow [a-zA-Z0-9_] — replace hyphens with underscores
-RULE_PREFIX="${PREFIX//-/_}"
+RULE_ROLE_ARN="arn:aws:iam::${ACCOUNT_ID}:role/${IOT_RULE_ROLE_NAME:-ota-iot-rule-role}"
+STATUS_LAMBDA_ARN="arn:aws:lambda:${REGION}:${ACCOUNT_ID}:function:ota_status_handler"
+REGISTER_LAMBDA_ARN="arn:aws:lambda:${REGION}:${ACCOUNT_ID}:function:ota_device_register"
 
-RULE_ROLE_ARN="arn:aws:iam::${ACCOUNT_ID}:role/${IOT_RULE_ROLE_NAME:-${PREFIX}-ota-iot-rule-role}"
-STATUS_LAMBDA_ARN="arn:aws:lambda:${REGION}:${ACCOUNT_ID}:function:${PREFIX}_ota_status_handler"
-REGISTER_LAMBDA_ARN="arn:aws:lambda:${REGION}:${ACCOUNT_ID}:function:${PREFIX}_ota_device_register"
-
-LOG_GROUP="/${PREFIX}/ota/rule-errors"
+LOG_GROUP="/ota/rule-errors"
 
 # ── Create error log group ────────────────────────────────────────────────────
 echo "==> CloudWatch log group for rule errors: $LOG_GROUP"
@@ -44,8 +41,8 @@ create_or_replace_rule() {
 }
 
 # ── Status ingest rule ────────────────────────────────────────────────────────
-echo "==> IoT Rule: ${RULE_PREFIX}_ota_status_ingest"
-create_or_replace_rule "${RULE_PREFIX}_ota_status_ingest" "{
+echo "==> IoT Rule: ota_status_ingest"
+create_or_replace_rule "ota_status_ingest" "{
   \"sql\": \"SELECT *, topic(3) AS deviceId FROM 'iot/device/+/ota/status'\",
   \"description\": \"Capture OTA job status updates from controllers\",
   \"ruleDisabled\": false,
@@ -62,8 +59,8 @@ create_or_replace_rule "${RULE_PREFIX}_ota_status_ingest" "{
 }"
 
 # ── Device register rule ──────────────────────────────────────────────────────
-echo "==> IoT Rule: ${RULE_PREFIX}_ota_device_register_rule"
-create_or_replace_rule "${RULE_PREFIX}_ota_device_register_rule" "{
+echo "==> IoT Rule: ota_device_register_rule"
+create_or_replace_rule "ota_device_register_rule" "{
   \"sql\": \"SELECT *, topic(3) AS deviceIdFromTopic FROM 'iot/device/+/ota/register'\",
   \"description\": \"Register controller in OTA inventory on agent startup\",
   \"ruleDisabled\": false,

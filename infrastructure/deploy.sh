@@ -118,20 +118,20 @@ export ACCOUNT_ID="${ACCOUNT_ID:-$(aws sts get-caller-identity --query Account -
 
 # Resource names derived from PREFIX
 export ARTIFACT_BUCKET="${ARTIFACT_BUCKET:-${PREFIX}-ota-artifacts}"
-export SIGNING_SECRET="${SIGNING_SECRET:-${PREFIX}-ota-signing-key}"
+export SIGNING_SECRET="${SIGNING_SECRET:-ota-signing-key}"
 
-# Lambda role names
-export LAMBDA_ROLE_NAME="${LAMBDA_ROLE_NAME:-${PREFIX}-ota-lambda-role}"
-export USER_LAMBDA_ROLE_NAME="${USER_LAMBDA_ROLE_NAME:-${PREFIX}-ota-user-lambda-role}"
-export IOT_RULE_ROLE_NAME="${IOT_RULE_ROLE_NAME:-${PREFIX}-ota-iot-rule-role}"
+# Lambda role names (generic — not customer-prefixed)
+export LAMBDA_ROLE_NAME="${LAMBDA_ROLE_NAME:-ota-lambda-role}"
+export USER_LAMBDA_ROLE_NAME="${USER_LAMBDA_ROLE_NAME:-ota-user-lambda-role}"
+export IOT_RULE_ROLE_NAME="${IOT_RULE_ROLE_NAME:-ota-iot-rule-role}"
 
-# DynamoDB table names
-export PACKAGES_TABLE="${PACKAGES_TABLE:-${PREFIX}_ota_packages}"
-export OTA_JOBS_TABLE="${OTA_JOBS_TABLE:-${PREFIX}_ota_jobs}"
-export COMPAT_TABLE="${COMPAT_TABLE:-${PREFIX}_ota_compatibility}"
-export DEPLOYMENTS_TABLE="${DEPLOYMENTS_TABLE:-${PREFIX}_ota_deployments}"
-export CONSENTS_TABLE="${CONSENTS_TABLE:-${PREFIX}_ota_user_consents}"
-export BETA_USERS_TABLE="${BETA_USERS_TABLE:-${PREFIX}_ota_beta_users}"
+# DynamoDB table names (generic — not customer-prefixed)
+export PACKAGES_TABLE="${PACKAGES_TABLE:-ota_packages}"
+export OTA_JOBS_TABLE="${OTA_JOBS_TABLE:-ota_jobs}"
+export COMPAT_TABLE="${COMPAT_TABLE:-ota_compatibility}"
+export DEPLOYMENTS_TABLE="${DEPLOYMENTS_TABLE:-ota_deployments}"
+export CONSENTS_TABLE="${CONSENTS_TABLE:-ota_user_consents}"
+export BETA_USERS_TABLE="${BETA_USERS_TABLE:-ota_beta_users}"
 
 # API Gateway
 export API_GATEWAY_ID API_GATEWAY_STAGE
@@ -163,7 +163,7 @@ export IOT_TOUCH_PANEL_MODELS="${IOT_TOUCH_PANEL_MODELS:-TP-100,TP-200}"
 # CloudFront
 export CLOUDFRONT_DOMAIN="${CLOUDFRONT_DOMAIN:-}"
 export CLOUDFRONT_KEY_PAIR_ID="${CLOUDFRONT_KEY_PAIR_ID:-}"
-export CLOUDFRONT_KEY_SECRET_NAME="${CLOUDFRONT_KEY_SECRET_NAME:-${PREFIX}-ota-cloudfront-key}"
+export CLOUDFRONT_KEY_SECRET_NAME="${CLOUDFRONT_KEY_SECRET_NAME:-ota-cloudfront-key}"
 
 # Presign tiers
 export PRESIGN_EXPIRY_TIER1_MAX_MB="${PRESIGN_EXPIRY_TIER1_MAX_MB:-50}"
