@@ -60,6 +60,18 @@ log_info "Lambda dir      : $LAMBDA_DIR"
 
 require_cmd python3 pip zip
 
+# ── PyArmor obfuscation setup ─────────────────────────────────────────────────
+# Set OBFUSCATE=true to encrypt all Lambda source before packaging.
+# Uses --platform linux.x86_64.11 so obfuscation works from any OS (Mac/Win/Linux).
+OBFUSCATE="${OBFUSCATE:-false}"
+if [[ "$OBFUSCATE" == "true" ]]; then
+  log_info "Obfuscation enabled — installing PyArmor..."
+  pip install -q pyarmor
+  # Pre-download the Linux x86_64 Python 3.11 runtime platform files
+  pyarmor runtime --platform linux.x86_64.11 -O /tmp/_pyarmor_runtime_base > /dev/null 2>&1 || true
+  log_ok "PyArmor $(pyarmor --version 2>&1 | head -1) ready  (target: linux.x86_64.11)"
+fi
+
 # ── Build environment JSON file ────────────────────────────────────────────────
 # AWS CLI --environment accepts: {"Variables":{"KEY":"VALUE",...}}
 # We write this to a temp file to avoid all shell quoting issues.
@@ -113,6 +125,44 @@ print(json.dumps(env))
 " > "$ENV_JSON_FILE"
 log_ok "Environment JSON written to $ENV_JSON_FILE  ($(wc -c < "$ENV_JSON_FILE") bytes)"
 
+# ── _obfuscate_lambda ─────────────────────────────────────────────────────────
+# Obfuscates all .py files from SRC_DIR into DEST_DIR using PyArmor.
+# Generates a linux.x86_64 Python 3.11 compatible runtime — works from any OS.
+_obfuscate_lambda() {
+  local SRC_DIR="$1"
+  local DEST_DIR="$2"
+  local OBF_TMP="/tmp/_pyarmor_obf_$$"
+  rm -rf "$OBF_TMP" && mkdir -p "$OBF_TMP"
+
+  # Collect all .py source files (exclude __pycache__)
+  local PY_FILES=()
+  for f in "$SRC_DIR"/*.py; do
+    [[ -f "$f" ]] && PY_FILES+=("$f")
+  done
+
+  if [[ ${#PY_FILES[@]} -eq 0 ]]; then
+    log_warn "  No .py files found in $SRC_DIR — skipping obfuscation."
+    return
+  fi
+
+  pyarmor gen \
+    --platform linux.x86_64.11 \
+    --output "$OBF_TMP" \
+    "${PY_FILES[@]}" 2>/dev/null
+
+  # Copy obfuscated .py files into destination
+  for f in "$OBF_TMP"/*.py; do
+    [[ -f "$f" ]] && cp "$f" "$DEST_DIR/"
+  done
+  # Copy the PyArmor runtime package (required at Lambda runtime)
+  if [[ -d "$OBF_TMP/pyarmor_runtime_000000" ]]; then
+    cp -r "$OBF_TMP/pyarmor_runtime_000000" "$DEST_DIR/"
+    log_info "  pyarmor_runtime_000000 bundled."
+  fi
+
+  rm -rf "$OBF_TMP"
+}
+
 # ── deploy_lambda ──────────────────────────────────────────────────────────────
 # Usage: deploy_lambda <src_suffix> <role_arn>
 #   src_suffix: the part after "digilux_ota_" in the source directory name
@@ -133,10 +183,12 @@ deploy_lambda() {
   fi
 
   # ── Build zip ────────────────────────────────────────────────────────────────
+  local PKG_TMP="/tmp/${FUNC_NAME}_pkg"
+  rm -rf "$PKG_TMP" && mkdir -p "$PKG_TMP"
+
+  # Step 1: Install pip dependencies (linux/x86_64 wheels) if needed
   if [[ -f "${SRC_DIR}/requirements.txt" ]]; then
     log_info "  Installing dependencies for $FUNC_NAME (linux/x86_64)..."
-    local PKG_TMP="/tmp/${FUNC_NAME}_pkg"
-    rm -rf "$PKG_TMP" && mkdir -p "$PKG_TMP"
     pip install -q \
       --platform manylinux2014_x86_64 \
       --python-version 3.11 \
@@ -145,22 +197,33 @@ deploy_lambda() {
       --upgrade \
       -r "${SRC_DIR}/requirements.txt" \
       -t "$PKG_TMP/"
-    cp "${SRC_DIR}/lambda_function.py" "$PKG_TMP/"
-    # Bundle sidecar config (user-facing copy, etc.)
-    shopt -s nullglob
-    for f in "${SRC_DIR}"/*.json "${SRC_DIR}"/messages.py; do
-      [[ -f "$f" ]] && cp "$f" "$PKG_TMP/"
-    done
-    shopt -u nullglob
-    cd "$PKG_TMP" && zip -qr "$ZIP_FILE" . && cd - > /dev/null
-    local ZIP_KB=$(( $(wc -c < "$ZIP_FILE") / 1024 ))
-    rm -rf "$PKG_TMP"
-    log_info "  Zip: $ZIP_FILE  (${ZIP_KB} KB with deps)"
+  fi
+
+  # Step 2: Copy or obfuscate Python source files
+  if [[ "$OBFUSCATE" == "true" ]]; then
+    log_info "  Obfuscating $FUNC_NAME source (linux.x86_64.11)..."
+    _obfuscate_lambda "$SRC_DIR" "$PKG_TMP"
   else
-    cd "$SRC_DIR" && zip -q "$ZIP_FILE" lambda_function.py messages.py messages.json 2>/dev/null \
-      || zip -q "$ZIP_FILE" lambda_function.py
-    cd - > /dev/null
-    log_info "  Zip: $ZIP_FILE  (no deps)"
+    shopt -s nullglob
+    for f in "$SRC_DIR"/*.py; do cp "$f" "$PKG_TMP/"; done
+    shopt -u nullglob
+  fi
+
+  # Step 3: Copy non-Python sidecars (JSON configs, etc.)
+  shopt -s nullglob
+  for f in "$SRC_DIR"/*.json; do [[ -f "$f" ]] && cp "$f" "$PKG_TMP/"; done
+  shopt -u nullglob
+
+  # Step 4: Zip everything and report size
+  cd "$PKG_TMP" && zip -qr "$ZIP_FILE" . && cd - > /dev/null
+  local ZIP_KB=$(( $(wc -c < "$ZIP_FILE") / 1024 ))
+  rm -rf "$PKG_TMP"
+  local OBFUSCATED_TAG=""
+  [[ "$OBFUSCATE" == "true" ]] && OBFUSCATED_TAG=" [obfuscated]"
+  if [[ -f "${SRC_DIR}/requirements.txt" ]]; then
+    log_info "  Zip: $ZIP_FILE  (${ZIP_KB} KB with deps${OBFUSCATED_TAG})"
+  else
+    log_info "  Zip: $ZIP_FILE  (${ZIP_KB} KB${OBFUSCATED_TAG})"
   fi
 
   # ── Create or update ──────────────────────────────────────────────────────────
