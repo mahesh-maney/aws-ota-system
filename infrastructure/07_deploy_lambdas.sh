@@ -64,12 +64,22 @@ require_cmd python3 pip zip
 # Set OBFUSCATE=true to encrypt all Lambda source before packaging.
 # Uses --platform linux.x86_64.11 so obfuscation works from any OS (Mac/Win/Linux).
 OBFUSCATE="${OBFUSCATE:-false}"
+PYARMOR_CMD=""
 if [[ "$OBFUSCATE" == "true" ]]; then
-  log_info "Obfuscation enabled — installing PyArmor..."
-  pip install -q pyarmor
-  # Pre-download the Linux x86_64 Python 3.11 runtime platform files
-  pyarmor runtime --platform linux.x86_64.11 -O /tmp/_pyarmor_runtime_base > /dev/null 2>&1 || true
-  log_ok "PyArmor $(pyarmor --version 2>&1 | head -1) ready  (target: linux.x86_64.11)"
+  log_info "Obfuscation enabled — installing PyArmor under Python 3.11..."
+  # Must use python3.11 so the generated runtime .so matches Lambda's Python 3.11
+  if ! command -v python3.11 &>/dev/null; then
+    log_warn "python3.11 not found — obfuscation requires Python 3.11. Install it and retry."
+    exit 1
+  fi
+  python3.11 -m pip install -q pyarmor
+  # Resolve the pyarmor executable installed under python3.11's prefix
+  PYARMOR_CMD="$(python3.11 -c 'import sys; print(sys.prefix)')/bin/pyarmor"
+  if [[ ! -x "$PYARMOR_CMD" ]]; then
+    log_warn "pyarmor executable not found at $PYARMOR_CMD"
+    exit 1
+  fi
+  log_ok "$($PYARMOR_CMD --version 2>&1 | head -1) ready  (target: linux.x86_64, cp311)"
 fi
 
 # ── Build environment JSON file ────────────────────────────────────────────────
@@ -145,8 +155,8 @@ _obfuscate_lambda() {
     return
   fi
 
-  pyarmor gen \
-    --platform linux.x86_64.11 \
+  $PYARMOR_CMD gen \
+    --platform linux.x86_64 \
     --output "$OBF_TMP" \
     "${PY_FILES[@]}" 2>/dev/null
 
@@ -201,7 +211,7 @@ deploy_lambda() {
 
   # Step 2: Copy or obfuscate Python source files
   if [[ "$OBFUSCATE" == "true" ]]; then
-    log_info "  Obfuscating $FUNC_NAME source (linux.x86_64.11)..."
+    log_info "  Obfuscating $FUNC_NAME source (linux.x86_64)..."
     _obfuscate_lambda "$SRC_DIR" "$PKG_TMP"
   else
     shopt -s nullglob
