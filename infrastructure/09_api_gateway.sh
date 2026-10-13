@@ -24,16 +24,23 @@ log_info "Region          : $REGION"
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
+ALL_RESOURCES=""   # populated once before first use
+
+_load_resources() {
+  if [[ -z "$ALL_RESOURCES" ]]; then
+    ALL_RESOURCES=$(aws apigateway get-resources \
+      --rest-api-id "$API_ID" --region "$REGION" \
+      --no-paginate --output json)
+  fi
+}
+
 get_or_create_resource() {
   local PARENT_ID="$1" PATH_PART="$2"
   local EXISTING
-  # Use Python to filter — avoids JMESPath && operator compatibility issues
-  EXISTING=$(aws apigateway get-resources \
-    --rest-api-id "$API_ID" --region "$REGION" \
-    --no-paginate --output json 2>/dev/null | \
-    python3 -c "
-import sys, json
-items = json.load(sys.stdin).get('items', [])
+  _load_resources
+  EXISTING=$(python3 -c "
+import sys, json, os
+items = json.loads(os.environ['ALL_RESOURCES']).get('items', [])
 match = [i['id'] for i in items if i.get('parentId') == '${PARENT_ID}' and i.get('pathPart') == '${PATH_PART}']
 print(match[0] if match else '')
 ")
@@ -41,12 +48,16 @@ print(match[0] if match else '')
     echo "$EXISTING"
   else
     log_info "    Creating resource: /${PATH_PART}" >&2
-    aws apigateway create-resource \
+    local NEW_ID
+    NEW_ID=$(aws apigateway create-resource \
       --rest-api-id "$API_ID" \
       --parent-id "$PARENT_ID" \
       --path-part "$PATH_PART" \
       --region "$REGION" \
-      --query "id" --output text
+      --query "id" --output text)
+    # Invalidate cache so newly created resource is visible
+    ALL_RESOURCES=""
+    echo "$NEW_ID"
   fi
 }
 
