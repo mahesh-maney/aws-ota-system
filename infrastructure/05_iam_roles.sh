@@ -123,6 +123,12 @@ aws iam put-role-policy \
           \"cognito-idp:AdminListGroupsForUser\"
         ],
         \"Resource\": \"arn:aws:cognito-idp:${REGION}:${ACCOUNT_ID}:userpool/${USER_COGNITO_POOL_ID}\"
+      },
+      {
+        \"Sid\": \"SQSDeadLetter\",
+        \"Effect\": \"Allow\",
+        \"Action\": \"sqs:SendMessage\",
+        \"Resource\": \"arn:aws:sqs:${REGION}:${ACCOUNT_ID}:ota_*-dlq\"
       }
     ]
   }"
