@@ -114,9 +114,12 @@ add_method() {
 }
 
 # Add OPTIONS (CORS preflight).  Skip if already exists.
+# Usage: add_cors <resource_id> [allowed_methods]
+# Default allowed_methods: GET,POST,PATCH,DELETE,OPTIONS
 # NOTE: uses if/then (NOT && return) to avoid set -e trap on the existence check.
 add_cors() {
   local RESOURCE_ID="$1"
+  local METHODS="${2:-GET,POST,PATCH,DELETE,OPTIONS}"
 
   # Idempotency check — always use if/then, never bare '&&' with set -euo pipefail
   if aws apigateway get-method \
@@ -153,7 +156,7 @@ add_cors() {
     --http-method OPTIONS --status-code 200 \
     --response-parameters '{
       "method.response.header.Access-Control-Allow-Headers": "'"'"'Content-Type,Authorization'"'"'",
-      "method.response.header.Access-Control-Allow-Methods": "'"'"'GET,POST,PATCH,OPTIONS'"'"'",
+      "method.response.header.Access-Control-Allow-Methods": "'"'"'${METHODS}'"'"'",
       "method.response.header.Access-Control-Allow-Origin":  "'"'"'*'"'"'"
     }' --region "$REGION" 2>/dev/null || true
 
@@ -208,8 +211,9 @@ add_cors   "$UPLOAD_COMPLETE"
 log_step "/api/v1/ota/packages/{packageName}/{version}"
 PKG_NAME=$(get_or_create_resource "$PKGS"     "{packageName}")
 PKG_VER=$(get_or_create_resource  "$PKG_NAME" "{version}")
-add_method "$PKG_VER" "GET" "$U_PKG_STATUS" "$ADMIN_AUTH"
-add_cors   "$PKG_VER"
+add_method "$PKG_VER" "GET"    "$U_PKG_STATUS" "$ADMIN_AUTH"
+add_method "$PKG_VER" "DELETE" "$U_PKG_STATUS" "$ADMIN_AUTH"
+add_cors   "$PKG_VER" "GET,DELETE,OPTIONS"
 
 log_step "/api/v1/ota/packages/{packageName}/{version}/activate"
 PKG_ACT=$(get_or_create_resource  "$PKG_VER"  "activate")
