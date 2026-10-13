@@ -81,5 +81,19 @@ aws s3api put-bucket-lifecycle-configuration \
     }]
   }'
 
+echo "==> CORS: allow browser presigned-URL uploads"
+aws s3api put-bucket-cors \
+  --bucket "$BUCKET" \
+  --region "$REGION" \
+  --cors-configuration '{
+    "CORSRules": [{
+      "AllowedOrigins": ["*"],
+      "AllowedMethods": ["GET", "PUT", "POST", "DELETE", "HEAD"],
+      "AllowedHeaders": ["*"],
+      "ExposeHeaders": ["ETag"],
+      "MaxAgeSeconds": 3000
+    }]
+  }'
+
 echo ""
 echo "S3 setup complete.  Bucket: s3://${BUCKET}"

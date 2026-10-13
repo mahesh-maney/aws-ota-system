@@ -669,7 +669,7 @@ def _abort_job(deployment_id: str, claims: dict, body: dict) -> dict:
 def lambda_handler(event, context):
     method       = event.get("httpMethod", "POST").upper()
     path_params  = event.get("pathParameters") or {}
-    job_id_param = path_params.get("jobId")
+    job_id_param = path_params.get("deploymentId") or path_params.get("jobId")
     request_id   = context.aws_request_id if context else None
 
     _log("info", "request_received",
