@@ -27,11 +27,16 @@ log_info "Region          : $REGION"
 get_or_create_resource() {
   local PARENT_ID="$1" PATH_PART="$2"
   local EXISTING
+  # Use Python to filter — avoids JMESPath && operator compatibility issues
   EXISTING=$(aws apigateway get-resources \
     --rest-api-id "$API_ID" --region "$REGION" \
-    --limit 500 \
-    --query "items[?parentId=='${PARENT_ID}' && pathPart=='${PATH_PART}'].id" \
-    --output text 2>/dev/null)
+    --no-paginate --output json 2>/dev/null | \
+    python3 -c "
+import sys, json
+items = json.load(sys.stdin).get('items', [])
+match = [i['id'] for i in items if i.get('parentId') == '${PARENT_ID}' and i.get('pathPart') == '${PATH_PART}']
+print(match[0] if match else '')
+")
   if [[ -n "$EXISTING" ]]; then
     echo "$EXISTING"
   else
