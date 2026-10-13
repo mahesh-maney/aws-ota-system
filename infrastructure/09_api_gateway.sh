@@ -169,6 +169,7 @@ U_UPLOAD_COMPLETE="ota_upload_complete"
 U_PKG_STATUS="ota_package_status"
 U_ACTIVATE="ota_package_activate"
 U_JOB="ota_job_create"
+U_BETA_USERS="ota_beta_users"
 U_CHECK="ota_user_check_updates"
 U_CONSENT="ota_user_consent"
 U_STATUS="ota_user_update_status"
@@ -219,6 +220,18 @@ log_step "/api/v1/ota/packages/{packageName}/{version}/activate"
 PKG_ACT=$(get_or_create_resource  "$PKG_VER"  "activate")
 add_method "$PKG_ACT" "PATCH" "$U_ACTIVATE" "$ADMIN_AUTH"
 add_cors   "$PKG_ACT"
+
+# ── /api/v1/ota/beta-users ────────────────────────────────────────────────────
+log_step "/api/v1/ota/beta-users"
+BETA_USERS_RES=$(get_or_create_resource "$OTA" "beta-users")
+add_method "$BETA_USERS_RES" "GET"    "$U_BETA_USERS" "$ADMIN_AUTH"
+add_method "$BETA_USERS_RES" "POST"   "$U_BETA_USERS" "$ADMIN_AUTH"
+add_cors   "$BETA_USERS_RES" "GET,POST,OPTIONS"
+
+log_step "/api/v1/ota/beta-users/{userId}"
+BETA_USER_ID=$(get_or_create_resource "$BETA_USERS_RES" "{userId}")
+add_method "$BETA_USER_ID" "DELETE" "$U_BETA_USERS" "$ADMIN_AUTH"
+add_cors   "$BETA_USER_ID" "DELETE,OPTIONS"
 
 # ── /api/v1/ota/deployments ───────────────────────────────────────────────────
 log_step "/api/v1/ota/deployments"

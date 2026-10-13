@@ -384,6 +384,7 @@ log_ok "artifact_processor — timeout=300s  memory=2048MB  /tmp=2048MB"
 
 deploy_lambda "package_register"    "$ADMIN_ROLE_ARN"
 deploy_lambda "compatibility_check" "$ADMIN_ROLE_ARN"
+deploy_lambda "beta_users"          "$ADMIN_ROLE_ARN"
 deploy_lambda "job_create"          "$ADMIN_ROLE_ARN"
 deploy_lambda "status_handler"      "$ADMIN_ROLE_ARN"
 deploy_lambda "device_register"     "$ADMIN_ROLE_ARN"
