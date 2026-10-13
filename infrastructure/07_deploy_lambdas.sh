@@ -335,6 +335,7 @@ deploy_lambda() {
 # ── Admin Lambdas ─────────────────────────────────────────────────────────────
 log_section "Admin Lambdas"
 deploy_lambda "upload_url"          "$ADMIN_ROLE_ARN"
+deploy_lambda "upload_complete"     "$ADMIN_ROLE_ARN"
 deploy_lambda "package_activate"    "$ADMIN_ROLE_ARN"
 deploy_lambda "artifact_processor"  "$ADMIN_ROLE_ARN"
 # artifact_processor handles large firmware files (up to ~200 MB) — override the
