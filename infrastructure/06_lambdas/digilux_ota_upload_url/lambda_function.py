@@ -41,6 +41,7 @@ import time
 import uuid
 
 import boto3
+from botocore.config import Config
 
 log = logging.getLogger()
 log.setLevel(logging.INFO)
@@ -82,7 +83,7 @@ DEVICE_TYPE_MAP = {
 VALID_RELEASE_TYPES = {"UAT", "PROD", "BETA", "CUSTOM"}
 
 dynamo = boto3.resource("dynamodb", region_name=REGION)
-s3     = boto3.client("s3",         region_name=REGION)
+s3     = boto3.client("s3",         region_name=REGION, config=Config(signature_version="s3v4"))
 
 
 def _audit(event: str, actor: str, resource: dict, result: str, **extra) -> None:
