@@ -73,10 +73,26 @@ if [[ "$OBFUSCATE" == "true" ]]; then
     exit 1
   fi
   python3.11 -m pip install -q pyarmor
-  # Resolve the pyarmor executable installed under python3.11's prefix
-  PYARMOR_CMD="$(python3.11 -c 'import sys; print(sys.prefix)')/bin/pyarmor"
-  if [[ ! -x "$PYARMOR_CMD" ]]; then
-    log_warn "pyarmor executable not found at $PYARMOR_CMD"
+  # Resolve the pyarmor executable — try sys.prefix, user base, and PATH
+  _PYARMOR_CANDIDATES=(
+    "$(python3.11 -c 'import sys; print(sys.prefix)')/bin/pyarmor"
+    "$(python3.11 -c 'import site; print(site.getuserbase())')/bin/pyarmor"
+    "$(python3.11 -m pip show pyarmor 2>/dev/null | grep ^Location | awk '{print $2}')/../../../bin/pyarmor"
+  )
+  PYARMOR_CMD=""
+  for _c in "${_PYARMOR_CANDIDATES[@]}"; do
+    _c="$(realpath "$_c" 2>/dev/null || echo "$_c")"
+    if [[ -x "$_c" ]]; then
+      PYARMOR_CMD="$_c"
+      break
+    fi
+  done
+  # Last resort: check PATH
+  if [[ -z "$PYARMOR_CMD" ]] && command -v pyarmor &>/dev/null; then
+    PYARMOR_CMD="$(command -v pyarmor)"
+  fi
+  if [[ -z "$PYARMOR_CMD" ]]; then
+    log_warn "pyarmor executable not found. Try: python3.11 -m pip install --user pyarmor"
     exit 1
   fi
   log_ok "$($PYARMOR_CMD --version 2>&1 | head -1) ready  (target: linux.x86_64, cp311)"
