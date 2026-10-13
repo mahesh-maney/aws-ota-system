@@ -443,9 +443,10 @@ else
     --output json 2>/dev/null || echo '{"items":[]}')
 
   # Resolve /api/v1 and /api/v1/ota resource IDs
-  read -r API_ROOT OTA_RESOURCE < <(echo "$ALL_RESOURCES" | python3 - <<'PYEOF'
-import sys, json
-items = json.load(sys.stdin).get("items", [])
+  export ALL_RESOURCES
+  read -r API_ROOT OTA_RESOURCE < <(python3 - <<'PYEOF'
+import json, os
+items = json.loads(os.environ["ALL_RESOURCES"]).get("items", [])
 api_root = next((r["id"] for r in items if r.get("path") == "/api/v1"), "")
 ota_res  = next((r["id"] for r in items
                  if r.get("parentId") == api_root and r.get("pathPart") == "ota"), "")
@@ -464,9 +465,9 @@ PYEOF
     echo ""
 
     # Build list of (resource_id, path, methods) for every resource under /ota
-    OTA_ITEMS=$(echo "$ALL_RESOURCES" | python3 - <<'PYEOF'
-import sys, json
-items = json.load(sys.stdin).get("items", [])
+    OTA_ITEMS=$(python3 - <<'PYEOF'
+import json, os
+items = json.loads(os.environ["ALL_RESOURCES"]).get("items", [])
 ota_items = [r for r in items if r.get("path", "").startswith("/api/v1/ota")]
 for r in sorted(ota_items, key=lambda x: x.get("path", "")):
     methods = [m for m in r.get("resourceMethods", {}).keys() if m != "OPTIONS"]
@@ -495,9 +496,10 @@ PYEOF
 
         # Extract function name from the integration URI:
         # arn:aws:apigateway:REGION:lambda:path/.../function:FUNC_NAME/invocations
-        FUNC_NAME=$(echo "$INTEGRATION" | python3 - <<'PYEOF'
-import sys, json
-d = json.load(sys.stdin)
+        export INTEGRATION
+        FUNC_NAME=$(python3 - <<'PYEOF'
+import json, os
+d = json.loads(os.environ["INTEGRATION"])
 uri = d.get("uri", "")
 if "function:" in uri:
     print(uri.split("function:")[1].split("/")[0])
