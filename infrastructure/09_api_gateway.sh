@@ -24,13 +24,14 @@ log_info "Region          : $REGION"
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
-ALL_RESOURCES=""   # populated once before first use
+export ALL_RESOURCES=""   # populated once before first use; exported for Python
 
 _load_resources() {
   if [[ -z "$ALL_RESOURCES" ]]; then
     ALL_RESOURCES=$(aws apigateway get-resources \
       --rest-api-id "$API_ID" --region "$REGION" \
       --no-paginate --output json)
+    export ALL_RESOURCES
   fi
 }
 
@@ -56,7 +57,7 @@ print(match[0] if match else '')
       --region "$REGION" \
       --query "id" --output text)
     # Invalidate cache so newly created resource is visible
-    ALL_RESOURCES=""
+    export ALL_RESOURCES=""
     echo "$NEW_ID"
   fi
 }
