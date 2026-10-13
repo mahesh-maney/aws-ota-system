@@ -125,6 +125,12 @@ aws iam put-role-policy \
         \"Resource\": \"arn:aws:cognito-idp:${REGION}:${ACCOUNT_ID}:userpool/${USER_COGNITO_POOL_ID}\"
       },
       {
+        \"Sid\": \"KMSArtifactKey\",
+        \"Effect\": \"Allow\",
+        \"Action\": [\"kms:Encrypt\",\"kms:Decrypt\",\"kms:GenerateDataKey\",\"kms:DescribeKey\"],
+        \"Resource\": \"*\"
+      },
+      {
         \"Sid\": \"SQSDeadLetter\",
         \"Effect\": \"Allow\",
         \"Action\": \"sqs:SendMessage\",

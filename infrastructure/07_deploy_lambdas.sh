@@ -43,6 +43,7 @@ PRESIGN_EXPIRY_TIER3_SEC="${PRESIGN_EXPIRY_TIER3_SEC:-86400}"
 PRESIGN_EXPIRY_TIER4_SEC="${PRESIGN_EXPIRY_TIER4_SEC:-172800}"
 IOT_JOB_TIMEOUT_MINUTES="${IOT_JOB_TIMEOUT_MINUTES:-1440}"
 CANARY_MAX="${CANARY_MAX:-5}"
+KMS_KEY_ID="${KMS_KEY_ID:-}"   # KMS key ID/alias for artifact envelope encryption
 
 LAMBDA_DIR="$(cd "$(dirname "$0")/06_lambdas" && pwd)"
 RUNTIME="python3.11"
@@ -98,6 +99,34 @@ if [[ "$OBFUSCATE" == "true" ]]; then
   log_ok "$($PYARMOR_CMD --version 2>&1 | head -1) ready  (target: linux.x86_64, cp311)"
 fi
 
+# ── KMS key — create if not supplied ──────────────────────────────────────────
+# artifact_processor uses KMS envelope encryption for per-artifact AES keys.
+# If KMS_KEY_ID is blank, create a new CMK + alias/digilux-ota-data-key now.
+KMS_ALIAS="alias/digilux-ota-data-key"
+if [[ -z "$KMS_KEY_ID" ]]; then
+  # Check if the alias already exists
+  _existing_kms=$(aws kms describe-key --key-id "$KMS_ALIAS" \
+    --region "$REGION" --query "KeyMetadata.KeyId" --output text 2>/dev/null || true)
+  if [[ -n "$_existing_kms" ]]; then
+    KMS_KEY_ID="$KMS_ALIAS"
+    log_ok "KMS key already exists: $KMS_ALIAS → $_existing_kms"
+  else
+    log_step "Creating KMS key for artifact envelope encryption"
+    _new_key_id=$(aws kms create-key \
+      --description "OTA artifact data key encryption — ${PREFIX}" \
+      --region "$REGION" \
+      --query "KeyMetadata.KeyId" --output text)
+    aws kms create-alias \
+      --alias-name "$KMS_ALIAS" \
+      --target-key-id "$_new_key_id" \
+      --region "$REGION"
+    KMS_KEY_ID="$KMS_ALIAS"
+    log_ok "KMS key created: $_new_key_id  alias: $KMS_ALIAS"
+  fi
+else
+  log_ok "KMS key (from config): $KMS_KEY_ID"
+fi
+
 # ── Build environment JSON file ────────────────────────────────────────────────
 # AWS CLI --environment accepts: {"Variables":{"KEY":"VALUE",...}}
 # We write this to a temp file to avoid all shell quoting issues.
@@ -117,6 +146,7 @@ env = {
         'DEPLOYMENTS_PKG_STATUS_INDEX': 'packageName-status-index',
         'BETA_USERS_TABLE': '${BETA_USERS_TABLE}',
         'ARTIFACT_BUCKET': '${ARTIFACT_BUCKET}',
+        'KMS_KEY_ID': '${KMS_KEY_ID}',
         'SIGNING_SECRET': '${SIGNING_SECRET}',
         'CLOUDFRONT_DOMAIN': '${CLOUDFRONT_DOMAIN}',
         'CLOUDFRONT_KEY_PAIR_ID': '${CLOUDFRONT_KEY_PAIR_ID}',
