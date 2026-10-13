@@ -62,6 +62,55 @@ print(match[0] if match else '')
   fi
 }
 
+# Add a Lambda-proxy method with AWS_IAM auth (no Cognito authorizer).
+# Used for device-facing endpoints authenticated via IoT Credentials Provider SigV4.
+add_method_iam() {
+  local RESOURCE_ID="$1" HTTP_METHOD="$2" FUNC_NAME="$3"
+
+  local EXISTS
+  if aws apigateway get-method \
+       --rest-api-id "$API_ID" \
+       --resource-id "$RESOURCE_ID" \
+       --http-method "$HTTP_METHOD" \
+       --region "$REGION" 2>/dev/null | grep -q '"httpMethod"'; then
+    log_skip "    $HTTP_METHOD (IAM) already exists on $RESOURCE_ID"
+    return 0
+  fi
+
+  local LAMBDA_ARN="arn:aws:lambda:${REGION}:${ACCOUNT_ID}:function:${FUNC_NAME}"
+
+  aws apigateway put-method \
+    --rest-api-id "$API_ID" \
+    --resource-id "$RESOURCE_ID" \
+    --http-method "$HTTP_METHOD" \
+    --authorization-type "AWS_IAM" \
+    --region "$REGION" > /dev/null
+
+  aws apigateway put-integration \
+    --rest-api-id "$API_ID" \
+    --resource-id "$RESOURCE_ID" \
+    --http-method "$HTTP_METHOD" \
+    --type AWS_PROXY \
+    --integration-http-method POST \
+    --uri "arn:aws:apigateway:${REGION}:lambda:path/2015-03-31/functions/${LAMBDA_ARN}/invocations" \
+    --region "$REGION" > /dev/null
+
+  local STMT_ID="${FUNC_NAME}-apigw-${RESOURCE_ID}-${HTTP_METHOD}"
+  aws lambda remove-permission \
+    --function-name "$FUNC_NAME" \
+    --statement-id "$STMT_ID" \
+    --region "$REGION" 2>/dev/null || true
+  aws lambda add-permission \
+    --function-name "$FUNC_NAME" \
+    --statement-id "$STMT_ID" \
+    --action "lambda:InvokeFunction" \
+    --principal "apigateway.amazonaws.com" \
+    --source-arn "arn:aws:execute-api:${REGION}:${ACCOUNT_ID}:${API_ID}/*/${HTTP_METHOD}/*" \
+    --region "$REGION" > /dev/null
+
+  log_ok "    $HTTP_METHOD (IAM) → $FUNC_NAME"
+}
+
 # Add a Lambda-proxy method.  Skip if method already exists (idempotent).
 add_method() {
   local RESOURCE_ID="$1" HTTP_METHOD="$2" FUNC_NAME="$3" AUTHORIZER_ID="$4"
@@ -170,6 +219,7 @@ U_PKG_STATUS="ota_package_status"
 U_ACTIVATE="ota_package_activate"
 U_JOB="ota_job_create"
 U_BETA_USERS="ota_beta_users"
+U_ARTIFACT_KEY="ota_artifact_key"
 U_CHECK="ota_user_check_updates"
 U_CONSENT="ota_user_consent"
 U_STATUS="ota_user_update_status"
@@ -256,6 +306,14 @@ OTA_DEVICE=$(get_or_create_resource "$OTA" "device")
 AVAIL=$(get_or_create_resource "$OTA_DEVICE" "available-updates")
 add_method "$AVAIL" "GET" "$U_CHECK" "$USER_AUTH"
 add_cors   "$AVAIL"
+
+# ── /api/v1/ota/device/artifact-key ──────────────────────────────────────────
+# Auth: AWS_IAM (IoT Credentials Provider SigV4) — NOT Cognito.
+# Devices use their X.509 cert → IoT Credentials Provider → IAM role → SigV4.
+log_step "/api/v1/ota/device/artifact-key"
+ARTIFACT_KEY_RES=$(get_or_create_resource "$OTA_DEVICE" "artifact-key")
+add_method_iam "$ARTIFACT_KEY_RES" "POST" "$U_ARTIFACT_KEY"
+add_cors       "$ARTIFACT_KEY_RES" "POST,OPTIONS"
 
 # ── /api/v1/ota/my/updates/* ─────────────────────────────────────────────────
 log_step "/api/v1/ota/my/updates/*"

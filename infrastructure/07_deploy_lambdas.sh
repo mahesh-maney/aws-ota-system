@@ -382,10 +382,13 @@ aws lambda wait function-updated \
   --function-name "ota_artifact_processor" --region "$REGION"
 log_ok "artifact_processor — timeout=300s  memory=2048MB  /tmp=2048MB"
 
+deploy_lambda "artifact_key"        "$ADMIN_ROLE_ARN"
 deploy_lambda "package_register"    "$ADMIN_ROLE_ARN"
 deploy_lambda "compatibility_check" "$ADMIN_ROLE_ARN"
 deploy_lambda "beta_users"          "$ADMIN_ROLE_ARN"
 deploy_lambda "job_create"          "$ADMIN_ROLE_ARN"
+deploy_lambda "job_sync"            "$ADMIN_ROLE_ARN"
+deploy_lambda "key_server"          "$ADMIN_ROLE_ARN"
 deploy_lambda "status_handler"      "$ADMIN_ROLE_ARN"
 deploy_lambda "device_register"     "$ADMIN_ROLE_ARN"
 
