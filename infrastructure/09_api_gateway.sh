@@ -162,6 +162,7 @@ add_cors() {
 # Lambda function names (generic — no customer prefix)
 U_UPLOAD="ota_upload_url"
 U_UPLOAD_COMPLETE="ota_upload_complete"
+U_PKG_STATUS="ota_package_status"
 U_ACTIVATE="ota_package_activate"
 U_JOB="ota_job_create"
 U_CHECK="ota_user_check_updates"
@@ -203,9 +204,13 @@ UPLOAD_COMPLETE=$(get_or_create_resource "$UPLOAD" "complete")
 add_method "$UPLOAD_COMPLETE" "POST" "$U_UPLOAD_COMPLETE" "$ADMIN_AUTH"
 add_cors   "$UPLOAD_COMPLETE"
 
-log_step "/api/v1/ota/packages/{packageName}/{version}/activate"
+log_step "/api/v1/ota/packages/{packageName}/{version}"
 PKG_NAME=$(get_or_create_resource "$PKGS"     "{packageName}")
 PKG_VER=$(get_or_create_resource  "$PKG_NAME" "{version}")
+add_method "$PKG_VER" "GET" "$U_PKG_STATUS" "$ADMIN_AUTH"
+add_cors   "$PKG_VER"
+
+log_step "/api/v1/ota/packages/{packageName}/{version}/activate"
 PKG_ACT=$(get_or_create_resource  "$PKG_VER"  "activate")
 add_method "$PKG_ACT" "PATCH" "$U_ACTIVATE" "$ADMIN_AUTH"
 add_cors   "$PKG_ACT"
