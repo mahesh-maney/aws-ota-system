@@ -36,19 +36,20 @@
 
 The script patches **only** these 5 variables. All other existing env vars are preserved untouched.
 
-| Env Var | Value to Set | Applied to Lambda(s) | Source of Truth |
+| Env Var | Value to Set | Applied to Lambda(s) | Source Confirmed |
 |---------|-------------|----------------------|-----------------|
-| `COGNITO_POOL_ID` | `us-east-1_DuegVptxS` | `ota_beta_users`, `ota_package_register` | Confirmed in source — `os.environ["COGNITO_POOL_ID"]` |
-| `COGNITO_USER_POOL_ID` | `us-east-1_DuegVptxS` | ALL 19 Lambdas | Set by `07_deploy_lambdas.sh` to all — var not directly found in source (may be consumed at runtime) |
-| `SES_SENDER` | `noreply@nucleusqa.honeywell.com` | ALL 19 Lambdas | Set by `07_deploy_lambdas.sh` to all — var not directly found in source (may be consumed at runtime) |
-| `PRODUCTION_GROUP` | `HON-PROD` | `ota_job_create`, `ota_package_activate`, `ota_device_register` | Confirmed in source — `os.environ.get("PRODUCTION_GROUP", ...)` |
-| `GATEWAYS_GROUP` | `HON-ZigbeeGateway` | `ota_device_register` | Confirmed in source — `os.environ.get("GATEWAYS_GROUP", ...)` |
+| `COGNITO_POOL_ID` | `us-east-1_DuegVptxS` | `ota_beta_users`, `ota_package_register` | Yes — `os.environ["COGNITO_POOL_ID"]` found in source |
+| `COGNITO_USER_POOL_ID` | `us-east-1_DuegVptxS` | **None (excluded)** | No — not found in any Lambda source file |
+| `SES_SENDER` | `noreply@nucleusqa.honeywell.com` | **None (excluded)** | No — not found in any Lambda source file |
+| `PRODUCTION_GROUP` | `HON-PROD` | `ota_job_create`, `ota_package_activate`, `ota_device_register` | Yes — `os.environ.get("PRODUCTION_GROUP", ...)` found in source |
+| `GATEWAYS_GROUP` | `HON-ZigbeeGateway` | `ota_device_register` | Yes — `os.environ.get("GATEWAYS_GROUP", ...)` found in source |
 
-> **Note on COGNITO_USER_POOL_ID and SES_SENDER:** These are not found by direct
-> source code grep (grep searches plain `.py` files). However `07_deploy_lambdas.sh`
-> explicitly sets them on every Lambda in the shared env JSON. To stay consistent
-> with the deploy script and avoid runtime surprises, the patch script applies them
-> to ALL Lambdas.
+> **Note on COGNITO_USER_POOL_ID and SES_SENDER:** Source code grep across all 19
+> Lambda `.py` files found no `os.environ` reference for either variable.
+> `07_deploy_lambdas.sh` sets them on all Lambdas via the shared env JSON, but
+> since no Lambda source is confirmed to read them, the patch script excludes them.
+> If a Lambda is found to use either variable, add it to the respective list in
+> `PATCH_MAP` inside `patch_lambda_env.py`.
 
 ---
 

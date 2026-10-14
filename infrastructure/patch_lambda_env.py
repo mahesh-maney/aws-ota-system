@@ -94,7 +94,18 @@ ALL_LAMBDAS = [
 ]
 
 # Map: env_var_key → (required_value, list_of_lambda_names_to_patch)
-# ALL_LAMBDAS sentinel means apply to every Lambda in the list above.
+#
+# Targets are based strictly on source code analysis (grep os.environ):
+#   COGNITO_POOL_ID      confirmed in: ota_beta_users, ota_package_register
+#   COGNITO_USER_POOL_ID NOT found in any Lambda source — excluded
+#   SES_SENDER           NOT found in any Lambda source — excluded
+#   PRODUCTION_GROUP     confirmed in: ota_job_create, ota_package_activate, ota_device_register
+#   GATEWAYS_GROUP       confirmed in: ota_device_register
+#
+# NOTE: COGNITO_USER_POOL_ID and SES_SENDER are set by 07_deploy_lambdas.sh
+# on all Lambdas but are not read by any Lambda source file. They are excluded
+# here to stay strictly selective. If a Lambda is found to read them in future,
+# add it to the respective list below.
 PATCH_MAP = {
     "COGNITO_POOL_ID": (
         COGNITO_POOL_ID,
@@ -102,11 +113,11 @@ PATCH_MAP = {
     ),
     "COGNITO_USER_POOL_ID": (
         COGNITO_USER_POOL_ID,
-        ALL_LAMBDAS,   # set by deploy script on all Lambdas
+        [],  # no Lambda source confirmed — excluded
     ),
     "SES_SENDER": (
         SES_SENDER,
-        ALL_LAMBDAS,   # set by deploy script on all Lambdas
+        [],  # no Lambda source confirmed — excluded
     ),
     "PRODUCTION_GROUP": (
         PRODUCTION_GROUP,
