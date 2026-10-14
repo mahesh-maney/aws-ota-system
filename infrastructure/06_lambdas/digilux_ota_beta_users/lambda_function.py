@@ -67,8 +67,8 @@ def _get_cognito_email(user_id: str) -> str:
 def lambda_handler(event, context):
     method      = event.get("httpMethod", "GET").upper()
     path_params = event.get("pathParameters") or {}
-    # API GW path param is named 'email' but now carries userId
-    user_id_param = path_params.get("email")
+    # API GW path param may be named {userId} (new) or {email} (legacy Digilux)
+    user_id_param = path_params.get("userId") or path_params.get("email")
     if user_id_param:
         user_id_param = urllib.parse.unquote(user_id_param)
 
