@@ -117,7 +117,7 @@ def _add_beta_user(body: dict, caller: str) -> dict:
     try:
         cog_user = cognito.admin_get_user(UserPoolId=USER_POOL_ID, Username=email)
     except cognito.exceptions.UserNotFoundException:
-        return _response(404, {"error": f"No Digilux account found for {email}"})
+        return _response(404, {"error": f"No account found for {email}"})
 
     user_attrs = {a["Name"]: a["Value"] for a in cog_user.get("UserAttributes", [])}
     user_id    = user_attrs.get("sub")
