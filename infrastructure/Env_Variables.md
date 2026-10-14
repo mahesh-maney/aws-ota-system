@@ -55,13 +55,14 @@ The script patches **only** these 5 variables. All other existing env vars are p
 
 ## What the Script Does
 
-For each Lambda in the target list:
+For each of the 19 Lambdas:
 1. **Reads** the current environment variables from AWS.
-2. **Compares** each of the 5 target keys against the required value.
-3. **Reports** status: `[OK]` (correct), `[FIX]` (wrong value), `[ADD]` (key missing).
-4. **Merges** only the changed keys into the existing env — all other vars preserved.
-5. **Calls** `update-function-configuration` only if at least one key changed.
-6. **Waits** for the update to complete before moving to the next Lambda.
+2. **For each of the 5 managed keys:**
+   - Key belongs to this Lambda → `[ADD]` if missing, `[FIX]` if wrong value, `[OK]` if correct.
+   - Key does NOT belong to this Lambda but EXISTS on it → `[REMOVE]` (cleanup stale var).
+3. **All other existing env vars** (not in the 5 managed keys) → **preserved untouched**.
+4. **Calls** `update-function-configuration` only if at least one key changed or removed.
+5. **Waits** for the update to complete before moving to the next Lambda.
 
 ---
 

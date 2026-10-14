@@ -148,10 +148,16 @@ lmbda = boto3.client("lambda", region_name=REGION)
 
 def patch_lambda(func_name, required_vars):
     """
-    Fetch current env vars, compare against required_vars, patch only what differs.
-    Preserves all existing env vars not in required_vars.
+    Fetch current env vars and apply selective patch:
+      - Keys in required_vars    → ADD if missing, FIX if wrong value, OK if correct.
+      - Keys in PATCH_MAP but NOT in required_vars (i.e. not used by this Lambda)
+        → REMOVE if they currently exist on this Lambda.
+      - All other existing env vars → preserved untouched.
     """
     print(f"\n  Lambda: {func_name}")
+
+    # All 5 managed keys — used to detect keys that exist but should be removed
+    all_managed_keys = set(PATCH_MAP.keys())
 
     # Fetch current configuration
     try:
@@ -165,27 +171,38 @@ def patch_lambda(func_name, required_vars):
 
     current_vars = resp.get("Environment", {}).get("Variables", {})
 
-    # Compare and build patch
-    changes = {}
+    changes  = {}   # keys to add or update
+    removals = []   # keys to remove
+
+    # 1. Add / fix keys this Lambda should have
     for key, required_value in required_vars.items():
         current_value = current_vars.get(key)
         if current_value is None:
-            print(f"    [ADD]   {key} = {required_value}")
+            print(f"    [ADD]    {key} = {required_value}")
             changes[key] = required_value
         elif current_value != required_value:
-            print(f"    [FIX]   {key}")
-            print(f"            was : {current_value}")
-            print(f"            now : {required_value}")
+            print(f"    [FIX]    {key}")
+            print(f"             was : {current_value}")
+            print(f"             now : {required_value}")
             changes[key] = required_value
         else:
-            print(f"    [OK]    {key} = {current_value}")
+            print(f"    [OK]     {key} = {current_value}")
 
-    if not changes:
-        print(f"    [SKIP]  No changes needed")
+    # 2. Remove managed keys that exist on this Lambda but are NOT in required_vars
+    keys_to_remove = all_managed_keys - set(required_vars.keys())
+    for key in sorted(keys_to_remove):
+        if key in current_vars:
+            print(f"    [REMOVE] {key} (not used by this Lambda)")
+            removals.append(key)
+
+    if not changes and not removals:
+        print(f"    [SKIP]   No changes needed")
         return
 
-    # Merge changes into existing vars (preserve everything else)
+    # Build final env: start from current, apply additions/fixes, drop removals
     merged_vars = {**current_vars, **changes}
+    for key in removals:
+        merged_vars.pop(key, None)
 
     try:
         lmbda.update_function_configuration(
@@ -195,9 +212,9 @@ def patch_lambda(func_name, required_vars):
         # Wait for update to complete before moving to next Lambda
         waiter = lmbda.get_waiter("function_updated")
         waiter.wait(FunctionName=func_name, WaiterConfig={"Delay": 2, "MaxAttempts": 30})
-        print(f"    [DONE]  {len(changes)} var(s) updated successfully")
+        print(f"    [DONE]   {len(changes)} added/fixed, {len(removals)} removed")
     except ClientError as e:
-        print(f"    [ERROR] Update failed: {e}")
+        print(f"    [ERROR]  Update failed: {e}")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
