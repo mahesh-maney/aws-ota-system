@@ -51,6 +51,8 @@ from messages import (
     OTA_COMPLETED_MSG,
     OTA_FAILED_MSG,
     OTA_IN_PROGRESS_MSG,
+    OTA_JOB_ACTIVE_NO_NEW_MSG,
+    OTA_JOB_COMPLETED_NO_NEW_MSG,
     OTA_TIMED_OUT_MSG,
     UNAUTHORIZED_MSG,
 )
@@ -97,15 +99,23 @@ def _resp(status: int, body: dict) -> dict:
 def _success(devices: list) -> dict:
     """
     HTTP 200 envelope: status is always success.
-    - devices empty                              → NO_UPDATE_MSG (client shows message)
-    - all entries otaStatus=NOT_REGISTERED       → NOT_REGISTERED_MSG (client shows message;
-                                                   otaStatus stays NOT_REGISTERED on each device)
-    - otherwise (REGISTERED / JOB_ACTIVE / mix)  → message "" (client reads devices only)
+    - devices empty                              → NO_UPDATE_MSG
+    - all NOT_REGISTERED                         → NOT_REGISTERED_MSG
+    - any REGISTERED                             → "" (updates available; client reads devices)
+    - no REGISTERED, any JOB_ACTIVE              → OTA_JOB_ACTIVE_NO_NEW_MSG
+    - no REGISTERED, any JOB_COMPLETED           → OTA_JOB_COMPLETED_NO_NEW_MSG
+    - otherwise                                  → "" (fallback)
     """
     if not devices:
         message = NO_UPDATE_MSG
     elif all(d.get("otaStatus") == "NOT_REGISTERED" for d in devices):
         message = NOT_REGISTERED_MSG
+    elif any(d.get("otaStatus") == "REGISTERED" for d in devices):
+        message = ""
+    elif any(d.get("otaStatus") == "JOB_ACTIVE" for d in devices):
+        message = OTA_JOB_ACTIVE_NO_NEW_MSG
+    elif any(d.get("otaStatus") == "JOB_COMPLETED" for d in devices):
+        message = OTA_JOB_COMPLETED_NO_NEW_MSG
     else:
         message = ""
 
@@ -233,10 +243,10 @@ _RETRYABLE_JOB_STATUSES = {"FAILED", "TIMED_OUT"}
 _COMPLETED_JOB_STATUSES = {"SUCCEEDED"}
 
 
-def _get_job_live_status(job_id: str, thing_name: str | None) -> str | None:
+def _get_job_live_status(job_id: str, thing_name: str | None) -> tuple:
     """
     Look up a job in OTA_JOBS_TABLE, optionally refresh via IoT live status.
-    Returns the status string or None if job not found.
+    Returns (status_string, job_item) or (None, None) if job not found.
     """
     try:
         job = dynamo.Table(OTA_JOBS_TABLE).get_item(
@@ -246,7 +256,7 @@ def _get_job_live_status(job_id: str, thing_name: str | None) -> str | None:
             _log("warning", "job_not_found_in_table",
                  jobId=job_id,
                  detail="pendingJobId set but no record in OTA_JOBS_TABLE")
-            return None
+            return None, None
 
         status = job.get("status", "")
 
@@ -263,12 +273,12 @@ def _get_job_live_status(job_id: str, thing_name: str | None) -> str | None:
                 _log("warning", "job_live_status_refresh_failed",
                      jobId=job_id, error=str(exc),
                      detail="Using DynamoDB status as fallback")
-        return status
+        return status, job
 
     except Exception as exc:
         _log("warning", "job_status_lookup_failed",
              jobId=job_id, error=str(exc))
-        return None
+        return None, None
 
 
 def _check_active_job(user_id: str, device_id: str, pkg_name: str,
@@ -291,14 +301,6 @@ def _check_active_job(user_id: str, device_id: str, pkg_name: str,
     # Quick path: pendingJobId on device record
     if pending_job_id and not pending_job_id.startswith("digilux-ota-dev-"):
         job_id_to_check = pending_job_id
-        # Get version from job record
-        try:
-            jitem = dynamo.Table(OTA_JOBS_TABLE).get_item(
-                Key={"jobId": pending_job_id}
-            ).get("Item") or {}
-            job_version = jitem.get("version", "")
-        except Exception:
-            pass
 
     # If no pendingJobId, check consents table for ACCEPTED + active job
     if not job_id_to_check:
@@ -330,9 +332,13 @@ def _check_active_job(user_id: str, device_id: str, pkg_name: str,
     if not job_id_to_check:
         return False, None, None, None
 
-    status = _get_job_live_status(job_id_to_check, thing_name)
+    status, job_item = _get_job_live_status(job_id_to_check, thing_name)
     if not status:
         return False, None, None, None
+
+    # job_version: prefer consent-derived value; fall back to job record
+    if not job_version and job_item:
+        job_version = job_item.get("version", "")
 
     _log("debug", "active_job_status_found",
          jobId=job_id_to_check, status=status,
@@ -358,9 +364,24 @@ def _check_active_job(user_id: str, device_id: str, pkg_name: str,
             "version": job_version or "",
             "message": msg.format(version=job_version or ""),
         }
+        # Attach error details from deviceStatuses so the app can show why the job failed.
+        # status_handler stores errorCode + errorReason + error under the device's key
+        # (thing_name if available, otherwise device_id).
+        if job_item:
+            device_statuses = job_item.get("deviceStatuses") or {}
+            dev_status = device_statuses.get(thing_name or "") or device_statuses.get(device_id) or {}
+            error_code   = dev_status.get("errorCode")
+            error_reason = dev_status.get("errorReason")
+            error_msg    = dev_status.get("error") or dev_status.get("statusDetail") or ""
+            if error_code is not None:
+                last_failed["errorCode"]   = int(error_code)
+                last_failed["errorReason"] = error_reason or ""
+            if error_msg:
+                last_failed["error"] = error_msg
         _log("info", "device_has_retryable_job",
              deviceId=device_id, jobId=job_id_to_check, status=status,
-             detail="FAILED/TIMED_OUT job — will continue to offer update")
+             detail="FAILED/TIMED_OUT job — will continue to offer update",
+             **({"errorCode": last_failed.get("errorCode")} if "errorCode" in last_failed else {}))
         return False, None, last_failed, None
 
     if status in _COMPLETED_JOB_STATUSES:

@@ -35,6 +35,12 @@ _DEFAULTS = {
     "job_completed": (
         "Your firmware ver {version} update was successful."
     ),
+    "job_active_no_new": (
+        "Your firmware update is in progress. There are no new updates available at this time."
+    ),
+    "job_completed_no_new": (
+        "Firmware updated successfully. There are no new updates available at this time."
+    ),
     "unauthorized": "Unauthorized — invalid token",
     "internal_error": "Internal server error",
 }
@@ -47,6 +53,8 @@ _ENV_OVERRIDES = {
     "OTA_FAILED_MSG": "failed",
     "OTA_TIMED_OUT_MSG": "timed_out",
     "OTA_COMPLETED_MSG": "job_completed",
+    "OTA_JOB_ACTIVE_NO_NEW_MSG": "job_active_no_new",
+    "OTA_JOB_COMPLETED_NO_NEW_MSG": "job_completed_no_new",
 }
 
 
@@ -99,3 +107,5 @@ OTA_TIMED_OUT_MSG = MESSAGES["timed_out"]
 OTA_COMPLETED_MSG = MESSAGES["job_completed"]
 UNAUTHORIZED_MSG = MESSAGES["unauthorized"]
 INTERNAL_ERROR_MSG = MESSAGES["internal_error"]
+OTA_JOB_ACTIVE_NO_NEW_MSG = MESSAGES["job_active_no_new"]
+OTA_JOB_COMPLETED_NO_NEW_MSG = MESSAGES["job_completed_no_new"]
