@@ -26,13 +26,15 @@ CONFIG_FILE="${DIR}/deploy.config"
 ONLY_PHASE=""
 FROM_PHASE=""
 UI_ONLY=false
+export OBFUSCATE="${OBFUSCATE:-false}"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --config)   CONFIG_FILE="$2"; shift 2 ;;
-    --phase)    ONLY_PHASE="$2"; shift 2 ;;
-    --from)     FROM_PHASE="$2"; shift 2 ;;
-    --ui-only)  UI_ONLY=true; shift ;;
+    --config)     CONFIG_FILE="$2"; shift 2 ;;
+    --phase)      ONLY_PHASE="$2"; shift 2 ;;
+    --from)       FROM_PHASE="$2"; shift 2 ;;
+    --ui-only)    UI_ONLY=true; shift ;;
+    --obfuscate)  OBFUSCATE=true; shift ;;
     *) echo "Unknown argument: $1"; exit 1 ;;
   esac
 done
@@ -223,6 +225,7 @@ PHASES=(
   "10_cloudwatch.sh"
   "11_s3_events.sh"
   "12_production_hardening.sh"
+  "15_cloudwatch_alarms.sh"
 )
 
 PHASE_TIMES=()
@@ -297,8 +300,7 @@ echo ""
 echo "  Base API URL:"
 echo "    https://${API_GATEWAY_ID}.execute-api.${REGION}.amazonaws.com/${API_GATEWAY_STAGE}"
 echo ""
-echo "  OTA signing public key (embed in each controller at"
-echo "  /etc/digilux/ota-signing.pub):"
+echo "  OTA signing public key (share with controller firmware team):"
 echo ""
 echo "  $SIGNING_KEY_OUTPUT"
 echo ""

@@ -102,7 +102,7 @@ fi
 # ── KMS key — create if not supplied ──────────────────────────────────────────
 # artifact_processor uses KMS envelope encryption for per-artifact AES keys.
 # If KMS_KEY_ID is blank, create a new CMK + alias/digilux-ota-data-key now.
-KMS_ALIAS="alias/digilux-ota-data-key"
+KMS_ALIAS="alias/${PREFIX}-ota-data-key"
 if [[ -z "$KMS_KEY_ID" ]]; then
   # Check if the alias already exists
   _existing_kms=$(aws kms describe-key --key-id "$KMS_ALIAS" \
@@ -174,6 +174,7 @@ env = {
         'CONSENTS_USER_INDEX': 'userId-deviceId-index',
         'CONSENTS_JOB_INDEX': 'jobId-index',
         'CONSENTS_DEPLOYMENT_INDEX': 'deploymentId-index',
+        'IOT_ENDPOINT': '${IOT_ENDPOINT:-}',
         'LOG_LEVEL': 'INFO',
     }
 }
@@ -402,7 +403,7 @@ deploy_lambda "user_get_download_link" "$USER_ROLE_ARN"
 # ── IoT invoke permissions ────────────────────────────────────────────────────
 # Grant IoT rules permission to invoke both $LATEST and the 'prod' alias.
 log_section "IoT Invoke Permissions"
-for SUFFIX in status_handler device_register; do
+for SUFFIX in status_handler device_register artifact_key; do
   FUNC="ota_${SUFFIX}"
   # Permission on the unqualified function (covers $LATEST)
   STMT_ID="iot-rule-invoke-${FUNC}"

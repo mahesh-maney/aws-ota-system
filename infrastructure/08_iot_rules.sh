@@ -41,6 +41,18 @@ create_or_replace_rule() {
   fi
 }
 
+# ── Enable IoT Core job lifecycle events ──────────────────────────────────────
+# Required for the ota_job_lifecycle_sync rule to receive $aws/events/job/+/+ messages.
+# Without this the rule exists but fires on nothing — jobs stay stuck in DynamoDB.
+echo "==> Enabling IoT Core job lifecycle events"
+aws iot update-event-configurations \
+  --event-configurations '{
+    "JOB":           {"Enabled": true},
+    "JOB_EXECUTION": {"Enabled": true}
+  }' \
+  --region "$REGION"
+echo "    Job and job-execution lifecycle events enabled."
+
 # ── Status ingest rule ────────────────────────────────────────────────────────
 echo "==> IoT Rule: ota_status_ingest"
 create_or_replace_rule "ota_status_ingest" "{
@@ -121,6 +133,52 @@ aws iam put-role-policy \
       \"Effect\": \"Allow\",
       \"Action\": \"lambda:InvokeFunction\",
       \"Resource\": \"${JOB_SYNC_LAMBDA_ARN}\"
+    }]
+  }" 2>/dev/null || true
+
+# ── MQTT handshake rule → ota_artifact_key ────────────────────────────────────
+# Device sends {"jobId":"..."} to iot/device/{thingName}/ota/handshake/request.
+# Lambda decrypts the artifact data key and publishes it back on the response topic.
+ARTIFACT_KEY_LAMBDA_ARN="arn:aws:lambda:${REGION}:${ACCOUNT_ID}:function:ota_artifact_key"
+echo "==> IoT Rule: ota_artifact_key_request"
+create_or_replace_rule "ota_artifact_key_request" "{
+  \"sql\": \"SELECT *, topic(3) AS thingName FROM 'iot/device/+/ota/handshake/request'\",
+  \"description\": \"MQTT key delivery — forward handshake requests to ota_artifact_key Lambda\",
+  \"ruleDisabled\": false,
+  \"awsIotSqlVersion\": \"2016-03-23\",
+  \"actions\": [{
+    \"lambda\": { \"functionArn\": \"${ARTIFACT_KEY_LAMBDA_ARN}\" }
+  }],
+  \"errorAction\": {
+    \"cloudwatchLogs\": {
+      \"logGroupName\": \"${LOG_GROUP}\",
+      \"roleArn\": \"${RULE_ROLE_ARN}\"
+    }
+  }
+}"
+
+aws lambda remove-permission \
+  --function-name "ota_artifact_key" \
+  --statement-id "ota_artifact_key-iot-handshake" \
+  --region "$REGION" 2>/dev/null || true
+aws lambda add-permission \
+  --function-name "ota_artifact_key" \
+  --statement-id "ota_artifact_key-iot-handshake" \
+  --action "lambda:InvokeFunction" \
+  --principal "iot.amazonaws.com" \
+  --source-arn "arn:aws:iot:${REGION}:${ACCOUNT_ID}:rule/ota_artifact_key_request" \
+  --region "$REGION" > /dev/null
+echo "    Lambda invoke permission granted to IoT handshake rule"
+
+aws iam put-role-policy \
+  --role-name "${IOT_RULE_ROLE_NAME:-ota-iot-rule-role}" \
+  --policy-name "ota-rule-artifact-key" \
+  --policy-document "{
+    \"Version\": \"2012-10-17\",
+    \"Statement\": [{
+      \"Effect\": \"Allow\",
+      \"Action\": \"lambda:InvokeFunction\",
+      \"Resource\": \"${ARTIFACT_KEY_LAMBDA_ARN}\"
     }]
   }" 2>/dev/null || true
 

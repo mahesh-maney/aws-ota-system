@@ -79,7 +79,7 @@ aws iam put-role-policy \
       {
         \"Sid\": \"S3Artifacts\",
         \"Effect\": \"Allow\",
-        \"Action\": [\"s3:GetObject\",\"s3:PutObject\",\"s3:ListBucket\",\"s3:DeleteObject\"],
+        \"Action\": [\"s3:GetObject\",\"s3:PutObject\",\"s3:DeleteObject\",\"s3:ListBucket\",\"s3:CreateMultipartUpload\",\"s3:UploadPart\",\"s3:CompleteMultipartUpload\",\"s3:AbortMultipartUpload\",\"s3:ListMultipartUploadParts\"],
         \"Resource\": [
           \"arn:aws:s3:::${ARTIFACT_BUCKET}\",
           \"arn:aws:s3:::${ARTIFACT_BUCKET}/*\"

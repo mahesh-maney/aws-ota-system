@@ -38,11 +38,11 @@ print("  Press Enter to accept [default] where shown.")
 print()
 
 API_ID     = prompt("API Gateway REST API ID")
-REGION     = prompt("AWS Region",              "ap-south-1")
-STAGE      = prompt("Stage name",              "smarthome")
+REGION     = prompt("AWS Region","us-east-1")
+STAGE      = prompt("Stage name","api")
 ACCOUNT_ID = prompt("AWS Account ID")
-ADMIN_AUTH = prompt("Admin Cognito Authorizer ID")
-USER_AUTH  = prompt("User Cognito Authorizer ID")
+ADMIN_AUTH = prompt("Admin Cognito Authorizer ID","zisf8r")
+USER_AUTH  = prompt("User Cognito Authorizer ID","noe20u")
 
 if not all([API_ID, REGION, STAGE, ACCOUNT_ID, ADMIN_AUTH, USER_AUTH]):
     print("\n  ERROR: All inputs are required.")

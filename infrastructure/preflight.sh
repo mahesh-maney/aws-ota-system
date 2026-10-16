@@ -239,11 +239,17 @@ section "Lambda source code"
 LAMBDA_DIR="$(cd "$DIR/06_lambdas" && pwd)"
 REQUIRED_DIRS=(
   digilux_ota_upload_url
+  digilux_ota_upload_complete
+  digilux_ota_package_status
   digilux_ota_package_activate
   digilux_ota_artifact_processor
+  digilux_ota_artifact_key
   digilux_ota_package_register
   digilux_ota_compatibility_check
+  digilux_ota_beta_users
   digilux_ota_job_create
+  digilux_ota_job_sync
+  digilux_ota_key_server
   digilux_ota_status_handler
   digilux_ota_device_register
   digilux_ota_user_check_updates

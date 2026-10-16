@@ -1,26 +1,52 @@
 #!/bin/bash
-# Phase 15 — Create CloudWatch alarms for all OTA Lambda functions
+# Phase 15 — CloudWatch alarms for all 18 OTA Lambda functions
 set -euo pipefail
+export AWS_PAGER="" PAGER=cat
+source "$(dirname "$0")/_lib.sh"
 
-REGION="ap-south-1"
-ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
-SNS_ARN="arn:aws:sns:${REGION}:${ACCOUNT_ID}:digilux-ota-alerts"
+log_section "Phase 15: CloudWatch Alarms"
 
-# All OTA Lambda functions
-LAMBDAS=(
-  digilux_ota_package_register
-  digilux_ota_compatibility_check
-  digilux_ota_job_create
-  digilux_ota_status_handler
-  digilux_ota_device_register
-  digilux_ota_user_check_updates
-  digilux_ota_user_consent
-  digilux_ota_user_update_status
-  digilux_ota_user_get_download_link
+REGION="${REGION:-ap-south-1}"
+ACCOUNT_ID="${ACCOUNT_ID:-$(aws sts get-caller-identity --query Account --output text)}"
+PREFIX="${PREFIX:-digilux}"
+
+SNS_TOPIC_NAME="${SNS_TOPIC_NAME:-ota-alerts}"
+SNS_ARN="arn:aws:sns:${REGION}:${ACCOUNT_ID}:${SNS_TOPIC_NAME}"
+
+log_info "Region    : $REGION"
+log_info "SNS topic : $SNS_ARN"
+
+# All 18 OTA Lambda functions (generic names — no customer prefix)
+ADMIN_LAMBDAS=(
+  ota_upload_url
+  ota_upload_complete
+  ota_package_status
+  ota_package_activate
+  ota_artifact_processor
+  ota_artifact_key
+  ota_package_register
+  ota_compatibility_check
+  ota_beta_users
+  ota_job_create
+  ota_job_sync
+  ota_key_server
+  ota_status_handler
+  ota_device_register
 )
 
-# Lambda timeout is 30s — alarm at 80% = 24000ms
-DURATION_THRESHOLD_MS=24000
+USER_LAMBDAS=(
+  ota_user_check_updates
+  ota_user_consent
+  ota_user_update_status
+  ota_user_get_download_link
+)
+
+ALL_LAMBDAS=("${ADMIN_LAMBDAS[@]}" "${USER_LAMBDAS[@]}")
+
+# artifact_processor has a 300s timeout — alarm at 80% = 240000ms
+# All others have 30s timeout — alarm at 80% = 24000ms
+DURATION_DEFAULT_MS=24000
+DURATION_ARTIFACT_MS=240000
 
 # Period: 60s; evaluate 1 data point
 PERIOD=60
@@ -30,7 +56,7 @@ create_alarm() {
   local NAME="$1"
   local METRIC="$2"
   local THRESHOLD="$3"
-  local STAT="$4"        # "Sum", "Average", etc. — or "extN" for p-stat
+  local STAT="$4"
   local DESC="$5"
   local FUNC="$6"
 
@@ -59,42 +85,29 @@ create_alarm() {
     --region            "$REGION" > /dev/null
 }
 
-echo "SNS topic: $SNS_ARN"
-echo ""
+for FUNC in "${ALL_LAMBDAS[@]}"; do
+  log_step "$FUNC"
 
-for FUNC in "${LAMBDAS[@]}"; do
-  echo "==> $FUNC"
+  DURATION_MS=$DURATION_DEFAULT_MS
+  [[ "$FUNC" == "ota_artifact_processor" ]] && DURATION_MS=$DURATION_ARTIFACT_MS
 
-  # Errors — alert on any error
   create_alarm \
-    "${FUNC}-errors" \
-    "Errors" \
-    1 \
-    "Sum" \
-    "OTA Lambda errors: ${FUNC}" \
-    "$FUNC"
-  echo "    errors alarm set"
+    "${FUNC}-errors" "Errors" 1 "Sum" \
+    "OTA Lambda errors: ${FUNC}" "$FUNC"
+  log_info "  errors alarm set"
 
-  # Throttles — alert on any throttle
   create_alarm \
-    "${FUNC}-throttles" \
-    "Throttles" \
-    1 \
-    "Sum" \
-    "OTA Lambda throttles: ${FUNC}" \
-    "$FUNC"
-  echo "    throttles alarm set"
+    "${FUNC}-throttles" "Throttles" 1 "Sum" \
+    "OTA Lambda throttles: ${FUNC}" "$FUNC"
+  log_info "  throttles alarm set"
 
-  # Duration — alert if p99 exceeds 80% of 30s timeout
   create_alarm \
-    "${FUNC}-duration" \
-    "Duration" \
-    "$DURATION_THRESHOLD_MS" \
-    "p99" \
-    "OTA Lambda duration p99 > 24s: ${FUNC}" \
-    "$FUNC"
-  echo "    duration alarm set"
+    "${FUNC}-duration" "Duration" "$DURATION_MS" "p99" \
+    "OTA Lambda duration p99 high: ${FUNC}" "$FUNC"
+  log_info "  duration alarm set (threshold: ${DURATION_MS}ms)"
+
+  log_ok "  $FUNC — 3 alarms created"
 done
 
-echo ""
-echo "All CloudWatch alarms created. Alerts → $SNS_ARN"
+log_phase_done
+log_ok "All ${#ALL_LAMBDAS[@]} Lambda functions alarmed.  Alerts → $SNS_ARN"
