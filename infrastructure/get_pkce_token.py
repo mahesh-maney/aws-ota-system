@@ -55,12 +55,18 @@ def _pkce_pair():
 def _extract_csrf(html: str, page_label: str) -> str:
     """
     Return the CSRF hidden-field value from a Cognito Managed Login HTML page.
-    Cognito uses name="csrf" (no underscore) in the Managed Login / Remix UI.
+    New Managed Login (Remix-based): csrf lives in window.__remixContext JSON.
+    Legacy Hosted UI v2: csrf is a hidden <input> field.
     """
+    # New Managed Login (Remix) — window.__remixContext = {"state":{"loaderData":{"root":{"csrf":"..."}}}}
+    m = re.search(r'"csrf"\s*:\s*"([^"]+)"', html)
+    if m:
+        return m.group(1)
+    # Legacy hidden-field fallbacks
     for pattern in (
         r'name="csrf"\s+value="([^"]+)"',
         r'value="([^"]+)"\s+name="csrf"',
-        r'name="_csrf"\s+value="([^"]+)"',    # legacy Hosted UI v2 fallback
+        r'name="_csrf"\s+value="([^"]+)"',
         r'value="([^"]+)"\s+name="_csrf"',
     ):
         m = re.search(pattern, html)

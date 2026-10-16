@@ -2028,9 +2028,13 @@
               }
             ],
             "url": {
-              "raw": "{{base_url}}/api/v1/ota/device/available-updates",
+              "raw": "https://iot.digilux.co.in/api/v1/ota/device/available-updates",
+              "protocol": "https",
               "host": [
-                "{{base_url}}"
+                "iot",
+                "digilux",
+                "co",
+                "in"
               ],
               "path": [
                 "api",

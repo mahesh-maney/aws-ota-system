@@ -63,14 +63,111 @@
           "response": []
         },
         {
-          "name": "Get User Token",
+          "name": "Get User Token (PKCE)",
           "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "// \u2500\u2500 PKCE flow for Cognito Managed Login (auth.digilux.co.in / Remix-based) \u2500\u2500\u2500",
+                  "const COGNITO_DOMAIN = 'https://auth.digilux.co.in';",
+                  "const CLIENT_ID      = pm.collectionVariables.get('app_pool_client_id');",
+                  "const REDIRECT_URI   = pm.collectionVariables.get('redirect_uri');",
+                  "const SCOPE          = 'openid email smarthome_server/read smarthome_server/write';",
+                  "const USERNAME       = pm.collectionVariables.get('user_email');",
+                  "const PASSWORD       = pm.collectionVariables.get('user_password');",
+                  "",
+                  "const CryptoJS = require('crypto-js');",
+                  "const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~';",
+                  "let verifier = '';",
+                  "for (let i = 0; i < 64; i++) verifier += chars[Math.floor(Math.random() * chars.length)];",
+                  "const challenge = CryptoJS.enc.Base64.stringify(CryptoJS.SHA256(verifier))",
+                  "    .replace(/\\+/g, '-').replace(/\\//g, '_').replace(/=/g, '');",
+                  "",
+                  "pm.collectionVariables.set('pkce_code_verifier', verifier);",
+                  "pm.collectionVariables.set('pkce_code', ''); // clear stale code",
+                  "",
+                  "const authUrl = `${COGNITO_DOMAIN}/oauth2/authorize` +",
+                  "    `?response_type=code&client_id=${CLIENT_ID}` +",
+                  "    `&redirect_uri=${encodeURIComponent(REDIRECT_URI)}` +",
+                  "    `&scope=${encodeURIComponent(SCOPE)}` +",
+                  "    `&code_challenge=${challenge}&code_challenge_method=S256`;",
+                  "",
+                  "// Step 1: GET /oauth2/authorize \u2192 follows to Managed Login page",
+                  "pm.sendRequest(authUrl, (err1, loginResp) => {",
+                  "    if (err1) { console.error('[PKCE] Step 1 error:', err1); return; }",
+                  "",
+                  "    const html = loginResp.text();",
+                  "",
+                  "    // New Managed Login (Remix): csrf is in window.__remixContext JSON",
+                  "    // Legacy Hosted UI v2: csrf is a hidden <input name=\"csrf\"> field",
+                  "    let csrf = null;",
+                  "    const remixMatch = html.match(/\"csrf\"\\s*:\\s*\"([^\"]+)\"/);",
+                  "    if (remixMatch) {",
+                  "        csrf = remixMatch[1];",
+                  "    } else {",
+                  "        const inputMatch = html.match(/name=\"csrf\"\\s+value=\"([^\"]+)\"/) ||",
+                  "                           html.match(/name=\"_csrf\"\\s+value=\"([^\"]+)\"/);",
+                  "        if (inputMatch) csrf = inputMatch[1];",
+                  "    }",
+                  "    if (!csrf) { console.error('[PKCE] CSRF token not found in login page'); return; }",
+                  "",
+                  "    const actionMatch = html.match(/<form[^>]+action=\"([^\"]+)\"/);",
+                  "    if (!actionMatch) { console.error('[PKCE] Form action not found'); return; }",
+                  "    const formAction = actionMatch[1].replace(/&amp;/g, '&');",
+                  "    const action = formAction.startsWith('http') ? formAction : COGNITO_DOMAIN + formAction;",
+                  "",
+                  "    // Step 2: POST credentials \u2192 follow redirects \u2192 callback URL with ?code=",
+                  "    pm.sendRequest({",
+                  "        url: action,",
+                  "        method: 'POST',",
+                  "        header: [{ key: 'Content-Type', value: 'application/x-www-form-urlencoded' }],",
+                  "        body: {",
+                  "            mode: 'urlencoded',",
+                  "            urlencoded: [",
+                  "                { key: 'csrf',           value: csrf     },",
+                  "                { key: 'username',       value: USERNAME },",
+                  "                { key: 'password',       value: PASSWORD },",
+                  "                { key: 'cognitoAsfData', value: ''       },",
+                  "            ]",
+                  "        }",
+                  "    }, (err2, codeResp) => {",
+                  "        if (err2) { console.error('[PKCE] Step 2 error:', err2); return; }",
+                  "",
+                  "        const body = codeResp.text() || '';",
+                  "        const loc  = codeResp.headers.get('Location') || '';",
+                  "",
+                  "        const codeMatch = body.match(/[?&]code=([\\w\\-]+)/) ||",
+                  "                          loc.match(/[?&]code=([\\w\\-]+)/);",
+                  "",
+                  "        if (codeMatch) {",
+                  "            pm.collectionVariables.set('pkce_code', codeMatch[1]);",
+                  "            console.log('[PKCE] Auth code captured \u2014 ready to exchange for token');",
+                  "        } else {",
+                  "            console.error('[PKCE] Auth code not found. Body snippet:', body.substring(0, 400));",
+                  "        }",
+                  "    });",
+                  "});"
+                ]
+              }
+            },
             {
               "listen": "test",
               "script": {
                 "type": "text/javascript",
                 "exec": [
-                  "var res = pm.response.json();\nvar token = res?.AuthenticationResult?.IdToken;\nif (token) {\n    pm.collectionVariables.set('user_token', token);\n    pm.environment.set('user_token', token);\n    pm.test('Get User Token saved', () => pm.expect(token).to.be.a('string'));\n    console.log('user_token saved to both collection + environment');\n} else {\n    pm.test('Get User Token fetch failed', () => { throw new Error(JSON.stringify(res)); });\n}"
+                  "const res = pm.response.json();",
+                  "const accessToken = res.access_token;",
+                  "const idToken     = res.id_token;",
+                  "if (accessToken) {",
+                  "    pm.collectionVariables.set('user_token', accessToken);",
+                  "    pm.environment.set('user_token', accessToken);",
+                  "    pm.test('Get User Token (PKCE) \u2014 access_token saved', () => pm.expect(accessToken).to.be.a('string'));",
+                  "    console.log('[PKCE] user_token saved (access_token)');",
+                  "} else {",
+                  "    pm.test('Get User Token (PKCE) failed', () => { throw new Error(JSON.stringify(res)); });",
+                  "}"
                 ]
               }
             }
@@ -80,36 +177,49 @@
             "header": [
               {
                 "key": "Content-Type",
-                "value": "application/x-amz-json-1.1"
-              },
-              {
-                "key": "X-Amz-Target",
-                "value": "AWSCognitoIdentityProviderService.InitiateAuth"
+                "value": "application/x-www-form-urlencoded"
               }
             ],
             "body": {
-              "mode": "raw",
-              "raw": "{\n  \"AuthFlow\": \"USER_PASSWORD_AUTH\",\n  \"ClientId\": \"{{app_pool_client_id}}\",\n  \"AuthParameters\": {\n    \"USERNAME\": \"demotesthw5@yopmail.com\",\n    \"PASSWORD\": \"DigiluxTest@9900\"\n  }\n}",
-              "options": {
-                "raw": {
-                  "language": "text"
+              "mode": "urlencoded",
+              "urlencoded": [
+                {
+                  "key": "grant_type",
+                  "value": "authorization_code"
+                },
+                {
+                  "key": "client_id",
+                  "value": "{{app_pool_client_id}}"
+                },
+                {
+                  "key": "code",
+                  "value": "{{pkce_code}}"
+                },
+                {
+                  "key": "redirect_uri",
+                  "value": "{{redirect_uri}}"
+                },
+                {
+                  "key": "code_verifier",
+                  "value": "{{pkce_code_verifier}}"
                 }
-              }
-            },
-            "url": {
-              "raw": "https://cognito-idp.ap-south-1.amazonaws.com/",
-              "protocol": "https",
-              "host": [
-                "cognito-idp",
-                "ap-south-1",
-                "amazonaws",
-                "com"
-              ],
-              "path": [
-                ""
               ]
             },
-            "description": "Fetches a user token from the main Digilux app Cognito pool and saves it to {{user_token}}.\n\nRun this once before using any End User endpoint. The token is valid for 24 hours."
+            "url": {
+              "raw": "https://auth.digilux.co.in/oauth2/token",
+              "protocol": "https",
+              "host": [
+                "auth",
+                "digilux",
+                "co",
+                "in"
+              ],
+              "path": [
+                "oauth2",
+                "token"
+              ]
+            },
+            "description": "Full PKCE flow for the Digilux device user pool (q7189jitfkk4ttesepkgls491).\n\nThe Pre-request Script automatically:\n  1. Generates a PKCE code_verifier + code_challenge\n  2. GETs the Cognito Managed Login page (auth.digilux.co.in)\n  3. POSTs credentials + CSRF \u2192 follows redirects to the callback URL\n  4. Extracts the authorization code\n\nThis request then exchanges the code for an access_token, which is saved to {{user_token}}.\n\nIf the script fails to capture the code, use the collection-level OAuth2 authorization:\n  Authorization tab \u2192 Type: OAuth 2.0 \u2192 Get New Access Token \u2192 Use Token"
           },
           "response": []
         }
@@ -2152,16 +2262,20 @@
               }
             ],
             "url": {
-              "raw": "{{base_url}}/api/v1/ota/my/updates",
+              "raw": "https://iot.digilux.co.in/api/v1/ota/device/available-updates",
+              "protocol": "https",
               "host": [
-                "{{base_url}}"
+                "iot",
+                "digilux",
+                "co",
+                "in"
               ],
               "path": [
                 "api",
                 "v1",
                 "ota",
-                "my",
-                "updates"
+                "device",
+                "available-updates"
               ]
             },
             "description": "Returns all controller devices owned by the calling user and any available updates for each.\n\n- Ownership determined by `userId` (`sub` claim) in the Cognito JWT\n- Only devices in `digilux_device_data` under this `userId` are returned\n- `otaStatus: NOT_REGISTERED` \u2014 device has never run the OTA agent\n- Version comparison uses semver integer tuples \u2014 `4.10.0 > 4.2.0`\n- `pendingJobId` non-null means an update is already in progress",
@@ -2893,6 +3007,86 @@
     {
       "key": "beta_user_id",
       "value": ""
+    },
+    {
+      "key": "redirect_uri",
+      "value": "https://oauth.pstmn.io/v1/callback",
+      "description": ""
+    },
+    {
+      "key": "pkce_code",
+      "value": "",
+      "description": ""
+    },
+    {
+      "key": "pkce_code_verifier",
+      "value": "",
+      "description": ""
+    },
+    {
+      "key": "user_email",
+      "value": "demotesthw5@yopmail.com",
+      "description": ""
+    },
+    {
+      "key": "user_password",
+      "value": "DigiluxTest@9900",
+      "description": ""
     }
-  ]
+  ],
+  "auth": {
+    "type": "oauth2",
+    "oauth2": [
+      {
+        "key": "tokenName",
+        "value": "User Token (PKCE)",
+        "type": "string"
+      },
+      {
+        "key": "challengeAlgorithm",
+        "value": "S256",
+        "type": "string"
+      },
+      {
+        "key": "grant_type",
+        "value": "authorization_code_with_pkce",
+        "type": "string"
+      },
+      {
+        "key": "authUrl",
+        "value": "https://auth.digilux.co.in/oauth2/authorize",
+        "type": "string"
+      },
+      {
+        "key": "accessTokenUrl",
+        "value": "https://auth.digilux.co.in/oauth2/token",
+        "type": "string"
+      },
+      {
+        "key": "clientId",
+        "value": "{{app_pool_client_id}}",
+        "type": "string"
+      },
+      {
+        "key": "scope",
+        "value": "openid email smarthome_server/read smarthome_server/write",
+        "type": "string"
+      },
+      {
+        "key": "redirect_uri",
+        "value": "https://oauth.pstmn.io/v1/callback",
+        "type": "string"
+      },
+      {
+        "key": "useBrowser",
+        "value": true,
+        "type": "boolean"
+      },
+      {
+        "key": "addTokenTo",
+        "value": "header",
+        "type": "string"
+      }
+    ]
+  }
 }
