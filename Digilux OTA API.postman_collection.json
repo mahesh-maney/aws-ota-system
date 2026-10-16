@@ -46,16 +46,9 @@
               }
             },
             "url": {
-              "raw": "https://cognito-idp.ap-south-1.amazonaws.com/",
-              "protocol": "https",
+              "raw": "{{admin_cognito_endpoint}}",
               "host": [
-                "cognito-idp",
-                "ap-south-1",
-                "amazonaws",
-                "com"
-              ],
-              "path": [
-                ""
+                "{{admin_cognito_endpoint}}"
               ]
             },
             "description": "Fetches an admin token from the dedicated OTA admin Cognito pool and saves it to {{admin_token}}.\n\nRun this once before using any admin endpoint. The token is valid for 24 hours."
@@ -71,7 +64,7 @@
                 "type": "text/javascript",
                 "exec": [
                   "// \u2500\u2500 PKCE flow for Cognito Managed Login (auth.digilux.co.in / Remix-based) \u2500\u2500\u2500",
-                  "const COGNITO_DOMAIN = 'https://auth.digilux.co.in';",
+                  "const COGNITO_DOMAIN = pm.collectionVariables.get('app_cognito_domain');",
                   "const CLIENT_ID      = pm.collectionVariables.get('app_pool_client_id');",
                   "const REDIRECT_URI   = pm.collectionVariables.get('redirect_uri');",
                   "const SCOPE          = 'openid email smarthome_server/read smarthome_server/write';",
@@ -2262,13 +2255,9 @@
               }
             ],
             "url": {
-              "raw": "https://iot.digilux.co.in/api/v1/ota/device/available-updates",
-              "protocol": "https",
+              "raw": "{{user_base_url}}/api/v1/ota/device/available-updates",
               "host": [
-                "iot",
-                "digilux",
-                "co",
-                "in"
+                "{{user_base_url}}"
               ],
               "path": [
                 "api",
@@ -2928,7 +2917,22 @@
     {
       "key": "base_url",
       "value": "https://iot.digilux.co.in/smarthome",
-      "description": "API base URL (custom domain). Fallback: https://ds6nxf8ac5.execute-api.ap-south-1.amazonaws.com/smarthome"
+      "description": "Admin API base URL (before /api/v1/...). Digilux: https://iot.digilux.co.in/smarthome | Honeywell: https://3uch7iu3k5.execute-api.us-east-1.amazonaws.com/api"
+    },
+    {
+      "key": "user_base_url",
+      "value": "https://iot.digilux.co.in",
+      "description": "User/device API base URL (before /api/v1/...). Digilux: https://iot.digilux.co.in | Honeywell: same API GW base as base_url"
+    },
+    {
+      "key": "admin_cognito_endpoint",
+      "value": "https://cognito-idp.ap-south-1.amazonaws.com/",
+      "description": "Cognito USER_PASSWORD_AUTH endpoint. Digilux: ap-south-1 | Honeywell: us-east-1"
+    },
+    {
+      "key": "app_cognito_domain",
+      "value": "https://auth.digilux.co.in",
+      "description": "Cognito Hosted UI base domain for PKCE flow. Digilux: https://auth.digilux.co.in | Honeywell: ask Mrinal"
     },
     {
       "key": "admin_token",
