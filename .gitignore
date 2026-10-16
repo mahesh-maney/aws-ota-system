@@ -42,3 +42,4 @@ infrastructure/deploy.config
 
 # Lambda zip artifacts created during deploy (rebuilt by 07_deploy_lambdas.sh)
 infrastructure/06_lambdas/**/*.zip
+pyarmor.bug.log
