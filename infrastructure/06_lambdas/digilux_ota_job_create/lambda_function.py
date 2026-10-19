@@ -376,11 +376,17 @@ def _cancel_queued_iot_jobs(deployment_id: str) -> dict:
             cancelled.append(job_id)
             _log("info", "iot_job_cancelled_on_abort",
                  jobId=job_id, deploymentId=deployment_id)
+            _audit("IOT_JOB_CANCELLED", "abort",
+                   {"jobId": job_id, "deploymentId": deployment_id}, "SUCCESS",
+                   reason="deployment_aborted", previousJobStatus="QUEUED")
 
         except Exception as e:
             failed.append(job_id)
             _log("warning", "cancel_queued_job_failed",
                  jobId=job_id, deploymentId=deployment_id, error=str(e))
+            _audit("IOT_JOB_CANCEL_FAILED", "abort",
+                   {"jobId": job_id, "deploymentId": deployment_id}, "FAILURE",
+                   error=str(e))
 
     return {"cancelled": len(cancelled), "skipped": len(skipped), "failed": len(failed)}
 
@@ -597,6 +603,9 @@ def _abort_job(deployment_id: str, claims: dict, body: dict) -> dict:
     if not reason:
         _log("warning", "abort_missing_reason",
              deploymentId=deployment_id, requestedBy=actor)
+        _audit("DEPLOYMENT_ABORT_REJECTED", actor,
+               {"deploymentId": deployment_id}, "FAILURE",
+               reason="missing_abort_reason")
         return _response(400, {"error": "An abort reason is required."})
 
     try:
@@ -607,6 +616,9 @@ def _abort_job(deployment_id: str, claims: dict, body: dict) -> dict:
         if not item:
             _log("warning", "abort_deployment_not_found",
                  deploymentId=deployment_id, requestedBy=actor)
+            _audit("DEPLOYMENT_ABORT_REJECTED", actor,
+                   {"deploymentId": deployment_id}, "FAILURE",
+                   reason="deployment_not_found")
             return _response(404, {"error": f"Deployment {deployment_id} not found"})
 
         current_status = item.get("status", "")
