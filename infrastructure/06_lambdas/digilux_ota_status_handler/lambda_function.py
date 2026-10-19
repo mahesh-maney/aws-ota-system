@@ -71,7 +71,7 @@ def _jobs_data_client():
     """Lazy Jobs data-plane client (required for UpdateJobExecution)."""
     global _iot_jobs_data
     if _iot_jobs_data is None:
-        endpoint = iot.describe_endpoint(endpointType="iot:Jobs")["endpointAddress"]
+        endpoint = iot.describe_endpoint(endpointType="iot:Data-ATS")["endpointAddress"]
         _iot_jobs_data = boto3.client(
             "iot-jobs-data",
             region_name=REGION,
