@@ -25,6 +25,7 @@ log.setLevel(logging.INFO)
 
 REGION          = os.environ["REGION"]
 PACKAGES_TABLE  = os.environ.get("PACKAGES_TABLE",  "digilux_ota_packages")
+COMPAT_TABLE    = os.environ.get("COMPAT_TABLE",    "digilux_ota_compatibility")
 ARTIFACT_BUCKET = os.environ.get("ARTIFACT_BUCKET", "digilux-ota-artifacts")
 
 dynamo = boto3.resource("dynamodb", region_name=REGION)
@@ -133,6 +134,15 @@ def _delete_package(event, package_name, version, caller):
             ":dr": reason,
         },
     )
+
+    # Remove the corresponding compatibility record
+    try:
+        dynamo.Table(COMPAT_TABLE).delete_item(
+            Key={"packageName": package_name, "version": version}
+        )
+        log.info(json.dumps({"msg": "compat_record_deleted", "packageName": package_name, "version": version}))
+    except Exception as e:
+        log.warning(f"Compatibility record delete failed (non-fatal): {e}")
 
     log.info(json.dumps({
         "msg": "package_deleted", "packageName": package_name,
