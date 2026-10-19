@@ -20,6 +20,8 @@ import os
 
 import boto3
 
+import _notif
+
 log = logging.getLogger()
 log.setLevel(logging.INFO)
 
@@ -148,6 +150,9 @@ def _delete_package(event, package_name, version, caller):
         "msg": "package_deleted", "packageName": package_name,
         "version": version, "caller": caller, "s3Deleted": s3_deleted,
     }))
+    _notif.notify_admin(
+        *_notif.tmpl_package_deleted(package_name, version, item.get("deviceType", ""), caller, reason)
+    )
 
     return _response(200, {
         "message":     f"{package_name} v{version} deleted.",

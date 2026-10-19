@@ -52,6 +52,8 @@ import boto3
 from boto3.dynamodb.conditions import Attr, Key
 from botocore.exceptions import ClientError
 
+import _notif
+
 log = logging.getLogger()
 log.setLevel(os.environ.get("LOG_LEVEL", "INFO"))
 
@@ -66,6 +68,7 @@ CONSENTS_TABLE     = os.environ.get("CONSENTS_TABLE",     "digilux_ota_user_cons
 BETA_USERS_TABLE   = os.environ.get("BETA_USERS_TABLE",   "digilux_ota_beta_users")
 DEPLOYMENTS_TABLE  = os.environ.get("DEPLOYMENTS_TABLE",  "digilux_ota_deployments")
 PRODUCTION_GROUP   = os.environ.get("PRODUCTION_GROUP",   "DGX-Gateways")
+COGNITO_POOL_ID    = os.environ.get("COGNITO_USER_POOL_ID", "")
 
 # GSI names
 DEPLOYMENTS_PKG_STATUS_INDEX = os.environ.get("DEPLOYMENTS_PKG_STATUS_INDEX", "packageName-status-index")
@@ -74,8 +77,9 @@ CONSENTS_DEPLOYMENT_INDEX    = os.environ.get("CONSENTS_DEPLOYMENT_INDEX",    "d
 
 MAX_DEVICES = int(os.environ.get("MAX_DEVICES", "200"))
 
-dynamo = boto3.resource("dynamodb", region_name=REGION)
-iot    = boto3.client("iot",       region_name=REGION)
+dynamo   = boto3.resource("dynamodb", region_name=REGION)
+iot      = boto3.client("iot",       region_name=REGION)
+cognito  = boto3.client("cognito-idp", region_name=REGION)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -183,6 +187,16 @@ def _supersede_deployment(existing_dep: dict, new_dep_id: str,
         )
         _log("info", "supersede_old_deployment_cancelled",
              oldDeploymentId=old_dep_id, supersededBy=new_dep_id, actor=actor)
+
+        subj, body = _notif.tmpl_deployment_superseded(
+            existing_dep.get("packageName", ""),
+            existing_dep.get("version", ""),
+            existing_dep.get("version", ""),   # new version not known here — overwritten below
+            existing_dep.get("rolloutStage", ""),
+            old_dep_id, new_dep_id,
+        )
+        _notif.notify_admin(subj, body)
+
         _audit("DEPLOYMENT_SUPERSEDED", actor,
                {"deploymentId": old_dep_id,
                 "packageName": existing_dep.get("packageName"),
@@ -686,6 +700,36 @@ def _abort_job(deployment_id: str, claims: dict, body: dict) -> dict:
         # Cancel any QUEUED IoT jobs so offline devices (C, D) don't install
         # firmware after the deployment has been aborted.
         cancel_summary = _cancel_queued_iot_jobs(deployment_id)
+
+        # ── Notify admin ──────────────────────────────────────────────────────
+        subj, body = _notif.tmpl_deployment_aborted_admin(
+            item.get("packageName", ""), item.get("version", ""),
+            item.get("rolloutStage", ""), deployment_id, actor, reason,
+            cancel_summary["cancelled"], cancel_summary["failed"],
+        )
+        _notif.notify_admin(subj, body)
+
+        # ── Notify consented device owners ────────────────────────────────────
+        try:
+            consents = dynamo.Table(CONSENTS_TABLE).query(
+                IndexName=CONSENTS_DEPLOYMENT_INDEX,
+                KeyConditionExpression=Key("deploymentId").eq(deployment_id),
+            ).get("Items", [])
+            notified_users = set()
+            for c in consents:
+                user_id = c.get("userId")
+                if not user_id or user_id in notified_users:
+                    continue
+                user_email = _notif.get_user_email(cognito, COGNITO_POOL_ID, user_id)
+                if user_email:
+                    u_subj, u_body = _notif.tmpl_deployment_aborted_user(
+                        item.get("packageName", ""), item.get("version", ""), reason
+                    )
+                    _notif.send_email([user_email], u_subj, u_body)
+                    notified_users.add(user_id)
+        except Exception as e:
+            _log("warning", "abort_user_notify_failed",
+                 deploymentId=deployment_id, error=str(e))
         _log("info", "abort_queued_iot_jobs_summary",
              deploymentId=deployment_id, **cancel_summary)
 
@@ -975,6 +1019,12 @@ def lambda_handler(event, context):
         # this update to all eligible devices without a per-device DB query.
         if rollout_stage in _STAGE_POINTER_KEY:
             _write_stage_pointer(pkg_name, version, pkg, rollout_stage, deployment_id)
+
+        subj, body = _notif.tmpl_deployment_created(
+            pkg_name, version, rollout_stage,
+            target_id_response, deployment_id, caller,
+        )
+        _notif.notify_admin(subj, body)
 
         _audit("DEPLOYMENT_CREATED", caller,
                {"packageName": pkg_name, "version": version},

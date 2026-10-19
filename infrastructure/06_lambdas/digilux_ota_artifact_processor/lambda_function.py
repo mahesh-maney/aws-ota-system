@@ -39,6 +39,8 @@ import uuid
 import boto3
 from botocore.exceptions import ClientError
 
+import _notif
+
 log = logging.getLogger()
 log.setLevel(os.environ.get("LOG_LEVEL", "INFO"))
 
@@ -169,6 +171,9 @@ def _quarantine(bucket: str, s3_key: str, pkg_name: str, version: str,
            {"packageName": pkg_name, "version": version},
            "FAILURE",
            s3Key=s3_key, bucket=bucket, detail=detail)
+    _notif.notify_admin(
+        *_notif.tmpl_artifact_corrupted(pkg_name, version, "", f"{reason}: {detail}", "unknown")
+    )
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -532,6 +537,14 @@ def _process_artifact(bucket: str, s3_key: str, obj_size: int) -> None:
            checksumVerified=expected_checksum is not None,
            pipelineMs=pipeline_ms,
            uploadedBy=item.get("uploadedBy", "unknown"))
+    _notif.notify_admin(
+        *_notif.tmpl_artifact_active(
+            pkg_name, version,
+            item.get("deviceType", device_type),
+            actual_size,
+            item.get("uploadedBy", "unknown"),
+        )
+    )
 
     # ── 11. Supersede older ACTIVE versions of same package + releaseType ──────
     release_type = item.get("releaseType")

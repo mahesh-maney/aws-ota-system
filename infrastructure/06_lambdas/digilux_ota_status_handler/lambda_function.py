@@ -29,16 +29,20 @@ import boto3
 from boto3.dynamodb.conditions import Attr, Key
 from botocore.exceptions import ClientError
 
+import _notif
+
 log = logging.getLogger()
 log.setLevel(logging.INFO)
 
-REGION             = os.environ["REGION"]
-DEVICE_DATA_TABLE  = os.environ.get("DEVICE_DATA_TABLE",  "digilux_device_data")
-OTA_JOBS_TABLE     = os.environ.get("OTA_JOBS_TABLE",     "digilux_ota_jobs")
-DEPLOYMENTS_TABLE  = os.environ.get("DEPLOYMENTS_TABLE",  "digilux_ota_deployments")
+REGION               = os.environ["REGION"]
+DEVICE_DATA_TABLE    = os.environ.get("DEVICE_DATA_TABLE",    "digilux_device_data")
+OTA_JOBS_TABLE       = os.environ.get("OTA_JOBS_TABLE",       "digilux_ota_jobs")
+DEPLOYMENTS_TABLE    = os.environ.get("DEPLOYMENTS_TABLE",    "digilux_ota_deployments")
+COGNITO_USER_POOL_ID = os.environ.get("COGNITO_USER_POOL_ID", "")
 
-dynamo = boto3.resource("dynamodb", region_name=REGION)
-iot    = boto3.client("iot", region_name=REGION)
+dynamo   = boto3.resource("dynamodb", region_name=REGION)
+iot      = boto3.client("iot",             region_name=REGION)
+cognito  = boto3.client("cognito-idp",     region_name=REGION)
 # UpdateJobExecution lives on the Jobs *data-plane* client, not control-plane `iot`.
 _iot_jobs_data = None
 
@@ -65,6 +69,22 @@ ERROR_CODE_MAP = {
 
 # Codes that trigger an immediate SECURITY_ALERT audit event
 SECURITY_ERROR_CODES = {10002, 10003, 10004, 10005, 10006}
+
+
+def _get_owner_email(job_id: str):
+    """Look up the device owner's email from the job record. Returns None on any failure."""
+    try:
+        job = dynamo.Table(OTA_JOBS_TABLE).get_item(Key={"jobId": job_id}).get("Item")
+        if not job:
+            return None
+        created_by = job.get("createdBy", "")
+        user_id = created_by.removeprefix("user:") if created_by.startswith("user:") else None
+        if not user_id:
+            return None
+        return _notif.get_user_email(cognito, COGNITO_USER_POOL_ID, user_id)
+    except Exception as e:
+        log.warning(json.dumps({"msg": "owner_email_lookup_failed", "jobId": job_id, "error": str(e)}))
+        return None
 
 
 def _jobs_data_client():
@@ -348,6 +368,15 @@ def lambda_handler(event, context):
                    "FAILURE",
                    packageName=pkg_name, version=version, thingName=thing_name)
             _update_deployment_counter(job_id, "timedOut")
+            owner_email = _get_owner_email(job_id)
+            if owner_email:
+                _notif.send_email(
+                    [owner_email],
+                    *_notif.tmpl_install_timed_out_user(pkg_name, version, thing_name, device_id)
+                )
+            _notif.notify_admin(
+                *_notif.tmpl_install_timed_out_admin(pkg_name, version, thing_name, device_id, job_id)
+            )
 
         elif status in ("SUCCEEDED", "FAILED", "REJECTED"):
             # Look up macAddress for the composite key update
@@ -405,6 +434,12 @@ def lambda_handler(event, context):
                            "SUCCESS",
                            packageName=pkg_name, version=version, thingName=thing_name)
                     _update_deployment_counter(job_id, "succeeded")
+                    owner_email = _get_owner_email(job_id)
+                    if owner_email:
+                        _notif.send_email(
+                            [owner_email],
+                            *_notif.tmpl_install_succeeded(pkg_name, version, thing_name, device_id)
+                        )
 
                 elif status == "FAILED":
                     log.warning(json.dumps({
@@ -431,6 +466,15 @@ def lambda_handler(event, context):
                            **({"errorCode": error_code, "errorReason": error_reason}
                               if error_code is not None else {}))
                     _update_deployment_counter(job_id, "failed")
+                    owner_email = _get_owner_email(job_id)
+                    if owner_email:
+                        _notif.send_email(
+                            [owner_email],
+                            *_notif.tmpl_install_failed_user(pkg_name, version, thing_name, device_id, error_code, error_reason)
+                        )
+                    _notif.notify_admin(
+                        *_notif.tmpl_install_failed_admin(pkg_name, version, thing_name, device_id, job_id, error_code, error_reason)
+                    )
 
                     # Authenticity failures after start-next are reported as FAILED;
                     # still raise SECURITY_ALERT for the same codes as REJECTED.
@@ -471,6 +515,15 @@ def lambda_handler(event, context):
                            thingName=thing_name,
                            errorCode=error_code, errorReason=error_reason)
                     _update_deployment_counter(job_id, "failed")
+                    owner_email = _get_owner_email(job_id)
+                    if owner_email:
+                        _notif.send_email(
+                            [owner_email],
+                            *_notif.tmpl_install_failed_user(pkg_name, version, thing_name, device_id, error_code, error_reason)
+                        )
+                    _notif.notify_admin(
+                        *_notif.tmpl_install_failed_admin(pkg_name, version, thing_name, device_id, job_id, error_code, error_reason)
+                    )
 
                     if error_code in SECURITY_ERROR_CODES:
                         log.error(json.dumps({

@@ -41,20 +41,24 @@ import os
 import boto3
 from botocore.exceptions import ClientError
 
+import _notif
+
 log = logging.getLogger()
 log.setLevel(logging.INFO)
 
-REGION             = os.environ["REGION"]
-PACKAGES_TABLE     = os.environ.get("PACKAGES_TABLE",     "digilux_ota_packages")
-ARTIFACT_BUCKET    = os.environ.get("ARTIFACT_BUCKET",    "digilux-ota-artifacts")
-OTA_JOBS_TABLE     = os.environ.get("OTA_JOBS_TABLE",     "digilux_ota_jobs")
-DEPLOYMENTS_TABLE  = os.environ.get("DEPLOYMENTS_TABLE",  "digilux_ota_deployments")
-PRODUCTION_GROUP   = os.environ.get("PRODUCTION_GROUP",   "DGX-Gateways")
-COOLING_OFF_DAYS   = int(os.environ.get("COOLING_OFF_DAYS", "7"))
+REGION               = os.environ["REGION"]
+PACKAGES_TABLE       = os.environ.get("PACKAGES_TABLE",       "digilux_ota_packages")
+ARTIFACT_BUCKET      = os.environ.get("ARTIFACT_BUCKET",      "digilux-ota-artifacts")
+OTA_JOBS_TABLE       = os.environ.get("OTA_JOBS_TABLE",       "digilux_ota_jobs")
+DEPLOYMENTS_TABLE    = os.environ.get("DEPLOYMENTS_TABLE",    "digilux_ota_deployments")
+PRODUCTION_GROUP     = os.environ.get("PRODUCTION_GROUP",     "DGX-Gateways")
+COOLING_OFF_DAYS     = int(os.environ.get("COOLING_OFF_DAYS", "7"))
+COGNITO_USER_POOL_ID = os.environ.get("COGNITO_USER_POOL_ID", "")
 
-dynamo = boto3.resource("dynamodb", region_name=REGION)
-s3     = boto3.client("s3",  region_name=REGION)
-iot    = boto3.client("iot", region_name=REGION)
+dynamo   = boto3.resource("dynamodb", region_name=REGION)
+s3       = boto3.client("s3",          region_name=REGION)
+iot      = boto3.client("iot",         region_name=REGION)
+cognito  = boto3.client("cognito-idp", region_name=REGION)
 
 
 def _write_latest_pointer(table, pkg_name: str, release_type: str,
@@ -252,6 +256,32 @@ def lambda_handler(event, context):
                    releaseType=item.get("releaseType"),
                    cancelledJobs=cancelled_jobs,
                    inProgressJobsWarning=in_progress_jobs or None)
+            _notif.notify_admin(
+                *_notif.tmpl_package_recalled_admin(
+                    package_name, version, caller, recall_reason,
+                    cancelled_jobs, in_progress_jobs
+                )
+            )
+            # Send one email per unique device owner affected by the recall
+            if cancelled_jobs and COGNITO_USER_POOL_ID:
+                _jt = dynamo.Table(OTA_JOBS_TABLE)
+                _seen = set()
+                for _jid in cancelled_jobs:
+                    try:
+                        _jitem = _jt.get_item(Key={"jobId": _jid}).get("Item", {})
+                        _cb = _jitem.get("createdBy", "")
+                        _uid = _cb.removeprefix("user:") if _cb.startswith("user:") else None
+                        if not _uid or _uid in _seen:
+                            continue
+                        _seen.add(_uid)
+                        _email = _notif.get_user_email(cognito, COGNITO_USER_POOL_ID, _uid)
+                        if _email:
+                            _notif.send_email(
+                                [_email],
+                                *_notif.tmpl_package_recalled_user(package_name, version, recall_reason)
+                            )
+                    except Exception as _e:
+                        log.warning(json.dumps({"msg": "recall_user_email_failed", "jobId": _jid, "error": str(_e)}))
 
             return _resp(200, {
                 "packageName":           package_name,
@@ -700,6 +730,9 @@ def _delete_package(package_name: str, version: str, caller: str, body: dict) ->
                deleteType="SOFT", previousStatus=status,
                releaseType=item.get("releaseType"),
                reason=reason, s3Deleted=s3_deleted)
+        _notif.notify_admin(
+            *_notif.tmpl_package_deleted(package_name, version, item.get("deviceType", ""), caller, reason)
+        )
         return _resp(200, {
             "packageName":    package_name,
             "version":        version,
@@ -725,6 +758,9 @@ def _delete_package(package_name: str, version: str, caller: str, body: dict) ->
            deleteType="HARD", previousStatus=status,
            releaseType=item.get("releaseType"),
            reason=reason, s3Deleted=s3_deleted)
+    _notif.notify_admin(
+        *_notif.tmpl_package_deleted(package_name, version, item.get("deviceType", ""), caller, reason)
+    )
     return _resp(200, {
         "packageName":    package_name,
         "version":        version,

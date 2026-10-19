@@ -24,6 +24,8 @@ import time
 import boto3
 from botocore.exceptions import ClientError
 
+import _notif
+
 log = logging.getLogger()
 log.setLevel(logging.INFO)
 
@@ -121,8 +123,9 @@ def _handle_staleness_check() -> dict:
         "thresholdDays": STALE_JOB_DAYS,
     }))
 
-    cancelled = []
-    synced    = []
+    cancelled       = []
+    cancelled_infos = []   # full job records for email template
+    synced          = []
 
     for job in stale_jobs:
         job_id   = job["jobId"]
@@ -137,6 +140,7 @@ def _handle_staleness_check() -> dict:
             _update_job_status(jobs_table, job_id, "CANCELLED", now_ms,
                                "system", f"IoT job not found during staleness check (age: {age_days:.1f}d)")
             cancelled.append(job_id)
+            cancelled_infos.append(job)
             _audit("DEPLOYMENT_CANCELLED", "system", {"jobId": job_id}, "SUCCESS",
                    trigger="STALENESS_CHECK", reason="IoT job not found", ageDays=round(age_days, 1))
             continue
@@ -164,6 +168,7 @@ def _handle_staleness_check() -> dict:
         reason = f"Auto-cancelled: no activity for {age_days:.1f} days (threshold: {STALE_JOB_DAYS}d)"
         _update_job_status(jobs_table, job_id, "CANCELLED", now_ms, "system", reason)
         cancelled.append(job_id)
+        cancelled_infos.append(job)
         _audit("DEPLOYMENT_CANCELLED", "system", {"jobId": job_id}, "SUCCESS",
                trigger="STALENESS_CHECK", ageDays=round(age_days, 1),
                thresholdDays=STALE_JOB_DAYS, iotStatus=iot_status)
@@ -172,6 +177,8 @@ def _handle_staleness_check() -> dict:
         "msg": "staleness_check_complete",
         "cancelled": len(cancelled), "synced": len(synced),
     }))
+    if cancelled_infos:
+        _notif.notify_admin(*_notif.tmpl_stale_jobs(cancelled_infos, STALE_JOB_DAYS))
     return {"cancelled": cancelled, "synced": synced}
 
 
