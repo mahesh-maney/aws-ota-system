@@ -329,6 +329,62 @@ def _write_device_pointers(pkg_name: str, version: str, pkg: dict,
                  deploymentId=deployment_id, error=str(e))
 
 
+def _cancel_queued_iot_jobs(deployment_id: str) -> dict:
+    """
+    Cancel any QUEUED IoT jobs linked to consents for this deployment.
+    Called during abort — IN_PROGRESS jobs are already blocked upstream,
+    so only QUEUED (device offline / not yet started) jobs are targeted.
+    Returns a summary dict for logging.
+    """
+    cancelled = []
+    skipped   = []
+    failed    = []
+
+    try:
+        consents = dynamo.Table(CONSENTS_TABLE).query(
+            IndexName=CONSENTS_DEPLOYMENT_INDEX,
+            KeyConditionExpression=Key("deploymentId").eq(deployment_id),
+        ).get("Items", [])
+    except Exception as e:
+        _log("warning", "cancel_queued_jobs_consent_fetch_failed",
+             deploymentId=deployment_id, error=str(e))
+        return {"cancelled": 0, "skipped": 0, "failed": 0}
+
+    for consent in consents:
+        job_id = consent.get("jobId")
+        if not job_id:
+            continue
+
+        try:
+            job = dynamo.Table(OTA_JOBS_TABLE).get_item(
+                Key={"jobId": job_id}
+            ).get("Item")
+            job_status = job.get("status") if job else None
+
+            if job_status != "QUEUED":
+                skipped.append(job_id)
+                _log("debug", "cancel_queued_job_skipped",
+                     jobId=job_id, jobStatus=job_status, deploymentId=deployment_id)
+                continue
+
+            iot.cancel_job(
+                jobId=job_id,
+                reasonCode="DEPLOYMENT_ABORTED",
+                comment=f"Deployment {deployment_id} was aborted by admin",
+                force=False,
+            )
+            cancelled.append(job_id)
+            _log("info", "iot_job_cancelled_on_abort",
+                 jobId=job_id, deploymentId=deployment_id)
+
+        except Exception as e:
+            failed.append(job_id)
+            _log("warning", "cancel_queued_job_failed",
+                 jobId=job_id, deploymentId=deployment_id, error=str(e))
+
+    return {"cancelled": len(cancelled), "skipped": len(skipped), "failed": len(failed)}
+
+
 def _delete_device_pointers(pkg_name: str, target_ids: list[str],
                              deployment_id: str, rollout_stage: str) -> None:
     """Delete LATEST#{stage}#{deviceId} pointers for a superseded or aborted deployment."""
@@ -615,6 +671,12 @@ def _abort_job(deployment_id: str, claims: dict, body: dict) -> dict:
             },
         )
 
+        # Cancel any QUEUED IoT jobs so offline devices (C, D) don't install
+        # firmware after the deployment has been aborted.
+        cancel_summary = _cancel_queued_iot_jobs(deployment_id)
+        _log("info", "abort_queued_iot_jobs_summary",
+             deploymentId=deployment_id, **cancel_summary)
+
         _log("info", "abort_deployment_complete",
              deploymentId=deployment_id, requestedBy=actor,
              previousStatus=current_status, reason=reason)
@@ -626,6 +688,8 @@ def _abort_job(deployment_id: str, claims: dict, body: dict) -> dict:
                previousStatus=current_status,
                rolloutStage=item.get("rolloutStage"),
                reason=reason,
+               iotJobsCancelled=cancel_summary["cancelled"],
+               iotJobsFailed=cancel_summary["failed"],
                detail="Consent records untouched — ACCEPTED consents remain valid per architecture")
 
         # Clean up pointers so devices immediately stop being offered this update.
