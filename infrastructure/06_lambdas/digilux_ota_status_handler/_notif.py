@@ -265,8 +265,8 @@ These devices may be offline or stuck. Review and take action if needed.
 def tmpl_package_recalled_admin(package_name, version, recalled_by, reason,
                                  cancelled_jobs, in_progress_jobs):
     subject = f"[OTA] Package recalled — {package_name} v{version}"
-    ip_lines = ("\n".join(f"  - {j}" for j in in_progress_jobs)
-                if in_progress_jobs else "  None")
+    ip_lines = "\n".join(f"  - {j}" for j in in_progress_jobs) if in_progress_jobs else "  None"
+    ip_section = ("⚠ In-progress jobs (require manual action):\n" + ip_lines) if in_progress_jobs else ""
     body = f"""An OTA package has been recalled and will no longer be offered to devices.
 
 Package                : {package_name}
@@ -275,7 +275,7 @@ Recalled by            : {recalled_by}
 Reason                 : {reason}
 Jobs cancelled         : {len(cancelled_jobs)}
 Jobs still in progress : {len(in_progress_jobs)}
-{("⚠ In-progress jobs (require manual action):\n" + ip_lines) if in_progress_jobs else ""}
+{ip_section}
 """
     return subject, body
 
