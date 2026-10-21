@@ -45,6 +45,8 @@ PRESIGN_EXPIRY_TIER4_SEC="${PRESIGN_EXPIRY_TIER4_SEC:-172800}"
 IOT_JOB_TIMEOUT_MINUTES="${IOT_JOB_TIMEOUT_MINUTES:-1440}"
 CANARY_MAX="${CANARY_MAX:-5}"
 KMS_KEY_ID="${KMS_KEY_ID:-}"   # KMS key ID/alias for artifact envelope encryption
+STALE_JOB_DAYS="${STALE_JOB_DAYS:-7}"
+KEY_REQUESTS_TABLE="${KEY_REQUESTS_TABLE:-ota_key_requests}"
 
 LAMBDA_DIR="$(cd "$(dirname "$0")/06_lambdas" && pwd)"
 RUNTIME="python3.11"
@@ -177,6 +179,8 @@ env = {
         'CONSENTS_JOB_INDEX': 'jobId-index',
         'CONSENTS_DEPLOYMENT_INDEX': 'deploymentId-index',
         'IOT_ENDPOINT': '${IOT_ENDPOINT:-}',
+        'STALE_JOB_DAYS': '${STALE_JOB_DAYS}',
+        'KEY_REQUESTS_TABLE': '${KEY_REQUESTS_TABLE}',
         'LOG_LEVEL': 'INFO',
     }
 }
@@ -223,12 +227,15 @@ _obfuscate_lambda() {
 }
 
 # ── deploy_lambda ──────────────────────────────────────────────────────────────
-# Usage: deploy_lambda <src_suffix> <role_arn>
+# Usage: deploy_lambda <src_suffix> <role_arn> [timeout_sec] [memory_mb] [tmp_mb]
 #   src_suffix: the part after "digilux_ota_" in the source directory name
 #   Deployed function name: ota_<src_suffix>
 deploy_lambda() {
   local SRC_SUFFIX="$1"
   local ROLE_ARN="$2"
+  local TIMEOUT="${3:-30}"
+  local MEMORY="${4:-256}"
+  local TMP_MB="${5:-512}"
   local SRC_DIR_NAME="digilux_ota_${SRC_SUFFIX}"
   local FUNC_NAME="ota_${SRC_SUFFIX}"
   local SRC_DIR="${LAMBDA_DIR}/${SRC_DIR_NAME}"
@@ -268,6 +275,13 @@ deploy_lambda() {
     shopt -u nullglob
   fi
 
+  # Step 2b: Auto-sync master _notif.py if this Lambda imports it
+  local MASTER_NOTIF="${LAMBDA_DIR}/_notif.py"
+  if [[ -f "$MASTER_NOTIF" ]] && grep -q "import _notif" "${SRC_DIR}/lambda_function.py" 2>/dev/null; then
+    cp "$MASTER_NOTIF" "$PKG_TMP/_notif.py"
+    log_info "  _notif.py synced from master"
+  fi
+
   # Step 3: Copy non-Python sidecars (JSON configs, etc.)
   shopt -s nullglob
   for f in "$SRC_DIR"/*.json; do [[ -f "$f" ]] && cp "$f" "$PKG_TMP/"; done
@@ -299,8 +313,9 @@ deploy_lambda() {
       --function-name "$FUNC_NAME" \
       --runtime "$RUNTIME" \
       --handler "lambda_function.lambda_handler" \
-      --timeout 30 \
-      --memory-size 256 \
+      --timeout "$TIMEOUT" \
+      --memory-size "$MEMORY" \
+      --ephemeral-storage "{\"Size\":${TMP_MB}}" \
       --environment "file://${ENV_JSON_FILE}" \
       --region "$REGION" > /dev/null
     aws lambda wait function-updated \
@@ -314,8 +329,9 @@ deploy_lambda() {
       --role "$ROLE_ARN" \
       --handler "lambda_function.lambda_handler" \
       --zip-file "fileb://$ZIP_FILE" \
-      --timeout 30 \
-      --memory-size 256 \
+      --timeout "$TIMEOUT" \
+      --memory-size "$MEMORY" \
+      --ephemeral-storage "{\"Size\":${TMP_MB}}" \
       --tracing-config Mode=Active \
       --environment "file://${ENV_JSON_FILE}" \
       --description "OTA — ${FUNC_NAME}" \
@@ -371,19 +387,8 @@ deploy_lambda "upload_url"          "$ADMIN_ROLE_ARN"
 deploy_lambda "upload_complete"     "$ADMIN_ROLE_ARN"
 deploy_lambda "package_status"      "$ADMIN_ROLE_ARN"
 deploy_lambda "package_activate"    "$ADMIN_ROLE_ARN"
-deploy_lambda "artifact_processor"  "$ADMIN_ROLE_ARN"
-# artifact_processor handles large firmware files (up to ~200 MB) — override the
-# generic 30s/256MB defaults set inside deploy_lambda.
-log_info "Applying artifact_processor resource overrides (large file processing)..."
-aws lambda update-function-configuration \
-  --function-name "ota_artifact_processor" \
-  --timeout 300 \
-  --memory-size 2048 \
-  --ephemeral-storage '{"Size":2048}' \
-  --region "$REGION" > /dev/null
-aws lambda wait function-updated \
-  --function-name "ota_artifact_processor" --region "$REGION"
-log_ok "artifact_processor — timeout=300s  memory=2048MB  /tmp=2048MB"
+# artifact_processor handles large firmware files — 300s timeout, 2048MB memory/tmp
+deploy_lambda "artifact_processor"  "$ADMIN_ROLE_ARN" 300 2048 2048
 
 deploy_lambda "artifact_key"        "$ADMIN_ROLE_ARN"
 deploy_lambda "package_register"    "$ADMIN_ROLE_ARN"
