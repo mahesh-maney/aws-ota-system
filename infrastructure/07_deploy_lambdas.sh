@@ -132,7 +132,28 @@ if [[ -z "$KMS_KEY_ID" ]]; then
     log_ok "KMS key created: $_new_key_id  alias: $KMS_ALIAS"
   fi
 else
-  log_ok "KMS key (from config): $KMS_KEY_ID"
+  # KMS_KEY_ID was explicitly set in deploy.config.
+  # Check if the alias/key exists in the target account — create it if not.
+  _existing_kms=$(aws kms describe-key --key-id "$KMS_KEY_ID" \
+    --region "$REGION" --query "KeyMetadata.KeyId" --output text 2>/dev/null || true)
+  if [[ -n "$_existing_kms" ]]; then
+    log_ok "KMS key (from config): $KMS_KEY_ID → $_existing_kms"
+  else
+    log_step "KMS key '$KMS_KEY_ID' not found in this account — creating it"
+    _new_key_id=$(aws kms create-key \
+      --description "OTA artifact data key encryption — ${PREFIX}" \
+      --region "$REGION" \
+      --query "KeyMetadata.KeyId" --output text)
+    # KMS_KEY_ID may be a bare name (digilux-ota-data-key) or full alias (alias/...)
+    _alias_name="$KMS_KEY_ID"
+    [[ "$_alias_name" != alias/* ]] && _alias_name="alias/${_alias_name}"
+    aws kms create-alias \
+      --alias-name "$_alias_name" \
+      --target-key-id "$_new_key_id" \
+      --region "$REGION"
+    KMS_KEY_ID="$_alias_name"
+    log_ok "KMS key created: $_new_key_id  alias: $_alias_name"
+  fi
 fi
 
 # ── Build environment JSON file ────────────────────────────────────────────────
