@@ -8,6 +8,7 @@ log_section "Phase 7: Deploy Lambda Functions"
 
 REGION="${REGION:-ap-south-1}"
 PREFIX="${PREFIX:-digilux}"
+FUNC_PREFIX="${FUNC_PREFIX:-ota_}"   # Function name prefix. Use "digilux_ota_" to update the live deployment.
 ACCOUNT_ID="${ACCOUNT_ID:-$(aws sts get-caller-identity --query Account --output text)}"
 
 ADMIN_ROLE_ARN="arn:aws:iam::${ACCOUNT_ID}:role/${LAMBDA_ROLE_NAME:-ota-lambda-role}"
@@ -55,6 +56,7 @@ RUNTIME="python3.11"
 GIT_SHA="$(git -C "$(dirname "$0")" rev-parse --short HEAD 2>/dev/null || date -u +%Y%m%d%H%M%S)"
 
 log_info "Prefix          : $PREFIX"
+log_info "Func prefix     : $FUNC_PREFIX"
 log_info "Region          : $REGION"
 log_info "Account         : $ACCOUNT_ID"
 log_info "Admin role      : $ADMIN_ROLE_ARN"
@@ -237,7 +239,7 @@ deploy_lambda() {
   local MEMORY="${4:-256}"
   local TMP_MB="${5:-512}"
   local SRC_DIR_NAME="digilux_ota_${SRC_SUFFIX}"
-  local FUNC_NAME="ota_${SRC_SUFFIX}"
+  local FUNC_NAME="${FUNC_PREFIX}${SRC_SUFFIX}"
   local SRC_DIR="${LAMBDA_DIR}/${SRC_DIR_NAME}"
   local ZIP_FILE="/tmp/${FUNC_NAME}.zip"
 

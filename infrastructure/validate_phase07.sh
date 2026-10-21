@@ -40,14 +40,16 @@ fi
 set -a; source "$CONFIG_FILE"; set +a
 
 PREFIX="${PREFIX:-digilux}"
+FUNC_PREFIX="${FUNC_PREFIX:-ota_}"   # Function name prefix. Use "digilux_ota_" to target the live deployment.
 REGION="${REGION:-ap-south-1}"
 
 echo ""
 echo -e "${_BOLD}════════════════════════════════════════════════════════════════${_NC}"
 echo -e "${_BOLD}  Phase 07 Validation — Lambda Smoke Tests${_NC}"
 echo -e "${_BOLD}════════════════════════════════════════════════════════════════${_NC}"
-echo -e "  Prefix : ${_BOLD}${PREFIX}${_NC}"
-echo -e "  Region : ${_BOLD}${REGION}${_NC}"
+echo -e "  Prefix      : ${_BOLD}${PREFIX}${_NC}"
+echo -e "  Func prefix : ${_BOLD}${FUNC_PREFIX}${_NC}"
+echo -e "  Region      : ${_BOLD}${REGION}${_NC}"
 echo ""
 
 PASS_COUNT=0
@@ -62,7 +64,7 @@ RESULTS=()
 invoke_lambda() {
   local SUFFIX="$1"
   local PAYLOAD="$2"
-  local FUNC="ota_${SUFFIX}"
+  local FUNC="${FUNC_PREFIX}${SUFFIX}"
   local OUT="/tmp/_validate_${FUNC}.json"
 
   printf "  %-45s " "$FUNC"
