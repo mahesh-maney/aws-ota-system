@@ -37,6 +37,7 @@ import datetime
 import json
 import logging
 import os
+import time
 
 import boto3
 from botocore.exceptions import ClientError
@@ -44,7 +45,7 @@ from botocore.exceptions import ClientError
 import _notif
 
 log = logging.getLogger()
-log.setLevel(logging.INFO)
+log.setLevel(os.environ.get("LOG_LEVEL", "INFO"))
 
 REGION               = os.environ["REGION"]
 PACKAGES_TABLE       = os.environ.get("PACKAGES_TABLE",       "digilux_ota_packages")
@@ -133,6 +134,14 @@ def lambda_handler(event, context):
         # ── Auth: admin only ──────────────────────────────────────────────────
         claims = event.get("requestContext", {}).get("authorizer", {}).get("claims", {})
         if "ota-admin" not in claims.get("cognito:groups", ""):
+            _caller = claims.get("email", claims.get("sub", "unknown"))
+            log.warning(json.dumps({"msg": "unauthorized_access",
+                                    "caller": _caller, "groups": claims.get("cognito:groups", ""),
+                                    "path": event.get("path"), "method": event.get("httpMethod")}))
+            _audit("UNAUTHORIZED_ACCESS", _caller,
+                   {"path": event.get("path"), "method": event.get("httpMethod")},
+                   "FAILURE", reason="not_in_ota_admin_group",
+                   groups=claims.get("cognito:groups", ""))
             return _resp(403, {"error": "Admin access required"})
 
         caller = claims.get("email", claims.get("sub", "unknown"))
@@ -157,8 +166,7 @@ def lambda_handler(event, context):
         restore  = bool(body.get("restore",  False))
 
         # ── Fetch package record (needed by all branches) ─────────────────────
-        import time as _time
-        now_ms = int(_time.time() * 1000)
+        now_ms = int(time.time() * 1000)
         table  = dynamo.Table(PACKAGES_TABLE)
         item   = table.get_item(
             Key={"packageName": package_name, "version": version}
@@ -207,7 +215,8 @@ def lambda_handler(event, context):
                     if d.get("version") == version
                 ]
             except Exception as dep_err:
-                log.warning(f"Could not check active deployments for recall: {dep_err}")
+                log.warning(json.dumps({"msg": "active_deployment_check_failed",
+                                        "packageName": package_name, "version": version, "error": str(dep_err)}))
 
             if active_deps:
                 dep = active_deps[0]
@@ -256,12 +265,16 @@ def lambda_handler(event, context):
                    releaseType=item.get("releaseType"),
                    cancelledJobs=cancelled_jobs,
                    inProgressJobsWarning=in_progress_jobs or None)
-            _notif.notify_admin(
-                *_notif.tmpl_package_recalled_admin(
-                    package_name, version, caller, recall_reason,
-                    cancelled_jobs, in_progress_jobs
+            try:
+                _notif.notify_admin(
+                    *_notif.tmpl_package_recalled_admin(
+                        package_name, version, caller, recall_reason,
+                        cancelled_jobs, in_progress_jobs
+                    )
                 )
-            )
+            except Exception as _ne:
+                log.warning(json.dumps({"msg": "notify_recalled_admin_failed",
+                                        "packageName": package_name, "version": version, "error": str(_ne)}))
             # Send one email per unique device owner affected by the recall
             if cancelled_jobs and COGNITO_USER_POOL_ID:
                 _jt = dynamo.Table(OTA_JOBS_TABLE)
@@ -337,7 +350,8 @@ def lambda_handler(event, context):
                 prod_deps = dep_resp.get("Items", [])
                 existing_prod_dep = prod_deps[0] if prod_deps else None
             except Exception as dep_err:
-                log.warning(f"Could not check existing PRODUCTION deployment: {dep_err}")
+                log.warning(json.dumps({"msg": "prod_deployment_check_failed",
+                                        "packageName": package_name, "version": version, "error": str(dep_err)}))
 
             if existing_prod_dep:
                 return _resp(409, {
@@ -391,7 +405,8 @@ def lambda_handler(event, context):
                     "version": version, "targetGroup": PRODUCTION_GROUP,
                 }))
             except Exception as dep_err:
-                log.error(f"Failed to create deployment record on promote: {dep_err}")
+                log.error(json.dumps({"msg": "auto_deployment_create_failed",
+                                      "packageName": package_name, "version": version, "error": str(dep_err)}))
                 # Non-fatal — package is promoted, pointer is written; deployment record
                 # can be created manually via POST /deployments if needed.
                 deployment_id = None
@@ -528,7 +543,7 @@ def lambda_handler(event, context):
         }))
         return _resp(500, {"error": "Internal server error"})
     except Exception as e:
-        log.exception(f"Unhandled error: {e}")
+        log.exception(json.dumps({"msg": "unhandled_error_package_activate", "error": str(e)}))
         return _resp(500, {"error": "Internal server error"})
 
 
@@ -564,11 +579,14 @@ def _cancel_queued_deployments(package_name: str, version: str,
             # Cancel IoT Job
             try:
                 iot.cancel_job(jobId=job_id, reasonCode="PACKAGE_RECALLED", force=False)
-                log.info(f"IoT Job {job_id} cancelled due to package recall")
+                log.info(json.dumps({"msg": "iot_job_cancelled_package_recall",
+                                     "jobId": job_id, "packageName": package_name, "version": version}))
             except iot.exceptions.ResourceNotFoundException:
-                log.warning(f"IoT Job {job_id} not found in IoT Core — marking cancelled in DDB only")
+                log.warning(json.dumps({"msg": "iot_job_not_found_on_recall",
+                                        "jobId": job_id, "packageName": package_name}))
             except ClientError as e:
-                log.error(f"Failed to cancel IoT Job {job_id}: {e}")
+                log.error(json.dumps({"msg": "iot_cancel_job_failed_on_recall",
+                                      "jobId": job_id, "error": str(e)}))
 
             # Update DynamoDB record
             try:
@@ -591,7 +609,11 @@ def _cancel_queued_deployments(package_name: str, version: str,
                        {"jobId": job_id, "packageName": package_name, "version": version},
                        "SUCCESS", trigger="PACKAGE_RECALLED", recallReason=recall_reason)
             except ClientError as e:
-                log.error(f"Failed to update DDB job {job_id} to CANCELLED: {e}")
+                log.error(json.dumps({"msg": "ddb_job_cancel_update_failed",
+                                      "jobId": job_id, "error": str(e)}))
+                _audit("DEPLOYMENT_CANCEL_FAILED", caller,
+                       {"jobId": job_id, "packageName": package_name, "version": version},
+                       "FAILURE", trigger="PACKAGE_RECALLED", error=str(e))
 
         elif job.get("status") == "IN_PROGRESS":
             in_progress.append(job_id)
@@ -612,7 +634,6 @@ def _delete_package(package_name: str, version: str, caller: str, body: dict) ->
     6. RECALLED → soft delete (delete S3 artifact, mark DynamoDB record DELETED for forensics)
        All others  → hard delete (delete S3 + DynamoDB record)
     """
-    import time as _time
     from boto3.dynamodb.conditions import Attr
 
     table = dynamo.Table(PACKAGES_TABLE)
@@ -664,7 +685,7 @@ def _delete_package(package_name: str, version: str, caller: str, body: dict) ->
     if status == "SUPERSEDED" and not force:
         superseded_at_ms = item.get("supersededAt")
         if superseded_at_ms:
-            age_days = (_time.time() * 1000 - int(superseded_at_ms)) / (1000 * 86400)
+            age_days = (time.time() * 1000 - int(superseded_at_ms)) / (1000 * 86400)
             if age_days < COOLING_OFF_DAYS:
                 return _resp(409, {
                     "error": (
@@ -696,11 +717,13 @@ def _delete_package(package_name: str, version: str, caller: str, body: dict) ->
         try:
             s3.delete_object(Bucket=s3_bucket, Key=s3_key)
             s3_deleted = True
-            log.info(f"Deleted S3 object ({field}): s3://{s3_bucket}/{s3_key}")
+            log.info(json.dumps({"msg": "s3_object_deleted", "field": field,
+                                  "bucket": s3_bucket, "key": s3_key}))
         except ClientError as e:
-            log.warning(f"Could not delete S3 object ({field}) s3://{s3_bucket}/{s3_key}: {e}")
+            log.warning(json.dumps({"msg": "s3_object_delete_failed", "field": field,
+                                     "bucket": s3_bucket, "key": s3_key, "error": str(e)}))
 
-    now_ms = int(_time.time() * 1000)
+    now_ms = int(time.time() * 1000)
 
     # ── 6. RECALLED → soft delete; everything else → hard delete ─────────────
     if status == "RECALLED":
@@ -730,9 +753,13 @@ def _delete_package(package_name: str, version: str, caller: str, body: dict) ->
                deleteType="SOFT", previousStatus=status,
                releaseType=item.get("releaseType"),
                reason=reason, s3Deleted=s3_deleted)
-        _notif.notify_admin(
-            *_notif.tmpl_package_deleted(package_name, version, item.get("deviceType", ""), caller, reason)
-        )
+        try:
+            _notif.notify_admin(
+                *_notif.tmpl_package_deleted(package_name, version, item.get("deviceType", ""), caller, reason)
+            )
+        except Exception as _ne:
+            log.warning(json.dumps({"msg": "notify_deleted_failed",
+                                    "packageName": package_name, "version": version, "error": str(_ne)}))
         return _resp(200, {
             "packageName":    package_name,
             "version":        version,
@@ -758,9 +785,13 @@ def _delete_package(package_name: str, version: str, caller: str, body: dict) ->
            deleteType="HARD", previousStatus=status,
            releaseType=item.get("releaseType"),
            reason=reason, s3Deleted=s3_deleted)
-    _notif.notify_admin(
-        *_notif.tmpl_package_deleted(package_name, version, item.get("deviceType", ""), caller, reason)
-    )
+    try:
+        _notif.notify_admin(
+            *_notif.tmpl_package_deleted(package_name, version, item.get("deviceType", ""), caller, reason)
+        )
+    except Exception as _ne:
+        log.warning(json.dumps({"msg": "notify_deleted_failed",
+                                "packageName": package_name, "version": version, "error": str(_ne)}))
     return _resp(200, {
         "packageName":    package_name,
         "version":        version,
@@ -794,7 +825,9 @@ def _supersede_lower_versions(table, pkg_name: str, current_version: str,
         if old_item["version"] == current_version:
             continue
         if _semver_tuple(old_item["version"]) >= current_semver:
-            log.info(f"Skipping supersede of {pkg_name}@{old_item['version']} — not older than {current_version}")
+            log.info(json.dumps({"msg": "supersede_skipped_not_older",
+                                  "packageName": pkg_name, "oldVersion": old_item["version"],
+                                  "currentVersion": current_version}))
             continue
         try:
             table.update_item(
@@ -806,10 +839,12 @@ def _supersede_lower_versions(table, pkg_name: str, current_version: str,
                 },
                 ConditionExpression=Attr("status").eq("ACTIVE"),
             )
-            log.info(f"Superseded {pkg_name}@{old_item['version']} → promoted {current_version} is PROD")
+            log.info(json.dumps({"msg": "version_superseded", "packageName": pkg_name,
+                                  "supersededVersion": old_item["version"], "promotedVersion": current_version}))
         except ClientError as e:
             if e.response["Error"]["Code"] != "ConditionalCheckFailedException":
-                log.error(f"Failed to supersede {pkg_name}@{old_item['version']}: {e}")
+                log.error(json.dumps({"msg": "supersede_version_failed", "packageName": pkg_name,
+                                       "version": old_item["version"], "error": str(e)}))
 
 
 def _supersede_active_for_restore(table, pkg_name: str, restoring_version: str,
@@ -835,10 +870,12 @@ def _supersede_active_for_restore(table, pkg_name: str, restoring_version: str,
                 },
                 ConditionExpression=Attr("status").eq("ACTIVE"),
             )
-            log.info(f"Superseded {pkg_name}@{old_item['version']} (rollback: {restoring_version} restored)")
+            log.info(json.dumps({"msg": "version_superseded_on_restore", "packageName": pkg_name,
+                                  "supersededVersion": old_item["version"], "restoredVersion": restoring_version}))
         except ClientError as e:
             if e.response["Error"]["Code"] != "ConditionalCheckFailedException":
-                log.error(f"Failed to supersede {pkg_name}@{old_item['version']}: {e}")
+                log.error(json.dumps({"msg": "supersede_on_restore_failed", "packageName": pkg_name,
+                                       "version": old_item["version"], "error": str(e)}))
 
 
 def _resp(status: int, body: dict) -> dict:

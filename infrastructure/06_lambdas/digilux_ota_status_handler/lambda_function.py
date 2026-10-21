@@ -24,6 +24,7 @@ import logging
 import os
 import time
 from decimal import Decimal
+from typing import Optional
 
 import boto3
 from boto3.dynamodb.conditions import Attr, Key
@@ -32,7 +33,7 @@ from botocore.exceptions import ClientError
 import _notif
 
 log = logging.getLogger()
-log.setLevel(logging.INFO)
+log.setLevel(os.environ.get("LOG_LEVEL", "INFO"))
 
 REGION               = os.environ["REGION"]
 DEVICE_DATA_TABLE    = os.environ.get("DEVICE_DATA_TABLE",    "digilux_device_data")
@@ -188,7 +189,7 @@ def _sync_iot_job_execution(
     status_detail: str,
     error_msg: str,
     error_code,
-    error_reason: str | None,
+    error_reason: Optional[str],
 ) -> None:
     """
     Mirror the device's custom-topic status into AWS IoT Jobs.
@@ -305,7 +306,7 @@ def lambda_handler(event, context):
             status_detail, error_msg, error_code, error_reason,
         )
 
-        log.debug(f"Updating deviceStatuses[{device_key}] in job {job_id}")
+        log.debug(json.dumps({"msg": "updating_device_status", "deviceKey": device_key, "jobId": job_id}))
         jobs_table = dynamo.Table(OTA_JOBS_TABLE)
         aggregate  = _aggregate_status(job_id, device_key, status)
         jobs_table.update_item(
@@ -333,7 +334,8 @@ def lambda_handler(event, context):
                 ":ts": now_ms,
             },
         )
-        log.info(f"Job {job_id} aggregate status → {aggregate} (device {device_key} reported {status})")
+        log.info(json.dumps({"msg": "job_aggregate_status_updated", "jobId": job_id,
+                              "aggregateStatus": aggregate, "deviceKey": device_key, "deviceStatus": status}))
 
         if status == "TIMED_OUT":
             # IoT timed out waiting for the device — treat like a stale failure.
@@ -349,7 +351,7 @@ def lambda_handler(event, context):
                     UpdateExpression="SET pendingJobId = :null, lastUpdatedAt = :ts",
                     ExpressionAttributeValues={":null": None, ":ts": now_ms},
                 )
-                log.info(f"device_data pendingJobId cleared for device={device_id} after TIMED_OUT")
+                log.info(json.dumps({"msg": "pending_job_cleared", "deviceId": device_id, "reason": "TIMED_OUT"}))
             jobs_table.update_item(
                 Key={"jobId": job_id},
                 UpdateExpression="SET #s = :s, completedAt = :ts",
@@ -368,15 +370,18 @@ def lambda_handler(event, context):
                    "FAILURE",
                    packageName=pkg_name, version=version, thingName=thing_name)
             _update_deployment_counter(job_id, "timedOut")
-            owner_email = _get_owner_email(job_id)
-            if owner_email:
-                _notif.send_email(
-                    [owner_email],
-                    *_notif.tmpl_install_timed_out_user(pkg_name, version, thing_name, device_id)
+            try:
+                owner_email = _get_owner_email(job_id)
+                if owner_email:
+                    _notif.send_email(
+                        [owner_email],
+                        *_notif.tmpl_install_timed_out_user(pkg_name, version, thing_name, device_id)
+                    )
+                _notif.notify_admin(
+                    *_notif.tmpl_install_timed_out_admin(pkg_name, version, thing_name, device_id, job_id)
                 )
-            _notif.notify_admin(
-                *_notif.tmpl_install_timed_out_admin(pkg_name, version, thing_name, device_id, job_id)
-            )
+            except Exception as _ne:
+                log.warning(json.dumps({"msg": "notify_timed_out_failed", "jobId": job_id, "error": str(_ne)}))
 
         elif status in ("SUCCEEDED", "FAILED", "REJECTED"):
             # Look up macAddress for the composite key update
@@ -386,7 +391,8 @@ def lambda_handler(event, context):
             ).get("Items", [])
 
             if not dev_items:
-                log.warning(f"Device {device_id} not found in {DEVICE_DATA_TABLE} — skipping OTA field update")
+                log.warning(json.dumps({"msg": "device_not_found_in_data_table",
+                                        "deviceId": device_id, "table": DEVICE_DATA_TABLE, "status": status}))
             else:
                 mac_address = dev_items[0]["macAddress"]
 
@@ -426,7 +432,8 @@ def lambda_handler(event, context):
                             )
                         else:
                             raise
-                    log.info(f"device_data updated: device={device_id} {pkg_name}={version}, pendingJobId cleared")
+                    log.info(json.dumps({"msg": "device_data_updated", "deviceId": device_id,
+                                         "packageName": pkg_name, "version": version, "pendingJobIdCleared": True}))
 
                     _audit("DEVICE_UPDATE_SUCCEEDED",
                            f"device:{device_id}",
@@ -434,12 +441,15 @@ def lambda_handler(event, context):
                            "SUCCESS",
                            packageName=pkg_name, version=version, thingName=thing_name)
                     _update_deployment_counter(job_id, "succeeded")
-                    owner_email = _get_owner_email(job_id)
-                    if owner_email:
-                        _notif.send_email(
-                            [owner_email],
-                            *_notif.tmpl_install_succeeded(pkg_name, version, thing_name, device_id)
-                        )
+                    try:
+                        owner_email = _get_owner_email(job_id)
+                        if owner_email:
+                            _notif.send_email(
+                                [owner_email],
+                                *_notif.tmpl_install_succeeded(pkg_name, version, thing_name, device_id)
+                            )
+                    except Exception as _ne:
+                        log.warning(json.dumps({"msg": "notify_succeeded_failed", "jobId": job_id, "error": str(_ne)}))
 
                 elif status == "FAILED":
                     log.warning(json.dumps({
@@ -453,7 +463,7 @@ def lambda_handler(event, context):
                         UpdateExpression="SET pendingJobId = :null, lastUpdatedAt = :ts",
                         ExpressionAttributeValues={":null": None, ":ts": now_ms},
                     )
-                    log.info(f"device_data pendingJobId cleared for device={device_id} after FAILED")
+                    log.info(json.dumps({"msg": "pending_job_cleared", "deviceId": device_id, "reason": "FAILED"}))
 
                     _audit("DEVICE_UPDATE_FAILED",
                            f"device:{device_id}",
@@ -466,15 +476,18 @@ def lambda_handler(event, context):
                            **({"errorCode": error_code, "errorReason": error_reason}
                               if error_code is not None else {}))
                     _update_deployment_counter(job_id, "failed")
-                    owner_email = _get_owner_email(job_id)
-                    if owner_email:
-                        _notif.send_email(
-                            [owner_email],
-                            *_notif.tmpl_install_failed_user(pkg_name, version, thing_name, device_id, error_code, error_reason)
+                    try:
+                        owner_email = _get_owner_email(job_id)
+                        if owner_email:
+                            _notif.send_email(
+                                [owner_email],
+                                *_notif.tmpl_install_failed_user(pkg_name, version, thing_name, device_id, error_code, error_reason)
+                            )
+                        _notif.notify_admin(
+                            *_notif.tmpl_install_failed_admin(pkg_name, version, thing_name, device_id, job_id, error_code, error_reason)
                         )
-                    _notif.notify_admin(
-                        *_notif.tmpl_install_failed_admin(pkg_name, version, thing_name, device_id, job_id, error_code, error_reason)
-                    )
+                    except Exception as _ne:
+                        log.warning(json.dumps({"msg": "notify_failed_failed", "jobId": job_id, "error": str(_ne)}))
 
                     # Authenticity failures after start-next are reported as FAILED;
                     # still raise SECURITY_ALERT for the same codes as REJECTED.
@@ -505,7 +518,7 @@ def lambda_handler(event, context):
                         UpdateExpression="SET pendingJobId = :null, lastUpdatedAt = :ts",
                         ExpressionAttributeValues={":null": None, ":ts": now_ms},
                     )
-                    log.info(f"device_data pendingJobId cleared for device={device_id} after REJECTED")
+                    log.info(json.dumps({"msg": "pending_job_cleared", "deviceId": device_id, "reason": "REJECTED"}))
 
                     _audit("DEVICE_UPDATE_REJECTED",
                            f"device:{device_id}",
@@ -515,15 +528,18 @@ def lambda_handler(event, context):
                            thingName=thing_name,
                            errorCode=error_code, errorReason=error_reason)
                     _update_deployment_counter(job_id, "failed")
-                    owner_email = _get_owner_email(job_id)
-                    if owner_email:
-                        _notif.send_email(
-                            [owner_email],
-                            *_notif.tmpl_install_failed_user(pkg_name, version, thing_name, device_id, error_code, error_reason)
+                    try:
+                        owner_email = _get_owner_email(job_id)
+                        if owner_email:
+                            _notif.send_email(
+                                [owner_email],
+                                *_notif.tmpl_install_failed_user(pkg_name, version, thing_name, device_id, error_code, error_reason)
+                            )
+                        _notif.notify_admin(
+                            *_notif.tmpl_install_failed_admin(pkg_name, version, thing_name, device_id, job_id, error_code, error_reason)
                         )
-                    _notif.notify_admin(
-                        *_notif.tmpl_install_failed_admin(pkg_name, version, thing_name, device_id, job_id, error_code, error_reason)
-                    )
+                    except Exception as _ne:
+                        log.warning(json.dumps({"msg": "notify_rejected_failed", "jobId": job_id, "error": str(_ne)}))
 
                     if error_code in SECURITY_ERROR_CODES:
                         log.error(json.dumps({
@@ -548,13 +564,15 @@ def lambda_handler(event, context):
                 ExpressionAttributeNames={"#s": "status"},
                 ExpressionAttributeValues={":s": job_terminal_status, ":ts": now_ms},
             )
-            log.info(f"Job {job_id} marked {job_terminal_status} (device reported {status}) in {OTA_JOBS_TABLE}")
+            log.info(json.dumps({"msg": "job_marked_terminal", "jobId": job_id,
+                                  "terminalStatus": job_terminal_status, "deviceStatus": status}))
 
         elif status == "IN_PROGRESS":
-            log.debug(f"Device {device_id} in-progress at {progress}% for job {job_id}")
+            log.debug(json.dumps({"msg": "device_in_progress", "deviceId": device_id,
+                                   "progress": progress, "jobId": job_id}))
 
     except Exception as e:
-        log.exception(f"ERROR in status_handler: {e}")
+        log.exception(json.dumps({"msg": "unhandled_error_status_handler", "error": str(e)}))
         # Do not re-raise — prevents IoT Rule from retrying indefinitely
 
 

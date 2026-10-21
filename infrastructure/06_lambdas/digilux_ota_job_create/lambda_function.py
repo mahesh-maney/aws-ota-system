@@ -188,14 +188,17 @@ def _supersede_deployment(existing_dep: dict, new_dep_id: str,
         _log("info", "supersede_old_deployment_cancelled",
              oldDeploymentId=old_dep_id, supersededBy=new_dep_id, actor=actor)
 
-        subj, body = _notif.tmpl_deployment_superseded(
-            existing_dep.get("packageName", ""),
-            existing_dep.get("version", ""),
-            existing_dep.get("version", ""),   # new version not known here — overwritten below
-            existing_dep.get("rolloutStage", ""),
-            old_dep_id, new_dep_id,
-        )
-        _notif.notify_admin(subj, body)
+        try:
+            subj, body = _notif.tmpl_deployment_superseded(
+                existing_dep.get("packageName", ""),
+                existing_dep.get("version", ""),
+                existing_dep.get("version", ""),   # new version not known here — overwritten below
+                existing_dep.get("rolloutStage", ""),
+                old_dep_id, new_dep_id,
+            )
+            _notif.notify_admin(subj, body)
+        except Exception as _e:
+            _log("warning", "notify_superseded_failed", error=str(_e))
 
         _audit("DEPLOYMENT_SUPERSEDED", actor,
                {"deploymentId": old_dep_id,
@@ -702,12 +705,15 @@ def _abort_job(deployment_id: str, claims: dict, body: dict) -> dict:
         cancel_summary = _cancel_queued_iot_jobs(deployment_id)
 
         # ── Notify admin ──────────────────────────────────────────────────────
-        subj, body = _notif.tmpl_deployment_aborted_admin(
-            item.get("packageName", ""), item.get("version", ""),
-            item.get("rolloutStage", ""), deployment_id, actor, reason,
-            cancel_summary["cancelled"], cancel_summary["failed"],
-        )
-        _notif.notify_admin(subj, body)
+        try:
+            subj, body = _notif.tmpl_deployment_aborted_admin(
+                item.get("packageName", ""), item.get("version", ""),
+                item.get("rolloutStage", ""), deployment_id, actor, reason,
+                cancel_summary["cancelled"], cancel_summary["failed"],
+            )
+            _notif.notify_admin(subj, body)
+        except Exception as _e:
+            _log("warning", "notify_aborted_failed", error=str(_e))
 
         # ── Notify consented device owners ────────────────────────────────────
         try:
@@ -1020,11 +1026,16 @@ def lambda_handler(event, context):
         if rollout_stage in _STAGE_POINTER_KEY:
             _write_stage_pointer(pkg_name, version, pkg, rollout_stage, deployment_id)
 
-        subj, body = _notif.tmpl_deployment_created(
-            pkg_name, version, rollout_stage,
-            target_id_response, deployment_id, caller,
-        )
-        _notif.notify_admin(subj, body)
+        target_id_response = target_group or ",".join(target_ids)
+
+        try:
+            subj, body = _notif.tmpl_deployment_created(
+                pkg_name, version, rollout_stage,
+                target_id_response, deployment_id, caller,
+            )
+            _notif.notify_admin(subj, body)
+        except Exception as _e:
+            _log("warning", "notify_created_failed", error=str(_e))
 
         _audit("DEPLOYMENT_CREATED", caller,
                {"packageName": pkg_name, "version": version},
@@ -1036,8 +1047,6 @@ def lambda_handler(event, context):
                deviceCount=len(devices),
                deviceType=pkg.get("deviceType", ""),
                )
-
-        target_id_response = target_group or ",".join(target_ids)
 
         msg = f"Deployment created. Devices in {target_id_response} will be offered this update."
 

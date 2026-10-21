@@ -61,7 +61,7 @@ import os
 import time
 import importlib
 import importlib.util
-from unittest.mock import MagicMock, patch, call
+from unittest.mock import ANY, MagicMock, patch, call
 from botocore.exceptions import ClientError
 
 import pytest
@@ -205,6 +205,17 @@ def _make_table_mock(pkg=None, existing_dep=None, devices=None, consents=None):
 
 def _resp_body(resp):
     return json.loads(resp["body"])
+
+
+def _make_notif_mock():
+    """Return a MagicMock for _notif with all tmpl_* functions returning valid (subject, body) tuples."""
+    m = MagicMock()
+    pair = ("mock subject", "mock body")
+    m.tmpl_deployment_created.return_value = pair
+    m.tmpl_deployment_aborted_admin.return_value = pair
+    m.tmpl_deployment_aborted_user.return_value = pair
+    m.tmpl_deployment_superseded.return_value = pair
+    return m
 
 
 # ── Authentication / authorisation ────────────────────────────────────────────
@@ -379,10 +390,12 @@ class TestBetaDeployment:
             resp = lf.lambda_handler(_event(body=body), None)
         return resp, dep_t, con_t
 
-    def test_creates_consent_records(self):
+    def test_no_consent_records_at_deployment_time(self):
+        """Per architecture: consent records are NOT pre-created at deployment.
+        They are written only when a user taps YES via the user_consent Lambda."""
         resp, _, con_t = self._create_beta()
         assert resp["statusCode"] == _CREATE_STATUS
-        con_t.put_item.assert_called()
+        con_t.put_item.assert_not_called()
 
     def test_target_type_device_list(self):
         resp, dep_t, _ = self._create_beta()
@@ -391,19 +404,19 @@ class TestBetaDeployment:
                 (put_call.args[0]["Item"] if put_call.args else {}))
         assert item.get("targetType") == "DEVICE_LIST"
 
-    def test_consent_count_in_response(self):
+    def test_response_includes_target_id(self):
+        """Response targetId contains the device ID for BETA deployments."""
         resp, _, _ = self._create_beta()
         body = _resp_body(resp)
-        assert body.get("consentCount", -1) > 0
+        assert body.get("targetType") == "DEVICE_LIST"
+        assert DEV_ID_1 in body.get("targetId", "")
 
-    def test_consent_record_has_pending_status(self):
-        resp, _, con_t = self._create_beta()
-        put_call = con_t.put_item.call_args
-        item = (put_call.kwargs.get("Item") or
-                (put_call.args[0]["Item"] if put_call.args else {}))
-        assert item["status"] == "PENDING"
-        assert item["packageName"] == PKG_NAME
-        assert item["version"] == VERSION
+    def test_response_status_is_active(self):
+        """BETA deployment is immediately ACTIVE (no awaiting-consent phase)."""
+        resp, _, _ = self._create_beta()
+        body = _resp_body(resp)
+        assert body.get("status") == "ACTIVE"
+        assert body.get("rolloutStage") == "BETA"
 
     def test_legacy_targetid_string_accepted(self):
         """backward compat: comma-separated string targetId instead of targetIds array."""
@@ -423,166 +436,86 @@ class TestBetaDeployment:
 # ── Supersede logic ───────────────────────────────────────────────────────────
 
 class TestSupersede:
-    def test_existing_deployment_cancelled(self):
+    """
+    When an active deployment already exists for the same package+stage,
+    the Lambda blocks the new deployment with 409 (DEPLOYMENT_BLOCKED).
+    Admin must abort the existing deployment first.
+    """
+
+    def _make_dm_with_active(self, existing_dep, pkg=None):
+        pkg_t = MagicMock()
+        pkg_t.get_item.return_value = {"Item": pkg or _pkg(version="5.0.0")}
+        dep_t = MagicMock()
+        dep_t.query.return_value = {"Items": [existing_dep]}
+        dep_t.scan.return_value   = {"Items": []}
+        dep_t.put_item.return_value   = {}
+        dep_t.update_item.return_value = {}
+        dep_t.get_item.return_value   = {}
+
+        def tf(name):
+            if "packages"    in name: return pkg_t
+            if "deployments" in name: return dep_t
+            return MagicMock()
+
+        dm = MagicMock(); dm.Table.side_effect = tf
+        return dm
+
+    def test_active_same_stage_returns_409(self):
+        """Creating a PRODUCTION deployment when one already exists → 409."""
         existing = _deployment("old-dep-001", stage="PRODUCTION")
-        dynamo_mock, _, dep_t, _, _ = _make_table_mock(pkg=_pkg(), existing_dep=existing)
-        iot_mock = MagicMock()
-        body = {"packageName": PKG_NAME, "version": "5.0.0",
-                "rolloutStage": "PRODUCTION"}
+        dm = self._make_dm_with_active(existing)
+        body = {"packageName": PKG_NAME, "version": "5.0.0", "rolloutStage": "PRODUCTION"}
+        with patch.object(lf, "dynamo", dm), patch.object(lf, "iot", MagicMock()), \
+             patch.object(lf, "_notif", _make_notif_mock()):
+            resp = lf.lambda_handler(_event(body=body), None)
+        assert resp["statusCode"] == 409
+        rb = _resp_body(resp)
+        assert rb["activeDeploymentId"] == "old-dep-001"
 
-        # patch pkg lookup for v5.0.0
-        pkg_table = MagicMock()
-        pkg_table.get_item.return_value = {"Item": _pkg(version="5.0.0")}
-        dep_table = MagicMock()
-        dep_table.scan.return_value = {"Items": []}
-        dep_table.query.return_value = {"Items": [existing]}
-        dep_table.get_item.return_value = {}
-        dep_table.put_item.return_value = {}
-        dep_table.update_item.return_value = {}
-        con_table = MagicMock()
-        con_table.query.return_value = {"Items": []}
-        con_table.put_item.return_value = {}
-        con_table.update_item.return_value = {}
+    def test_409_body_includes_existing_version(self):
+        """409 response body reports the existing deployment's version."""
+        existing = _deployment("old-dep-001", ver="3.0.0", stage="PRODUCTION")
+        dm = self._make_dm_with_active(existing)
+        body = {"packageName": PKG_NAME, "version": "5.0.0", "rolloutStage": "PRODUCTION"}
+        with patch.object(lf, "dynamo", dm), patch.object(lf, "iot", MagicMock()), \
+             patch.object(lf, "_notif", _make_notif_mock()):
+            resp = lf.lambda_handler(_event(body=body), None)
+        assert resp["statusCode"] == 409
+        rb = _resp_body(resp)
+        assert rb.get("activeVersion") == "3.0.0"
 
-        def table_factory(name):
-            if "packages" in name: return pkg_table
-            if "deployments" in name: return dep_table
-            if "consent" in name: return con_table
+    def test_active_beta_does_not_block_production(self):
+        """Active BETA deployment does not block a new PRODUCTION deployment."""
+        existing_beta = _deployment("old-beta-001", stage="BETA")
+        # For PRODUCTION, _find_active_deployment queries for PRODUCTION stage;
+        # the mock returns empty Items (no active PRODUCTION deployment).
+        pkg_t = MagicMock()
+        pkg_t.get_item.return_value = {"Item": _pkg(version="5.0.0")}
+        dep_t = MagicMock()
+        dep_t.query.return_value  = {"Items": []}  # no active PRODUCTION deployment
+        dep_t.put_item.return_value   = {}
+        dep_t.update_item.return_value = {}
+        dep_t.get_item.return_value   = {}
+
+        def tf(name):
+            if "packages"    in name: return pkg_t
+            if "deployments" in name: return dep_t
             return MagicMock()
 
-        dynamo2 = MagicMock()
-        dynamo2.Table.side_effect = table_factory
-
-        with patch.object(lf, "dynamo", dynamo2), patch.object(lf, "iot", iot_mock):
+        dm = MagicMock(); dm.Table.side_effect = tf
+        body = {"packageName": PKG_NAME, "version": "5.0.0", "rolloutStage": "PRODUCTION"}
+        with patch.object(lf, "dynamo", dm), patch.object(lf, "iot", MagicMock()), \
+             patch.object(lf, "_notif", _make_notif_mock()):
             resp = lf.lambda_handler(_event(body=body), None)
-
         assert resp["statusCode"] == _CREATE_STATUS
-        # update_item must be called on deployments table to CANCEL old one
-        update_calls_str = str(dep_table.update_item.call_args_list)
-        assert "CANCELLED" in update_calls_str
 
-    def test_pending_consents_cancelled_on_supersede(self):
-        old_dep_id = "old-dep-002"
-        old_consent = {
-            "consentId":    "con-001",
-            "deploymentId": old_dep_id,
-            "status":       "PENDING",
-            "deviceId":     DEV_ID_1,
-        }
-        existing = _deployment(old_dep_id, stage="PRODUCTION")
-
-        pkg_t = MagicMock()
-        pkg_t.get_item.return_value = {"Item": _pkg(version="5.0.0")}
-        dep_t = MagicMock()
-        dep_t.query.return_value = {"Items": [existing]}
-        dep_t.scan.return_value = {"Items": []}
-        dep_t.put_item.return_value = {}
-        dep_t.update_item.return_value = {}
-        dep_t.get_item.return_value = {}
-        con_t = MagicMock()
-        con_t.query.return_value = {"Items": [old_consent]}
-        con_t.put_item.return_value = {}
-        con_t.update_item.return_value = {}
-
-        def tf(name):
-            if "packages" in name: return pkg_t
-            if "deployments" in name: return dep_t
-            if "consent" in name: return con_t
-            return MagicMock()
-
-        dm = MagicMock(); dm.Table.side_effect = tf
-        iot_mock = MagicMock()
+    def test_no_existing_deployment_creates_201(self):
+        """When no active deployment exists for this package+stage, creation succeeds."""
+        dm, *_ = _make_table_mock(pkg=_pkg(version="5.0.0"))
         body = {"packageName": PKG_NAME, "version": "5.0.0", "rolloutStage": "PRODUCTION"}
-
-        with patch.object(lf, "dynamo", dm), patch.object(lf, "iot", iot_mock):
+        with patch.object(lf, "dynamo", dm), patch.object(lf, "iot", MagicMock()), \
+             patch.object(lf, "_notif", _make_notif_mock()):
             resp = lf.lambda_handler(_event(body=body), None)
-
-        assert resp["statusCode"] == _CREATE_STATUS
-        # consent update_item called to CANCEL old PENDING consent
-        con_update_str = str(con_t.update_item.call_args_list)
-        assert "CANCELLED" in con_update_str
-
-    def test_queued_iot_job_cancel_attempted(self):
-        old_dep_id = "old-dep-003"
-        old_consent = {
-            "consentId":    "con-002",
-            "deploymentId": old_dep_id,
-            "status":       "ACCEPTED",
-            "jobId":        "iot-job-queued-001",
-            "deviceId":     DEV_ID_1,
-        }
-        existing = _deployment(old_dep_id, stage="PRODUCTION")
-
-        pkg_t = MagicMock()
-        pkg_t.get_item.return_value = {"Item": _pkg(version="5.0.0")}
-        dep_t = MagicMock()
-        dep_t.query.return_value = {"Items": [existing]}
-        dep_t.scan.return_value = {"Items": []}
-        dep_t.put_item.return_value = {}
-        dep_t.update_item.return_value = {}
-        dep_t.get_item.return_value = {}
-        con_t = MagicMock()
-        con_t.query.return_value = {"Items": [old_consent]}
-        con_t.put_item.return_value = {}
-        con_t.update_item.return_value = {}
-
-        def tf(name):
-            if "packages" in name: return pkg_t
-            if "deployments" in name: return dep_t
-            if "consent" in name: return con_t
-            return MagicMock()
-
-        dm = MagicMock(); dm.Table.side_effect = tf
-        iot_mock = MagicMock()
-        iot_mock.cancel_job.return_value = {}
-        body = {"packageName": PKG_NAME, "version": "5.0.0", "rolloutStage": "PRODUCTION"}
-
-        with patch.object(lf, "dynamo", dm), patch.object(lf, "iot", iot_mock):
-            lf.lambda_handler(_event(body=body), None)
-
-        iot_mock.cancel_job.assert_called_with(jobId="iot-job-queued-001", force=False)
-
-    def test_in_progress_iot_job_silently_skipped(self):
-        old_dep_id = "old-dep-004"
-        old_consent = {
-            "consentId":    "con-003",
-            "deploymentId": old_dep_id,
-            "status":       "ACCEPTED",
-            "jobId":        "iot-job-inprogress-001",
-            "deviceId":     DEV_ID_1,
-        }
-        existing = _deployment(old_dep_id, stage="PRODUCTION")
-
-        pkg_t = MagicMock()
-        pkg_t.get_item.return_value = {"Item": _pkg(version="5.0.0")}
-        dep_t = MagicMock()
-        dep_t.query.return_value = {"Items": [existing]}
-        dep_t.scan.return_value = {"Items": []}
-        dep_t.put_item.return_value = {}
-        dep_t.update_item.return_value = {}
-        dep_t.get_item.return_value = {}
-        con_t = MagicMock()
-        con_t.query.return_value = {"Items": [old_consent]}
-        con_t.put_item.return_value = {}
-        con_t.update_item.return_value = {}
-
-        def tf(name):
-            if "packages" in name: return pkg_t
-            if "deployments" in name: return dep_t
-            if "consent" in name: return con_t
-            return MagicMock()
-
-        dm = MagicMock(); dm.Table.side_effect = tf
-        iot_mock = MagicMock()
-        iot_mock.cancel_job.side_effect = ClientError(
-            {"Error": {"Code": "InvalidStateTransitionException", "Message": "IN_PROGRESS"}}, "op"
-        )
-        body = {"packageName": PKG_NAME, "version": "5.0.0", "rolloutStage": "PRODUCTION"}
-
-        with patch.object(lf, "dynamo", dm), patch.object(lf, "iot", iot_mock):
-            resp = lf.lambda_handler(_event(body=body), None)
-
-        # Should still succeed — IN_PROGRESS exception is expected and swallowed
         assert resp["statusCode"] == _CREATE_STATUS
 
 
@@ -592,7 +525,8 @@ class TestListDeployments:
     def test_returns_200_with_jobs(self):
         items = [_deployment("d1"), _deployment("d2")]
         dep_t = MagicMock()
-        dep_t.scan.return_value = {"Items": items}
+        # _list_jobs uses tbl.query(IndexName=...) not scan; returns same items for all statuses
+        dep_t.query.return_value = {"Items": items}
 
         def tf(name):
             if "deployments" in name: return dep_t
@@ -605,11 +539,11 @@ class TestListDeployments:
         assert resp["statusCode"] == 200
         body = _resp_body(resp)
         assert "jobs" in body
-        assert len(body["jobs"]) == 2
+        assert len(body["jobs"]) >= 2  # may have duplicates across statuses
 
     def test_deployment_has_job_id_field(self):
         dep_t = MagicMock()
-        dep_t.scan.return_value = {"Items": [_deployment("dep-abc")]}
+        dep_t.query.return_value = {"Items": [_deployment("dep-abc")]}
 
         def tf(name):
             if "deployments" in name: return dep_t
@@ -627,7 +561,8 @@ class TestListDeployments:
         dep["targetGroup"] = lf.PRODUCTION_GROUP
         dep["targetType"]  = "THING_GROUP"
         dep_t = MagicMock()
-        dep_t.scan.return_value = {"Items": [dep]}
+        # _list_jobs uses tbl.query(IndexName=...) not scan
+        dep_t.query.return_value = {"Items": [dep]}
 
         def tf(name):
             if "deployments" in name: return dep_t
@@ -638,6 +573,7 @@ class TestListDeployments:
             resp = lf.lambda_handler(_event(method="GET"), None)
 
         body = _resp_body(resp)
+        assert len(body["jobs"]) > 0
         assert body["jobs"][0]["targetId"] == lf.PRODUCTION_GROUP
 
 
@@ -649,8 +585,9 @@ class TestGetDeployment:
         dep_t = MagicMock()
         dep_t.get_item.return_value = {"Item": dep}
         con_t = MagicMock()
+        # _get_job only queries consents from deploymentId-index GSI and counts ACCEPTED
         con_t.query.return_value = {"Items": [
-            {"consentId": "c1", "status": "PENDING"},
+            {"consentId": "c1", "status": "ACCEPTED"},
             {"consentId": "c2", "status": "ACCEPTED"},
         ]}
 
@@ -665,7 +602,7 @@ class TestGetDeployment:
 
         assert resp["statusCode"] == 200
         body = _resp_body(resp)
-        assert body.get("consentStats") == {"PENDING": 1, "ACCEPTED": 1, "DECLINED": 0, "CANCELLED": 0}
+        assert body.get("consentStats", {}).get("ACCEPTED") == 2
 
     def test_returns_404_for_unknown_id(self):
         dep_t = MagicMock()
@@ -711,28 +648,43 @@ class TestAbortDeployment:
         dep_t.update_item.return_value = {}
         return dep_t
 
-    def _run_abort(self, dep, consents=None):
+    def _run_abort(self, dep, consents=None, reason="Test abort reason", jobs=None):
+        """Run an abort request.
+
+        jobs: optional dict {jobId: job_item} for OTA_JOBS_TABLE lookups.
+              Used to test IoT job cancellation (status must be "QUEUED" to trigger cancel).
+        """
         dep_t = self._dep_t(dep)
         con_t = MagicMock()
         con_t.query.return_value = {"Items": consents or []}
         con_t.update_item.return_value = {}
+        jobs_t = MagicMock()
+        if jobs:
+            def _get_job(Key, **kw):
+                return {"Item": jobs[Key["jobId"]]} if Key.get("jobId") in jobs else {}
+            jobs_t.get_item.side_effect = _get_job
         iot_mock = MagicMock()
+        notif_mock = _make_notif_mock()
 
         def tf(name):
             if "deployments" in name: return dep_t
-            if "consent" in name: return con_t
+            if "consent"     in name: return con_t
+            if "jobs"        in name: return jobs_t
             return MagicMock()
 
         dm = MagicMock(); dm.Table.side_effect = tf
-        with patch.object(lf, "dynamo", dm), patch.object(lf, "iot", iot_mock):
+        with patch.object(lf, "dynamo", dm), \
+             patch.object(lf, "iot", iot_mock), \
+             patch.object(lf, "_notif", notif_mock):
             resp = lf.lambda_handler(
-                _event(method="POST", job_id="dep-abort-001"), None
+                _event(method="POST", job_id="dep-abort-001",
+                       body={"reason": reason}), None
             )
-        return resp, dep_t, con_t, iot_mock
+        return resp, dep_t, con_t, iot_mock, notif_mock
 
     def test_active_deployment_cancelled(self):
         dep = _deployment("dep-abort-001", status="ACTIVE")
-        resp, dep_t, _, _ = self._run_abort(dep)
+        resp, dep_t, _, _, _ = self._run_abort(dep)
         assert resp["statusCode"] == 200
         assert _resp_body(resp)["status"] == "CANCELLED"
 
@@ -743,18 +695,38 @@ class TestAbortDeployment:
             assert resp["statusCode"] == 400, f"Expected 400 for {status}"
             assert status in _resp_body(resp)["error"]
 
-    def test_pending_consents_cancelled_on_abort(self):
+    def test_missing_reason_returns_400(self):
+        dep = _deployment("dep-abort-001", status="ACTIVE")
+        dep_t = self._dep_t(dep)
+
+        def tf(name):
+            if "deployments" in name: return dep_t
+            return MagicMock()
+
+        dm = MagicMock(); dm.Table.side_effect = tf
+        with patch.object(lf, "dynamo", dm), patch.object(lf, "iot", MagicMock()):
+            resp = lf.lambda_handler(
+                _event(method="POST", job_id="dep-abort-001", body={}), None
+            )
+        assert resp["statusCode"] == 400
+        assert "reason" in _resp_body(resp)["error"].lower()
+
+    def test_consent_records_untouched_on_abort(self):
+        """Aborting a deployment does NOT modify consent records — per architecture design."""
         dep = _deployment("dep-abort-001", status="ACTIVE")
         pending_consent = {
             "consentId":    "con-abort-001",
             "deploymentId": "dep-abort-001",
             "status":       "PENDING",
         }
-        _, _, con_t, _ = self._run_abort(dep, consents=[pending_consent])
-        update_str = str(con_t.update_item.call_args_list)
-        assert "CANCELLED" in update_str
+        resp, _, con_t, _, _ = self._run_abort(dep, consents=[pending_consent])
+        assert resp["statusCode"] == 200
+        assert _resp_body(resp)["status"] == "CANCELLED"
+        # Consent records are intentionally not modified during abort
+        con_t.update_item.assert_not_called()
 
     def test_queued_iot_job_cancelled_on_abort(self):
+        """QUEUED IoT jobs are cancelled when a deployment is aborted."""
         dep = _deployment("dep-abort-001", status="ACTIVE")
         accepted_consent = {
             "consentId":    "con-abort-002",
@@ -762,8 +734,17 @@ class TestAbortDeployment:
             "status":       "ACCEPTED",
             "jobId":        "iot-job-to-cancel",
         }
-        _, _, _, iot_mock = self._run_abort(dep, consents=[accepted_consent])
-        iot_mock.cancel_job.assert_called_with(jobId="iot-job-to-cancel", force=False)
+        queued_job = {"jobId": "iot-job-to-cancel", "status": "QUEUED"}
+        _, _, _, iot_mock, _ = self._run_abort(
+            dep, consents=[accepted_consent],
+            jobs={"iot-job-to-cancel": queued_job},
+        )
+        iot_mock.cancel_job.assert_called_once_with(
+            jobId="iot-job-to-cancel",
+            reasonCode="DEPLOYMENT_ABORTED",
+            comment=ANY,
+            force=False,
+        )
 
     def test_abort_not_found_returns_404(self):
         dep_t = MagicMock()
@@ -774,10 +755,12 @@ class TestAbortDeployment:
             return MagicMock()
 
         dm = MagicMock(); dm.Table.side_effect = tf
-        iot_mock = MagicMock()
-        with patch.object(lf, "dynamo", dm), patch.object(lf, "iot", iot_mock):
+        with patch.object(lf, "dynamo", dm), \
+             patch.object(lf, "iot", MagicMock()), \
+             patch.object(lf, "_notif", MagicMock()):
             resp = lf.lambda_handler(
-                _event(method="POST", job_id="nonexistent-dep"), None
+                _event(method="POST", job_id="nonexistent-dep",
+                       body={"reason": "test"}), None
             )
         assert resp["statusCode"] == 404
 
@@ -876,3 +859,206 @@ class TestFindActiveDeployment:
 
         query_call = tbl.query.call_args
         assert query_call.kwargs.get("IndexName") == lf.DEPLOYMENTS_PKG_STATUS_INDEX
+
+
+# ── Email notification tests ──────────────────────────────────────────────────
+
+class TestEmailNotifications:
+    """
+    Verify that _notif calls are made at the correct event points and
+    that notification failures are always non-fatal.
+    """
+
+    def _make_dynamo(self, pkg=None, existing_dep=None):
+        pkg_t = MagicMock()
+        pkg_t.get_item.return_value = {"Item": pkg or _pkg()} if (pkg or True) else {}
+        dep_t = MagicMock()
+        dep_t.scan.return_value  = {"Items": [existing_dep] if existing_dep else []}
+        dep_t.query.return_value = {"Items": [existing_dep] if existing_dep else []}
+        dep_t.get_item.return_value = {"Item": existing_dep} if existing_dep else {}
+        dep_t.put_item.return_value = {}
+        dep_t.update_item.return_value = {}
+        con_t = MagicMock()
+        con_t.query.return_value = {"Items": []}
+        con_t.put_item.return_value = {}
+        con_t.update_item.return_value = {}
+
+        def tf(name):
+            if "packages"     in name: return pkg_t
+            if "deployments"  in name: return dep_t
+            if "consent"      in name: return con_t
+            return MagicMock()
+
+        dm = MagicMock(); dm.Table.side_effect = tf
+        return dm, dep_t, con_t
+
+    # ── Deployment created → notify_admin ────────────────────────────────────
+
+    def test_deployment_created_notifies_admin(self):
+        dm, _, _ = self._make_dynamo()
+        notif = _make_notif_mock()
+        body = {"packageName": PKG_NAME, "version": VERSION, "rolloutStage": "PRODUCTION"}
+        with patch.object(lf, "dynamo", dm), \
+             patch.object(lf, "iot", MagicMock()), \
+             patch.object(lf, "_notif", notif):
+            resp = lf.lambda_handler(_event(body=body), None)
+        assert resp["statusCode"] == _CREATE_STATUS
+        notif.notify_admin.assert_called()
+        # Verify template was called with correct package/version
+        args = notif.tmpl_deployment_created.call_args[0]
+        assert args[0] == PKG_NAME
+        assert args[1] == VERSION
+
+    def test_deployment_created_notify_failure_is_nonfatal(self):
+        """SES failure must not prevent the deployment from being created."""
+        dm, _, _ = self._make_dynamo()
+        notif = _make_notif_mock()
+        notif.notify_admin.side_effect = Exception("SES unavailable")
+        body = {"packageName": PKG_NAME, "version": VERSION, "rolloutStage": "PRODUCTION"}
+        with patch.object(lf, "dynamo", dm), \
+             patch.object(lf, "iot", MagicMock()), \
+             patch.object(lf, "_notif", notif):
+            resp = lf.lambda_handler(_event(body=body), None)
+        assert resp["statusCode"] == _CREATE_STATUS
+
+    # ── Deployment aborted → admin + user emails ──────────────────────────────
+
+    def test_abort_notifies_admin(self):
+        dep = _deployment("dep-notif-abort", status="ACTIVE", stage="PRODUCTION")
+        dep_t = MagicMock()
+        dep_t.get_item.return_value = {"Item": dep}
+        dep_t.update_item.return_value = {}
+        con_t = MagicMock()
+        con_t.query.return_value = {"Items": []}
+        notif = _make_notif_mock()
+
+        def tf(name):
+            if "deployments" in name: return dep_t
+            if "consent"     in name: return con_t
+            return MagicMock()
+
+        dm = MagicMock(); dm.Table.side_effect = tf
+        with patch.object(lf, "dynamo", dm), \
+             patch.object(lf, "iot", MagicMock()), \
+             patch.object(lf, "_notif", notif):
+            resp = lf.lambda_handler(
+                _event(method="POST", job_id="dep-notif-abort",
+                       body={"reason": "Security issue"}), None
+            )
+        assert resp["statusCode"] == 200
+        notif.notify_admin.assert_called()
+        notif.tmpl_deployment_aborted_admin.assert_called_once()
+
+    def test_abort_with_accepted_consent_emails_device_owner(self):
+        """Device owners of consented jobs receive an email on abort."""
+        dep = _deployment("dep-notif-abort2", status="ACTIVE")
+        dep["rolloutStage"] = "BETA"
+        dep_t = MagicMock()
+        dep_t.get_item.return_value = {"Item": dep}
+        dep_t.update_item.return_value = {}
+        accepted_consent = {
+            "consentId":    "con-notif-001",
+            "deploymentId": "dep-notif-abort2",
+            "status":       "ACCEPTED",
+            "jobId":        "iot-job-notif-001",
+            "userId":       "user:user-sub-001",
+        }
+        con_t = MagicMock()
+        con_t.query.return_value = {"Items": [accepted_consent]}
+        con_t.update_item.return_value = {}
+        notif = _make_notif_mock()
+        notif.get_user_email.return_value = "owner@example.com"
+
+        def tf(name):
+            if "deployments" in name: return dep_t
+            if "consent"     in name: return con_t
+            return MagicMock()
+
+        dm = MagicMock(); dm.Table.side_effect = tf
+        with patch.object(lf, "dynamo", dm), \
+             patch.object(lf, "iot", MagicMock()), \
+             patch.object(lf, "_notif", notif):
+            resp = lf.lambda_handler(
+                _event(method="POST", job_id="dep-notif-abort2",
+                       body={"reason": "Recall"}), None
+            )
+        assert resp["statusCode"] == 200
+        notif.send_email.assert_called()
+
+    def test_abort_user_email_failure_is_nonfatal(self):
+        """send_email failure must not abort the abort operation."""
+        dep = _deployment("dep-notif-abort3", status="ACTIVE")
+        dep_t = MagicMock()
+        dep_t.get_item.return_value = {"Item": dep}
+        dep_t.update_item.return_value = {}
+        con_t = MagicMock()
+        con_t.query.return_value = {"Items": []}
+        notif = _make_notif_mock()
+        notif.notify_admin.side_effect = Exception("SES error")
+
+        def tf(name):
+            if "deployments" in name: return dep_t
+            if "consent"     in name: return con_t
+            return MagicMock()
+
+        dm = MagicMock(); dm.Table.side_effect = tf
+        with patch.object(lf, "dynamo", dm), \
+             patch.object(lf, "iot", MagicMock()), \
+             patch.object(lf, "_notif", notif):
+            resp = lf.lambda_handler(
+                _event(method="POST", job_id="dep-notif-abort3",
+                       body={"reason": "test"}), None
+            )
+        # Deployment must still be marked CANCELLED even when email fails
+        assert resp["statusCode"] == 200
+        assert _resp_body(resp)["status"] == "CANCELLED"
+
+    # ── Supersede → notify_admin ──────────────────────────────────────────────
+
+    def test_no_notification_when_blocked_by_active_deployment(self):
+        """409 (active deployment exists) must not trigger any notifications."""
+        old_dep = _deployment("old-dep-notif", stage="PRODUCTION")
+        pkg_t = MagicMock()
+        pkg_t.get_item.return_value = {"Item": _pkg(version="5.0.0")}
+        dep_t = MagicMock()
+        dep_t.query.return_value  = {"Items": [old_dep]}
+        dep_t.scan.return_value   = {"Items": []}
+        dep_t.put_item.return_value  = {}
+        dep_t.update_item.return_value = {}
+        dep_t.get_item.return_value  = {}
+        notif = _make_notif_mock()
+
+        def tf(name):
+            if "packages"    in name: return pkg_t
+            if "deployments" in name: return dep_t
+            return MagicMock()
+
+        dm = MagicMock(); dm.Table.side_effect = tf
+        body = {"packageName": PKG_NAME, "version": "5.0.0", "rolloutStage": "PRODUCTION"}
+        with patch.object(lf, "dynamo", dm), \
+             patch.object(lf, "iot", MagicMock()), \
+             patch.object(lf, "_notif", notif):
+            resp = lf.lambda_handler(_event(body=body), None)
+
+        assert resp["statusCode"] == 409
+        notif.notify_admin.assert_not_called()
+
+    # ── No notification on validation errors ──────────────────────────────────
+
+    def test_no_email_on_400_validation_error(self):
+        """Validation failures must not trigger any notifications."""
+        notif = MagicMock()
+        body = {"packageName": PKG_NAME}  # missing version
+        with patch.object(lf, "_notif", notif):
+            resp = lf.lambda_handler(_event(body=body), None)
+        assert resp["statusCode"] == 400
+        notif.notify_admin.assert_not_called()
+        notif.send_email.assert_not_called()
+
+    def test_no_email_on_403(self):
+        non_admin_claims = {"cognito:groups": "ota-user", "email": "user@test.com"}
+        notif = MagicMock()
+        with patch.object(lf, "_notif", notif):
+            resp = lf.lambda_handler(_event(claims=non_admin_claims), None)
+        assert resp["statusCode"] == 403
+        notif.notify_admin.assert_not_called()
