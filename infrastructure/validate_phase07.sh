@@ -152,11 +152,17 @@ S3_EVENT_PAYLOAD='{"Records":[{"s3":{"bucket":{"name":"smoke-test-bucket"},"obje
 
 echo -e "${_BOLD}── Admin Lambdas ────────────────────────────────────────────────${_NC}"
 invoke_lambda "upload_url"          "$API_PROXY_GET"
+invoke_lambda "upload_complete"     "$API_PROXY_POST"
+invoke_lambda "package_status"      "$API_PROXY_GET"
 invoke_lambda "package_activate"    "$API_PROXY_POST"
 invoke_lambda "artifact_processor"  "$S3_EVENT_PAYLOAD"
+invoke_lambda "artifact_key"        "$API_PROXY_POST"
 invoke_lambda "package_register"    "$API_PROXY_POST"
 invoke_lambda "compatibility_check" "$API_PROXY_GET"
+invoke_lambda "beta_users"          "$API_PROXY_GET"
 invoke_lambda "job_create"          "$API_PROXY_POST"
+invoke_lambda "job_sync"            "$API_PROXY_POST"
+invoke_lambda "key_server"          "$API_PROXY_POST"
 invoke_lambda "status_handler"      "$IOT_STATUS_PAYLOAD"
 invoke_lambda "device_register"     "$IOT_REGISTER_PAYLOAD"
 

@@ -413,7 +413,7 @@ deploy_lambda "user_get_download_link" "$USER_ROLE_ARN"
 # Grant IoT rules permission to invoke both $LATEST and the 'prod' alias.
 log_section "IoT Invoke Permissions"
 for SUFFIX in status_handler device_register artifact_key; do
-  FUNC="ota_${SUFFIX}"
+  FUNC="${FUNC_PREFIX}${SUFFIX}"
   # Permission on the unqualified function (covers $LATEST)
   STMT_ID="iot-rule-invoke-${FUNC}"
   aws lambda remove-permission \
@@ -450,4 +450,4 @@ done
 rm -f "$ENV_JSON_FILE"
 
 log_phase_done
-log_ok "All 12 Lambda functions deployed successfully."
+log_ok "All 18 Lambda functions deployed successfully."
