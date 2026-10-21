@@ -154,13 +154,15 @@ export LOGO_FILE="${LOGO_FILE:-}"
 export BRAND_NAME="${BRAND_NAME:-OTA Admin}"
 export ADMIN_UI_REPO_PATH="${ADMIN_UI_REPO_PATH:-}"
 
-# IoT groups
+# IoT groups — use values from deploy.config as-is; only fall back if truly unset (not just blank)
+# IMPORTANT: do NOT use :- here — empty string in deploy.config means "skip that level"
+# and must be passed through as empty, not overridden with a default.
 export IOT_ROOT_GROUP="${IOT_ROOT_GROUP:-DIGILUX}"
-export IOT_PRODUCTION_GROUP="${IOT_PRODUCTION_GROUP:-PRODUCTION}"
-export IOT_GATEWAYS_GROUP="${IOT_GATEWAYS_GROUP:-GATEWAYS}"
-export IOT_TOUCH_PANELS_GROUP="${IOT_TOUCH_PANELS_GROUP:-TOUCH-PANELS}"
-export IOT_GATEWAY_MODELS="${IOT_GATEWAY_MODELS:-DGW-100,DGW-200}"
-export IOT_TOUCH_PANEL_MODELS="${IOT_TOUCH_PANEL_MODELS:-TP-100,TP-200}"
+export IOT_PRODUCTION_GROUP
+export IOT_GATEWAYS_GROUP
+export IOT_TOUCH_PANELS_GROUP
+export IOT_GATEWAY_MODELS
+export IOT_TOUCH_PANEL_MODELS
 
 # CloudFront
 export CLOUDFRONT_DOMAIN="${CLOUDFRONT_DOMAIN:-}"
