@@ -693,7 +693,7 @@ _section "T16 — LAMBDA HEALTH"
 # ─────────────────────────────────────────────────────────────────────────────
 
 for FUNC in digilux_ota_upload_url digilux_ota_artifact_processor digilux_ota_job_create \
-            digilux_ota_compatibility_check digilux_ota_status_handler digilux_ota_device_register; do
+            digilux_ota_status_handler digilux_ota_device_register; do
   STATE=$(aws lambda get-function --function-name "$FUNC" --region "$REGION" \
     --query 'Configuration.State' --output text 2>/dev/null)
   RUNTIME=$(aws lambda get-function --function-name "$FUNC" --region "$REGION" \
@@ -729,13 +729,6 @@ CF_SECRET=$(aws lambda get-function-configuration \
   && _pass "user_consent: CLOUDFRONT_PRIVATE_KEY_SECRET is not set" \
   || _fail "user_consent: CLOUDFRONT_PRIVATE_KEY_SECRET is still set"
 
-# (+) digilux_ota_user_get_download_link also has no CloudFront env vars
-DL_CF=$(aws lambda get-function-configuration \
-  --function-name digilux_ota_user_get_download_link --region "$REGION" \
-  --query 'Environment.Variables.CLOUDFRONT_DOMAIN' --output text 2>/dev/null)
-[ -z "$DL_CF" ] || [ "$DL_CF" = "None" ] \
-  && _pass "user_get_download_link: CLOUDFRONT_DOMAIN is not set" \
-  || _fail "user_get_download_link: CLOUDFRONT_DOMAIN is set to '$DL_CF'"
 
 # (+) encS3Key in S3 — object actually exists under enc/ prefix (not old path)
 TEST_VERSION=$(grep TEST_VERSION /tmp/ota_test_version.txt | cut -d= -f2)

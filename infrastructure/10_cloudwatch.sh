@@ -10,15 +10,12 @@ ALL_FUNCS=(
   "ota_upload_url"
   "ota_package_activate"
   "ota_artifact_processor"
-  "ota_package_register"
-  "ota_compatibility_check"
   "ota_job_create"
   "ota_status_handler"
   "ota_device_register"
   "ota_user_check_updates"
   "ota_user_consent"
   "ota_user_update_status"
-  "ota_user_get_download_link"
 )
 
 echo "==> CloudWatch log groups (30-day retention)"

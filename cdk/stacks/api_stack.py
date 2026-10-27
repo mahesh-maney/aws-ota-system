@@ -26,7 +26,6 @@ class ApiStack(cdk.Stack):
     User endpoints (any valid app token):
       GET  /api/v1/ota/device/available-updates              Check pending updates for device
       POST /api/v1/ota/my/updates/consent                    Consent to update → creates IoT job
-      POST /api/v1/ota/my/updates/download-link              Get CloudFront signed download URL
       GET  /api/v1/ota/my/updates/{jobId}/status             Track update progress
     """
 
@@ -128,13 +127,6 @@ class ApiStack(cdk.Stack):
         abort = deployment_job.add_resource("abort")
         add_admin_method(abort, "POST", lambdas.job_create)
 
-        # ── Admin: /api/v1/controllers/{deviceId}/updates/available ───────────
-        controllers = v1.add_resource("controllers")
-        controller_device = controllers.add_resource("{deviceId}")
-        controller_updates = controller_device.add_resource("updates")
-        controller_avail = controller_updates.add_resource("available")
-        add_admin_method(controller_avail, "GET", lambdas.compat_check)
-
         # ── User: /api/v1/ota/device/available-updates ────────────────────────
         device = ota.add_resource("device")
         available_updates = device.add_resource("available-updates")
@@ -148,12 +140,8 @@ class ApiStack(cdk.Stack):
         consent_res = my_updates.add_resource("consent")
         add_user_method(consent_res, "POST", lambdas.consent)
 
-        # POST /api/v1/ota/my/updates/download-link
-        download_link = my_updates.add_resource("download-link")
-        add_user_method(download_link, "POST", lambdas.download_link)
-
         # GET /api/v1/ota/my/updates/{jobId}/status
-        # NOTE: {jobId} path param coexists with literal siblings (consent, download-link)
+        # NOTE: {jobId} path param coexists with literal sibling (consent)
         # API Gateway resolves literal paths before path parameters — no conflict.
         my_job = my_updates.add_resource("{jobId}")
         my_status = my_job.add_resource("status")

@@ -145,6 +145,7 @@ def lambda_handler(event, context):
 
         response_body = {
             "jobId":         job_id,
+            "deviceId":      device_id,
             "consentId":     consent.get("consentId"),
             "packageName":   job.get("packageName"),
             "version":       job.get("version"),
@@ -156,6 +157,8 @@ def lambda_handler(event, context):
             "progress":      this_device_status.get("progress"),
             "statusDetail":  this_device_status.get("statusDetail"),
         }
+        if job.get("isRestartRequired"):
+            response_body["isRestartRequired"] = True
 
         # Only include IoT counters if available (useful for debugging via support)
         if iot_status:

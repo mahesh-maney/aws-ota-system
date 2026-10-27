@@ -157,8 +157,6 @@ invoke_lambda "package_status"      "$API_PROXY_GET"
 invoke_lambda "package_activate"    "$API_PROXY_POST"
 invoke_lambda "artifact_processor"  "$S3_EVENT_PAYLOAD"
 invoke_lambda "artifact_key"        "$API_PROXY_POST"
-invoke_lambda "package_register"    "$API_PROXY_POST"
-invoke_lambda "compatibility_check" "$API_PROXY_GET"
 invoke_lambda "beta_users"          "$API_PROXY_GET"
 invoke_lambda "job_create"          "$API_PROXY_POST"
 invoke_lambda "job_sync"            "$API_PROXY_POST"
@@ -171,7 +169,6 @@ echo -e "${_BOLD}── User Lambdas ──────────────�
 invoke_lambda "user_check_updates"     "$API_PROXY_GET"
 invoke_lambda "user_consent"           "$API_PROXY_POST"
 invoke_lambda "user_update_status"     "$IOT_STATUS_PAYLOAD"
-invoke_lambda "user_get_download_link" "$API_PROXY_GET"
 
 # ── Summary ───────────────────────────────────────────────────────────────────
 echo ""

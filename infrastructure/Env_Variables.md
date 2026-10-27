@@ -16,18 +16,15 @@
 | 4 | `ota_package_activate` | Admin | Publish / recall / promote / restore |
 | 5 | `ota_artifact_processor` | Admin | S3-triggered — processes uploads |
 | 6 | `ota_artifact_key` | Admin | AES key delivery (MQTT + HTTP) |
-| 7 | `ota_package_register` | Admin | Registers package in catalog |
-| 8 | `ota_compatibility_check` | Admin | Per-device update check |
-| 9 | `ota_beta_users` | Admin | Manages beta user list |
-| 10 | `ota_job_create` | Admin | Create / list / abort deployments |
-| 11 | `ota_job_sync` | Admin | EventBridge + IoT lifecycle sync |
-| 12 | `ota_key_server` | Admin | Internal key wrap/unwrap service |
-| 13 | `ota_status_handler` | Admin | IoT rule — syncs job status to DynamoDB |
-| 14 | `ota_device_register` | Admin | IoT rule — registers device on agent startup |
-| 15 | `ota_user_check_updates` | User | Available updates for user's devices |
-| 16 | `ota_user_consent` | User | User accepts / declines OTA update |
-| 17 | `ota_user_update_status` | User | Poll job execution status |
-| 18 | `ota_user_get_download_link` | User | Presigned S3 download URL |
+| 7 | `ota_beta_users` | Admin | Manages beta user list |
+| 8 | `ota_job_create` | Admin | Create / list / abort deployments |
+| 9 | `ota_job_sync` | Admin | EventBridge + IoT lifecycle sync |
+| 10 | `ota_key_server` | Admin | Internal key wrap/unwrap service |
+| 11 | `ota_status_handler` | Admin | IoT rule — syncs job status to DynamoDB |
+| 12 | `ota_device_register` | Admin | IoT rule — registers device on agent startup |
+| 13 | `ota_user_check_updates` | User | Available updates for user's devices |
+| 14 | `ota_user_consent` | User | User accepts / declines OTA update |
+| 15 | `ota_user_update_status` | User | Poll job execution status |
 | — | `ota_dev_simulate_job` | Excluded | Dev/test only — not deployed to production |
 
 ---
@@ -38,14 +35,15 @@ The script patches **only** these 5 variables. All other existing env vars are p
 
 | Env Var | Value to Set | Applied to Lambda(s) | Source Confirmed |
 |---------|-------------|----------------------|-----------------|
-| `COGNITO_POOL_ID` | `us-east-1_DuegVptxS` | `ota_beta_users`, `ota_package_register` | Yes — `os.environ["COGNITO_POOL_ID"]` found in source |
+| `COGNITO_POOL_ID` | `us-east-1_DuegVptxS` | `ota_beta_users` | Yes — `os.environ["COGNITO_POOL_ID"]` found in source |
 | `COGNITO_USER_POOL_ID` | `us-east-1_DuegVptxS` | **None (excluded)** | No — not found in any Lambda source file |
 | `SES_SENDER` | `noreply@nucleusqa.honeywell.com` | **None (excluded)** | No — not found in any Lambda source file |
 | `PRODUCTION_GROUP` | `HON-PROD` | `ota_job_create`, `ota_package_activate`, `ota_device_register` | Yes — `os.environ.get("PRODUCTION_GROUP", ...)` found in source |
 | `GATEWAYS_GROUP` | `HON-ZigbeeGateway` | `ota_device_register` | Yes — `os.environ.get("GATEWAYS_GROUP", ...)` found in source |
 
-> **Note on COGNITO_USER_POOL_ID and SES_SENDER:** Source code grep across all 19
+> **Note on COGNITO_USER_POOL_ID and SES_SENDER:** Source code grep across all 17
 > Lambda `.py` files found no `os.environ` reference for either variable.
+
 > `07_deploy_lambdas.sh` sets them on all Lambdas via the shared env JSON, but
 > since no Lambda source is confirmed to read them, the patch script excludes them.
 > If a Lambda is found to use either variable, add it to the respective list in

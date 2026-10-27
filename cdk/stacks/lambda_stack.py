@@ -181,8 +181,6 @@ class LambdaStack(cdk.Stack):
         self.upload_url       = make_fn("UploadUrl",       "upload_url",          iam_stack.admin_role)
         self.package_activate = make_fn("PackageActivate", "package_activate",    iam_stack.admin_role)
         self.artifact_proc    = make_fn("ArtifactProc",    "artifact_processor",  iam_stack.admin_role)
-        self.pkg_register     = make_fn("PkgRegister",     "package_register",    iam_stack.admin_role)
-        self.compat_check     = make_fn("CompatCheck",     "compatibility_check", iam_stack.admin_role)
         self.job_create       = make_fn("JobCreate",       "job_create",          iam_stack.admin_role)
         self.status_handler   = make_fn("StatusHandler",   "status_handler",      iam_stack.admin_role)
         self.device_register  = make_fn("DeviceRegister",  "device_register",     iam_stack.admin_role)
@@ -191,7 +189,6 @@ class LambdaStack(cdk.Stack):
         self.check_updates   = make_fn("CheckUpdates",   "user_check_updates",      iam_stack.user_role)
         self.consent         = make_fn("Consent",        "user_consent",             iam_stack.user_role)
         self.update_status   = make_fn("UpdateStatus",   "user_update_status",       iam_stack.user_role)
-        self.download_link   = make_fn("DownloadLink",   "user_get_download_link",   iam_stack.user_role)
 
         # ── IoT Topic Rules ───────────────────────────────────────────────────
         rule_log_group = logs.LogGroup(
@@ -260,7 +257,7 @@ class LambdaStack(cdk.Stack):
         """All Lambda functions — used by AlarmsStack to create alarms."""
         return [
             self.upload_url, self.package_activate, self.artifact_proc,
-            self.pkg_register, self.compat_check, self.job_create,
+            self.job_create,
             self.status_handler, self.device_register, self.check_updates,
-            self.consent, self.update_status, self.download_link,
+            self.consent, self.update_status,
         ]

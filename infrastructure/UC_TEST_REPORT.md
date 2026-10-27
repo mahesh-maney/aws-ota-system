@@ -870,7 +870,7 @@ Device is unblocked, offered the newer PROD update, and the UI can display the p
 
 | Field | Detail |
 |-------|--------|
-| **Lambda** | `digilux_ota_package_register` (GET list handler) |
+| **Lambda** | `digilux_ota_upload_url` (GET list handler) |
 | **Current** | Packages returned in DynamoDB partition scan order |
 | **Desired** | Newest packages first (`createdAt` descending) |
 | **Fix** | Option A: Add `packageName-createdAt` GSI. Option B: Sort in Lambda after scan. |

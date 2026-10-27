@@ -128,7 +128,6 @@ def build_json(account_id, region, functions):
 EXPECTED_LAMBDAS = [
     ("ota_artifact_processor",  "Processes uploads; signs + encrypts artifact; PENDING → ACTIVE/CORRUPTED"),
     ("ota_upload_url",          "Generates presigned S3 upload URLs for admin uploads"),
-    ("ota_package_register",    "Registers packages; maps deviceType → packageName"),
     ("ota_device_register",     "Registers devices; assigns to IoT thing group leaf"),
     ("ota_job_create",          "Creates AWAITING_CONSENT deployment + per-device consent records"),
     ("ota_user_consent",        "YES/NO consent; YES creates per-device IoT Job"),

@@ -24,8 +24,6 @@ ADMIN_LAMBDAS=(
   ota_package_activate
   ota_artifact_processor
   ota_artifact_key
-  ota_package_register
-  ota_compatibility_check
   ota_beta_users
   ota_job_create
   ota_job_sync
@@ -38,7 +36,6 @@ USER_LAMBDAS=(
   ota_user_check_updates
   ota_user_consent
   ota_user_update_status
-  ota_user_get_download_link
 )
 
 ALL_LAMBDAS=("${ADMIN_LAMBDAS[@]}" "${USER_LAMBDAS[@]}")

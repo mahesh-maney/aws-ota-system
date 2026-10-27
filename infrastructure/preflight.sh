@@ -244,8 +244,6 @@ REQUIRED_DIRS=(
   digilux_ota_package_activate
   digilux_ota_artifact_processor
   digilux_ota_artifact_key
-  digilux_ota_package_register
-  digilux_ota_compatibility_check
   digilux_ota_beta_users
   digilux_ota_job_create
   digilux_ota_job_sync
@@ -255,7 +253,6 @@ REQUIRED_DIRS=(
   digilux_ota_user_check_updates
   digilux_ota_user_consent
   digilux_ota_user_update_status
-  digilux_ota_user_get_download_link
 )
 
 for D in "${REQUIRED_DIRS[@]}"; do

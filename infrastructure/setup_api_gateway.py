@@ -418,11 +418,6 @@ def main():
     add_method_cognito(consent, "POST", "ota_user_consent", USER_AUTH)
     add_cors(consent, "POST,OPTIONS")
 
-    print("\n  /api/v1/ota/my/updates/download-link")
-    download = get_or_create_resource(updates, "download-link")
-    add_method_cognito(download, "POST", "ota_user_get_download_link", USER_AUTH)
-    add_cors(download, "POST,OPTIONS")
-
     print("\n  /api/v1/ota/my/updates/{jobId}/status")
     job_param  = get_or_create_resource(updates, "{jobId}")
     status_res = get_or_create_resource(job_param, "status")
@@ -433,13 +428,6 @@ def main():
     print("\n[Step 8/10] Compatibility check endpoint")
 
     print("\n  /api/v1/controllers/{deviceId}/updates/available")
-    controllers  = get_or_create_resource(api_root, "controllers")
-    ctrl_device  = get_or_create_resource(controllers, "{deviceId}")
-    ctrl_updates = get_or_create_resource(ctrl_device, "updates")
-    ctrl_avail   = get_or_create_resource(ctrl_updates, "available")
-    add_method_cognito(ctrl_avail, "GET", "ota_compatibility_check", ADMIN_AUTH)
-    add_cors(ctrl_avail, "GET,OPTIONS")
-
     # ── Step 9 — Gateway responses ────────────────────────────────────────────
     setup_gateway_responses()
 

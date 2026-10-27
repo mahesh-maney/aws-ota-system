@@ -391,6 +391,8 @@ def _check_active_job(user_id: str, device_id: str, pkg_name: str,
             "version": job_version or "",
             "message": OTA_COMPLETED_MSG.format(version=job_version or ""),
         }
+        if job_item and job_item.get("isRestartRequired"):
+            last_completed["isRestartRequired"] = True
         _log("info", "device_job_completed_found",
              deviceId=device_id, jobId=job_id_to_check, jobVersion=job_version,
              detail="SUCCEEDED job — will surface completion status to app")

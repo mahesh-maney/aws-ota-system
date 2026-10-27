@@ -186,9 +186,9 @@ if [[ ! -d "$LAMBDA_DIR" ]]; then
 else
   pass "Lambda directory found: $LAMBDA_DIR"
   MISSING_LAMBDAS=0
-  for SUFFIX in upload_url package_activate artifact_processor package_register \
-                compatibility_check job_create status_handler device_register \
-                user_check_updates user_consent user_update_status user_get_download_link; do
+  for SUFFIX in upload_url package_activate artifact_processor \
+                job_create status_handler device_register \
+                user_check_updates user_consent user_update_status; do
     SRC="${LAMBDA_DIR}/digilux_ota_${SUFFIX}/lambda_function.py"
     if [[ -f "$SRC" ]]; then
       pass "digilux_ota_${SUFFIX}/lambda_function.py"

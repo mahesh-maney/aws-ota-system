@@ -30,7 +30,6 @@ LAMBDA_NAMES=(
   "digilux_ota_user_check_updates"
   "digilux_ota_user_consent"
   "digilux_ota_user_update_status"
-  "digilux_ota_user_get_download_link"
 )
 
 LAMBDA_ENV_COMMON="REGION=${REGION},ACCOUNT_ID=${ACCOUNT_ID},\
@@ -463,7 +462,7 @@ echo "  /api/v1/ota resource ID: ${OTA_RESOURCE_ID}"
 MY_ID=$(get_or_create_resource "${OTA_RESOURCE_ID}" "my")
 echo "  /api/v1/ota/my → ${MY_ID}"
 
-# /api/v1/ota/my/updates  (parent resource for consent, download-link, status)
+# /api/v1/ota/my/updates  (parent resource for consent, status)
 UPDATES_ID=$(get_or_create_resource "${MY_ID}" "updates")
 echo "  /api/v1/ota/my/updates → ${UPDATES_ID}"
 
@@ -486,10 +485,6 @@ echo "  /api/v1/ota/my/updates/{jobId}/status → ${STATUS_ID}"
 # GET /api/v1/ota/my/updates/{jobId}/status  → digilux_ota_user_update_status
 add_method "${STATUS_ID}" "GET" "digilux_ota_user_update_status" "COGNITO_USER_POOLS"
 
-# POST /api/v1/ota/my/updates/download-link  → digilux_ota_user_get_download_link
-DOWNLOAD_LINK_ID=$(get_or_create_resource "${UPDATES_ID}" "download-link")
-echo "  /api/v1/ota/my/updates/download-link → ${DOWNLOAD_LINK_ID}"
-add_method "${DOWNLOAD_LINK_ID}" "POST" "digilux_ota_user_get_download_link" "COGNITO_USER_POOLS"
 
 # /api/v1/ota/device  (already created for available-updates)
 DEVICE_ID=$(get_or_create_resource "${OTA_RESOURCE_ID}" "device")
@@ -520,7 +515,6 @@ echo ""
 echo "  New endpoints:"
 echo "  GET  /api/v1/ota/device/available-updates"
 echo "  POST /api/v1/ota/my/updates/consent"
-echo "  POST /api/v1/ota/my/updates/download-link"
 echo "  GET  /api/v1/ota/my/updates/{jobId}/status"
 echo ""
 echo "  New DynamoDB table: ${CONSENTS_TABLE}"

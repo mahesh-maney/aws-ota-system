@@ -731,69 +731,6 @@
         }
       }
     },
-    "/api/v1/controllers/{deviceId}/updates/available" : {
-      "get" : {
-        "parameters" : [ {
-          "name" : "deviceId",
-          "in" : "path",
-          "required" : true,
-          "type" : "string"
-        } ],
-        "responses" : { },
-        "security" : [ {
-          "digilux-ota-admin-authorizer" : [ ]
-        } ],
-        "x-amazon-apigateway-integration" : {
-          "uri" : "arn:aws:apigateway:ap-south-1:lambda:path/2015-03-31/functions/arn:aws:lambda:ap-south-1:986906626244:function:digilux_ota_compatibility_check/invocations",
-          "httpMethod" : "POST",
-          "passthroughBehavior" : "when_no_match",
-          "responseTransferMode" : "BUFFERED",
-          "type" : "aws_proxy"
-        }
-      },
-      "options" : {
-        "consumes" : [ "application/json" ],
-        "parameters" : [ {
-          "name" : "deviceId",
-          "in" : "path",
-          "required" : true,
-          "type" : "string"
-        } ],
-        "responses" : {
-          "200" : {
-            "description" : "200 response",
-            "headers" : {
-              "Access-Control-Allow-Origin" : {
-                "type" : "string"
-              },
-              "Access-Control-Allow-Methods" : {
-                "type" : "string"
-              },
-              "Access-Control-Allow-Headers" : {
-                "type" : "string"
-              }
-            }
-          }
-        },
-        "x-amazon-apigateway-integration" : {
-          "responses" : {
-            "default" : {
-              "statusCode" : "200",
-              "responseParameters" : {
-                "method.response.header.Access-Control-Allow-Methods" : "'GET,POST,OPTIONS'",
-                "method.response.header.Access-Control-Allow-Headers" : "'Content-Type,Authorization'",
-                "method.response.header.Access-Control-Allow-Origin" : "'*'"
-              }
-            }
-          },
-          "requestTemplates" : {
-            "application/json" : "{\"statusCode\":200}"
-          },
-          "passthroughBehavior" : "when_no_match",
-          "type" : "mock"
-        }
-      }
-    },
     "/api/v1/createDevice" : {
       "post" : {
         "produces" : [ "application/json" ],
@@ -2731,21 +2668,6 @@
         } ],
         "x-amazon-apigateway-integration" : {
           "uri" : "arn:aws:apigateway:ap-south-1:lambda:path/2015-03-31/functions/arn:aws:lambda:ap-south-1:986906626244:function:digilux_ota_user_consent/invocations",
-          "httpMethod" : "POST",
-          "passthroughBehavior" : "when_no_match",
-          "responseTransferMode" : "BUFFERED",
-          "type" : "aws_proxy"
-        }
-      }
-    },
-    "/api/v1/ota/my/updates/download-link" : {
-      "post" : {
-        "responses" : { },
-        "security" : [ {
-          "cognito_authorizer_v2" : [ ]
-        } ],
-        "x-amazon-apigateway-integration" : {
-          "uri" : "arn:aws:apigateway:ap-south-1:lambda:path/2015-03-31/functions/arn:aws:lambda:ap-south-1:986906626244:function:digilux_ota_user_get_download_link/invocations",
           "httpMethod" : "POST",
           "passthroughBehavior" : "when_no_match",
           "responseTransferMode" : "BUFFERED",

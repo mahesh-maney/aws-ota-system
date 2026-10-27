@@ -43,7 +43,6 @@ LAMBDA_DIR = Path(__file__).parent / "06_lambdas"
 LAMBDAS_TO_REVIEW = [
     "digilux_ota_artifact_processor",
     "digilux_ota_upload_url",
-    "digilux_ota_user_get_download_link",
     "digilux_ota_user_check_updates",
     "digilux_ota_user_consent",
     "digilux_ota_device_register",
@@ -240,34 +239,6 @@ def part1_api(admin_token: str, user_token: str) -> dict:
     devices = body if s == 200 else {}
     # Re-fetch available updates to find a device with an update
     s_upd, upd = http("GET", "/api/v1/ota/device/available-updates", user_token)
-    dl_result = None
-    if s_upd == 200 and upd.get("devices"):
-        dev = upd["devices"][0]
-        s_dl, dl = http("POST", "/api/v1/ota/my/updates/download-link", user_token, {
-            "deviceId":    dev["deviceId"],
-            "packageName": dev["package"],
-            "version":     dev["availableVersion"],
-        })
-        collected["download_link"] = {"status": s_dl, "body": dl}
-        dl_result = dl
-
-        ok("POST /download-link → 200", s_dl == 200, f"Got {s_dl}: {dl.get('error','')}")
-        if s_dl == 200:
-            for field in ["downloadUrl", "signatureUrl", "sha256", "signature",
-                          "encrypted", "aesKey", "aesIv", "mqttDelivered", "expiresAt"]:
-                ok(f"  response has '{field}'", field in dl,
-                   "MISSING — controller/app will break" if field not in dl else "")
-            ok("  encrypted=True", dl.get("encrypted") is True,
-               f"Got encrypted={dl.get('encrypted')}")
-            ok("  downloadUrl ends in .enc", ".enc" in dl.get("downloadUrl", ""),
-               "Should point to encrypted artifact, not raw .tar")
-            ok("  signatureUrl ends in .sig", ".sig" in dl.get("signatureUrl", ""),
-               "Separate .sig file required for ECDSA verification")
-            ok("  sha256 is 64-char hex", len(dl.get("sha256", "")) == 64,
-               f"Got length {len(dl.get('sha256',''))}")
-    else:
-        print("      ⚠ No updates available for test device — skipping download-link check")
-        print("        (run admin e2e first to create + activate a test package)")
 
     # ── A7: Claude semantic analysis ──────────────────────────────────────────
     print("\n  [A7] Claude semantic analysis of collected responses...")
@@ -282,7 +253,7 @@ Please evaluate:
 2. Any fields that are missing, have wrong types, or look suspicious?
 3. Security: does anything in the responses leak internal info (ARNs, bucket names, etc.) that shouldn't be public?
 4. Controller-impact: are there any response fields that, if wrong or missing, would cause the embedded Linux controller to fail to apply the update?
-5. Consistency between responses (e.g., SHA256 in download-link matches what's expected)?
+5. Consistency between responses across endpoints?
 
 Be specific. Flag anything that needs attention."""
 

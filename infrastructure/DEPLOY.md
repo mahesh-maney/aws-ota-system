@@ -170,11 +170,10 @@ for FN in \
   digilux_ota_user_check_updates \
   digilux_ota_job_create \
   digilux_ota_user_consent \
-  digilux_ota_package_register \
   digilux_ota_device_register \
   digilux_ota_status_handler \
   digilux_ota_user_update_status \
-  digilux_ota_user_get_download_link; do
+  digilux_ota_user_update_status; do
   aws lambda update-alias \
     --function-name "$FN" --name prod \
     --function-version <TARGET_VERSION> \

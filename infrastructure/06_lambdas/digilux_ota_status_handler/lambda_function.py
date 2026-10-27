@@ -274,7 +274,9 @@ def lambda_handler(event, context):
             error_code = int(raw_error_code) if raw_error_code is not None else None
         except (TypeError, ValueError):
             error_code = None
-        error_reason  = ERROR_CODE_MAP.get(error_code, "UNKNOWN_ERROR") if error_code is not None else None
+        error_reason        = ERROR_CODE_MAP.get(error_code, "UNKNOWN_ERROR") if error_code is not None else None
+        # isRestartRequired sent as string "true" by firmware when manifest has restart-required files
+        is_restart_required = status_details.get("isRestartRequired") == "true"
         pkg_name      = event.get("packageName", "")
         version       = event.get("version", "")
         error_msg     = event.get("error", "") or status_details.get("error", "")
@@ -558,11 +560,16 @@ def lambda_handler(event, context):
 
             # Map REJECTED → FAILED at the job level so the UI shows a clear terminal state
             job_terminal_status = "FAILED" if status == "REJECTED" else status
+            _update_expr   = "SET #s = :s, completedAt = :ts"
+            _update_values = {":s": job_terminal_status, ":ts": now_ms}
+            if status == "SUCCEEDED" and is_restart_required:
+                _update_expr += ", isRestartRequired = :rr"
+                _update_values[":rr"] = True
             jobs_table.update_item(
                 Key={"jobId": job_id},
-                UpdateExpression="SET #s = :s, completedAt = :ts",
+                UpdateExpression=_update_expr,
                 ExpressionAttributeNames={"#s": "status"},
-                ExpressionAttributeValues={":s": job_terminal_status, ":ts": now_ms},
+                ExpressionAttributeValues=_update_values,
             )
             log.info(json.dumps({"msg": "job_marked_terminal", "jobId": job_id,
                                   "terminalStatus": job_terminal_status, "deviceStatus": status}))

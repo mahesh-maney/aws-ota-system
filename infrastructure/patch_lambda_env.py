@@ -79,8 +79,6 @@ ALL_LAMBDAS = [
     "ota_package_activate",
     "ota_artifact_processor",
     "ota_artifact_key",
-    "ota_package_register",
-    "ota_compatibility_check",
     "ota_beta_users",
     "ota_job_create",
     "ota_job_sync",
@@ -90,13 +88,12 @@ ALL_LAMBDAS = [
     "ota_user_check_updates",
     "ota_user_consent",
     "ota_user_update_status",
-    "ota_user_get_download_link",
 ]
 
 # Map: env_var_key → (required_value, list_of_lambda_names_to_patch)
 #
 # Targets are based strictly on source code analysis (grep os.environ):
-#   COGNITO_POOL_ID      confirmed in: ota_beta_users, ota_package_register
+#   COGNITO_POOL_ID      confirmed in: ota_beta_users
 #   COGNITO_USER_POOL_ID NOT found in any Lambda source — excluded
 #   SES_SENDER           NOT found in any Lambda source — excluded
 #   PRODUCTION_GROUP     confirmed in: ota_job_create, ota_package_activate, ota_device_register
@@ -109,7 +106,7 @@ ALL_LAMBDAS = [
 PATCH_MAP = {
     "COGNITO_POOL_ID": (
         COGNITO_POOL_ID,
-        ["ota_beta_users", "ota_package_register"],
+        ["ota_beta_users"],
     ),
     "COGNITO_USER_POOL_ID": (
         COGNITO_USER_POOL_ID,

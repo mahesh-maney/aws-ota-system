@@ -417,8 +417,6 @@ deploy_lambda "package_activate"    "$ADMIN_ROLE_ARN"
 deploy_lambda "artifact_processor"  "$ADMIN_ROLE_ARN" 300 2048 2048
 
 deploy_lambda "artifact_key"        "$ADMIN_ROLE_ARN"
-deploy_lambda "package_register"    "$ADMIN_ROLE_ARN"
-deploy_lambda "compatibility_check" "$ADMIN_ROLE_ARN"
 deploy_lambda "beta_users"          "$ADMIN_ROLE_ARN"
 deploy_lambda "job_create"          "$ADMIN_ROLE_ARN"
 deploy_lambda "job_sync"            "$ADMIN_ROLE_ARN"
@@ -431,7 +429,6 @@ log_section "User Lambdas"
 deploy_lambda "user_check_updates"     "$USER_ROLE_ARN"
 deploy_lambda "user_consent"           "$USER_ROLE_ARN"
 deploy_lambda "user_update_status"     "$USER_ROLE_ARN"
-deploy_lambda "user_get_download_link" "$USER_ROLE_ARN"
 
 # ── IoT invoke permissions ────────────────────────────────────────────────────
 # Grant IoT rules permission to invoke both $LATEST and the 'prod' alias.

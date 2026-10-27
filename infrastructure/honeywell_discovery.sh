@@ -453,7 +453,6 @@ OTA_LAMBDA_KEYWORDS=(
   "ota_user_consent"
   "ota_artifact_key"
   "ota_status_handler"
-  "ota_package_register"
   "ota_device_register"
   "entitlement_check"
 )

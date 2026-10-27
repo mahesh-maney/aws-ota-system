@@ -175,15 +175,12 @@ LAMBDA_SUFFIXES=(
   upload_url
   package_activate
   artifact_processor
-  package_register
-  compatibility_check
   job_create
   status_handler
   device_register
   user_check_updates
   user_consent
   user_update_status
-  user_get_download_link
 )
 for SUFFIX in "${LAMBDA_SUFFIXES[@]}"; do
   FUNC="${PREFIX}_ota_${SUFFIX}"

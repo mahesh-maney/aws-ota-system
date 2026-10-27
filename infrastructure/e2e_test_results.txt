@@ -103,7 +103,6 @@
   ✓ Lambda digilux_ota_upload_url: State=Active Runtime=python3.11
   ✓ Lambda digilux_ota_artifact_processor: State=Active Runtime=python3.11
   ✓ Lambda digilux_ota_job_create: State=Active Runtime=python3.11
-  ✓ Lambda digilux_ota_compatibility_check: State=Active Runtime=python3.11
   ✓ Lambda digilux_ota_status_handler: State=Active Runtime=python3.11
   ✓ Lambda digilux_ota_device_register: State=Active Runtime=python3.11
 

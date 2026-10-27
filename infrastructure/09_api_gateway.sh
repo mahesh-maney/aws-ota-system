@@ -223,7 +223,6 @@ U_ARTIFACT_KEY="ota_artifact_key"
 U_CHECK="ota_user_check_updates"
 U_CONSENT="ota_user_consent"
 U_STATUS="ota_user_update_status"
-U_DOWNLOAD="ota_user_get_download_link"
 
 # ── Resolve /api/v1 root ──────────────────────────────────────────────────────
 log_step "Resolving /api/v1 resource"
@@ -324,9 +323,6 @@ CONSENT_RES=$(get_or_create_resource "$UPDATES" "consent")
 add_method "$CONSENT_RES" "POST" "$U_CONSENT" "$USER_AUTH"
 add_cors   "$CONSENT_RES"
 
-DOWNLOAD_RES=$(get_or_create_resource "$UPDATES" "download-link")
-add_method "$DOWNLOAD_RES" "POST" "$U_DOWNLOAD" "$USER_AUTH"
-add_cors   "$DOWNLOAD_RES"
 
 JOB_PARAM=$(get_or_create_resource "$UPDATES" "{jobId}")
 STATUS_RES=$(get_or_create_resource "$JOB_PARAM" "status")
@@ -420,5 +416,4 @@ echo "    POST  ${BASE_URL}/api/v1/ota/deployments/{deploymentId}/abort"
 echo "  Device/User endpoints:"
 echo "    GET   ${BASE_URL}/api/v1/ota/device/available-updates"
 echo "    POST  ${BASE_URL}/api/v1/ota/my/updates/consent"
-echo "    POST  ${BASE_URL}/api/v1/ota/my/updates/download-link"
 echo "    GET   ${BASE_URL}/api/v1/ota/my/updates/{jobId}/status"
